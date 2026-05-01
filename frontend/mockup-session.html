@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vyrexo — Active Session</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* ── Brand Colors ────────────────────────── */
+    :root {
+      --coral: #3B5998;
+      --amber: #7B93B0;
+      --gold: #C0C8D4;
+      --coral-dim: #3B59981A;
+      --amber-dim: #7B93B01A;
+      --gold-dim: #C0C8D41A;
+      --bg: #07070a;
+      --surface: #0a0a0f;
+      --surface2: #0c0c11;
+      --border: #141418;
+      --border2: #1c1c24;
+      --muted: #3f3f46;
+      --muted2: #52525b;
+      --text: #ededed;
+      --text2: #d4d4d8;
+      --text3: #a1a1aa;
+      --text4: #71717a;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+
+    /* ── SIDEBAR (collapsible) ───────────────── */
+    .sidebar {
+      width: 260px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.3s ease, opacity 0.3s ease;
+      overflow: hidden;
+    }
+
+    .sidebar.collapsed {
+      width: 0;
+      border-right: none;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .sidebar-header {
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-logo {
+      font-size: 18px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--coral), var(--amber), var(--gold));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+
+    .icon-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid #27272a;
+      background: var(--border);
+      color: var(--text4);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+
+    .icon-btn:hover {
+      border-color: var(--amber);
+      color: var(--amber);
+      background: var(--amber-dim);
+    }
+
+    .sidebar-search { padding: 10px 12px; }
+
+    .search-input {
+      width: 100%;
+      background: #0f0f14;
+      border: 1px solid var(--border2);
+      border-radius: 7px;
+      padding: 7px 10px 7px 30px;
+      color: var(--text3);
+      font-size: 12px;
+      outline: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%233f3f46' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: 9px center;
+    }
+
+    .search-input::placeholder { color: var(--muted); }
+
+    .session-list { flex: 1; overflow-y: auto; padding: 2px 6px; }
+
+    .session-group-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      padding: 10px 10px 4px;
+    }
+
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 9px;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-bottom: 1px;
+      border: 1px solid transparent;
+    }
+
+    .session-item:hover { background: #14141a; }
+    .session-item.active { background: var(--amber-dim); border-color: #7B93B025; }
+
+    .session-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      background: var(--border);
+      border: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+
+    .session-info { flex: 1; min-width: 0; }
+
+    .session-name {
+      font-size: 12.5px;
+      color: var(--text2);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 500;
+    }
+
+    .session-meta {
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 1px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .session-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+    .session-dot.active { background: #22c55e; box-shadow: 0 0 4px #22c55e88; }
+    .session-dot.ended { background: var(--muted); }
+
+    .sidebar-footer { border-top: 1px solid var(--border); padding: 6px; }
+
+    .sidebar-footer-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 10px;
+      border-radius: 7px;
+      font-size: 12.5px;
+      color: var(--muted2);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .sidebar-footer-item:hover { background: #14141a; color: var(--text3); }
+    .sidebar-footer-item svg { width: 15px; height: 15px; opacity: 0.5; }
+
+    /* ── MAIN AREA ───────────────────────────── */
+    .main-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* Floating toggles */
+    .toggle-left { position: absolute; top: 12px; left: 12px; z-index: 100; }
+    .toggle-right { position: absolute; top: 12px; right: 12px; z-index: 100; }
+
+    /* Floating center bar */
+    .floating-bar {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 5px 14px;
+      background: #0a0a0f99;
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border2);
+      border-radius: 12px;
+    }
+
+    .mode-badge {
+      background: var(--amber-dim);
+      color: var(--amber);
+      padding: 2px 10px;
+      border-radius: 10px;
+      font-size: 10.5px;
+      font-weight: 600;
+      border: 1px solid #7B93B028;
+    }
+
+    .project-path {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--muted2);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 6px #22c55e88;
+    }
+
+    .divider { width: 1px; height: 16px; background: #27272a; }
+
+    .vscode-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid #27272a;
+      background: var(--border);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      padding: 0;
+    }
+
+    .vscode-btn:hover { border-color: #1e6fff; background: #1e6fff15; }
+    .vscode-icon { width: 16px; height: 16px; }
+
+    /* ── ORB CENTER ───────────────────────────── */
+    .orb-center {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse at center, #0a0e1a 0%, var(--bg) 70%);
+    }
+
+    .orb-container {
+      position: relative;
+      width: 200px;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .orb-glow {
+      position: absolute;
+      width: 200px;
+      height: 200px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #7B93B020 0%, transparent 70%);
+      animation: orb-breathe 4s ease-in-out infinite;
+    }
+
+    .orb-ring-outer {
+      position: absolute;
+      width: 165px;
+      height: 165px;
+      border-radius: 50%;
+      border: 1px solid #3B599812;
+      animation: orb-breathe 4s ease-in-out infinite 0.5s;
+    }
+
+    .orb-ring-inner {
+      position: absolute;
+      width: 135px;
+      height: 135px;
+      border-radius: 50%;
+      border: 1px solid #F59E0B20;
+      animation: orb-breathe 4s ease-in-out infinite 1s;
+    }
+
+    .orb-core {
+      position: relative;
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, var(--gold), var(--amber), var(--coral));
+      box-shadow:
+        0 0 50px #7B93B033,
+        0 0 100px #3B59981A,
+        inset 0 0 30px #C0C8D433;
+      animation: orb-listen 1.2s ease-in-out infinite;
+    }
+
+    @keyframes orb-breathe {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.08); opacity: 0.7; }
+    }
+
+    @keyframes orb-listen {
+      0%, 100% { transform: scale(1); }
+      25% { transform: scale(1.06); }
+      50% { transform: scale(0.97); }
+      75% { transform: scale(1.08); }
+    }
+
+    .orb-state {
+      margin-top: 28px;
+      font-size: 12px;
+      color: var(--amber);
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .orb-transcript {
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--muted2);
+      font-style: italic;
+      text-align: center;
+      max-width: 340px;
+      line-height: 1.4;
+    }
+
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 22px;
+      margin-top: 16px;
+    }
+
+    .waveform-bar {
+      width: 3px;
+      border-radius: 2px;
+      animation: wave 0.8s ease-in-out infinite;
+    }
+
+    .waveform-bar:nth-child(1) { height: 6px; background: var(--coral); animation-delay: 0s; }
+    .waveform-bar:nth-child(2) { height: 12px; background: var(--coral); animation-delay: 0.1s; }
+    .waveform-bar:nth-child(3) { height: 18px; background: var(--amber); animation-delay: 0.15s; }
+    .waveform-bar:nth-child(4) { height: 10px; background: var(--amber); animation-delay: 0.25s; }
+    .waveform-bar:nth-child(5) { height: 22px; background: var(--gold); animation-delay: 0.1s; }
+    .waveform-bar:nth-child(6) { height: 14px; background: var(--amber); animation-delay: 0.2s; }
+    .waveform-bar:nth-child(7) { height: 8px; background: var(--coral); animation-delay: 0.3s; }
+
+    @keyframes wave {
+      0%, 100% { transform: scaleY(1); }
+      50% { transform: scaleY(0.3); }
+    }
+
+    .shortcuts-hint {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 11px;
+      color: #27272a;
+    }
+
+    .shortcuts-hint kbd {
+      background: var(--border);
+      border: 1px solid var(--border2);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: inherit;
+      font-size: 10px;
+      color: var(--muted2);
+    }
+
+    /* ── RIGHT PANEL (collapsible) ───────────── */
+    .right-panel {
+      width: 420px;
+      background: #09090d;
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.3s ease, opacity 0.3s ease;
+      overflow: hidden;
+    }
+
+    .right-panel.collapsed {
+      width: 0;
+      border-left: none;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      padding: 0 6px;
+    }
+
+    .tab {
+      padding: 9px 16px;
+      font-size: 12px;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      font-weight: 500;
+    }
+
+    .tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+
+    .tab-content { flex: 1; overflow-y: auto; padding: 12px; }
+
+    .narration-box {
+      padding: 9px 12px;
+      background: #7B93B008;
+      border: 1px solid #7B93B015;
+      border-left: 3px solid var(--amber);
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--gold);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .speaker-icon { color: var(--amber); flex-shrink: 0; opacity: 0.7; }
+    .narration-text { font-style: italic; }
+
+    .agent-timeline { display: flex; flex-direction: column; gap: 3px; }
+
+    .agent-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 9px 10px;
+      border-radius: 7px;
+      background: var(--surface2);
+      border: 1px solid #14141a;
+    }
+
+    .agent-step.active { border-color: #7B93B020; background: #7B93B006; }
+    .agent-step.completed { opacity: 0.5; }
+
+    .step-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .step-icon.planner { background: #3B599818; color: var(--coral); }
+    .step-icon.coding { background: #7B93B015; color: var(--amber); }
+    .step-icon.testing { background: #16a34a18; color: #4ade80; }
+    .step-icon.review { background: #C0C8D418; color: var(--gold); }
+    .step-icon.executor { background: #52525218; color: var(--text3); }
+
+    .step-content { flex: 1; min-width: 0; }
+    .step-header { display: flex; align-items: center; gap: 7px; }
+
+    .step-agent {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .step-agent.planner { color: var(--coral); }
+    .step-agent.coding { color: var(--amber); }
+    .step-agent.testing { color: #4ade80; }
+    .step-agent.review { color: var(--gold); }
+    .step-agent.executor { color: var(--text3); }
+
+    .step-status { font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: 600; }
+    .step-status.running { background: var(--amber-dim); color: var(--amber); }
+    .step-status.done { background: #16a34a18; color: #4ade80; }
+    .step-status.pending { background: #27272a; color: var(--muted2); }
+
+    .step-desc { font-size: 12px; color: var(--text4); margin-top: 2px; line-height: 1.4; }
+    .step-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+
+    .file-chip {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 3px;
+      background: #18181b;
+      color: var(--amber);
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      border: 1px solid #27272a;
+    }
+
+    .bottom-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 14px;
+      background: #08080c;
+      border-top: 1px solid var(--border);
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+
+    .quota { display: flex; gap: 14px; }
+    .quota-item { display: flex; align-items: center; gap: 5px; }
+
+    .quota-bar { width: 44px; height: 3px; background: #18181b; border-radius: 2px; overflow: hidden; }
+    .quota-fill { height: 100%; border-radius: 2px; }
+    .quota-fill.pro { background: var(--amber); }
+    .quota-fill.flash { background: var(--gold); }
+
+    .interrupt-btn {
+      background: #dc262622;
+      color: #f87171;
+      border: 1px solid #dc262633;
+      padding: 3px 12px;
+      border-radius: 5px;
+      font-size: 10.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .interrupt-btn:hover { background: #dc262644; }
+
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+  <!-- SIDEBAR -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-logo">Vyrexo</span>
+      <button class="icon-btn" title="New session">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+
+    <div class="sidebar-search">
+      <input class="search-input" placeholder="Search sessions..." />
+    </div>
+
+    <div class="session-list">
+      <div class="session-group-label">Today</div>
+      <div class="session-item active">
+        <div class="session-icon">🔐</div>
+        <div class="session-info">
+          <div class="session-name">FastAPI Auth Service</div>
+          <div class="session-meta"><span class="session-dot active"></span>Active · 12 min ago</div>
+        </div>
+      </div>
+      <div class="session-item">
+        <div class="session-icon">🛒</div>
+        <div class="session-info">
+          <div class="session-name">E-commerce Cart API</div>
+          <div class="session-meta"><span class="session-dot ended"></span>Ended · 2h ago</div>
+        </div>
+      </div>
+      <div class="session-group-label">Yesterday</div>
+      <div class="session-item">
+        <div class="session-icon">📊</div>
+        <div class="session-info">
+          <div class="session-name">Dashboard React Components</div>
+          <div class="session-meta"><span class="session-dot ended"></span>Ended · 18h ago</div>
+        </div>
+      </div>
+      <div class="session-item">
+        <div class="session-icon">🗄️</div>
+        <div class="session-info">
+          <div class="session-name">Database Schema Migration</div>
+          <div class="session-meta"><span class="session-dot ended"></span>Ended · 20h ago</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Settings
+      </div>
+      <div class="sidebar-footer-item">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+        API Keys
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN AREA -->
+  <div class="main-area">
+    <div class="toggle-left">
+      <button class="icon-btn" id="toggleLeft" title="Toggle sessions">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+      </button>
+    </div>
+
+    <div class="floating-bar">
+      <span class="mode-badge">Normal</span>
+      <span class="project-path">~/projects/my-saas-app</span>
+      <div class="divider"></div>
+      <div class="status-indicator"><span class="status-dot"></span>Connected</div>
+      <div class="divider"></div>
+      <button class="vscode-btn" title="Open in VS Code">
+        <svg class="vscode-icon" viewBox="0 0 100 100" fill="none">
+          <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="toggle-right">
+      <button class="icon-btn" id="toggleRight" title="Toggle agents">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
+      </button>
+    </div>
+
+    <div class="orb-center">
+      <div class="orb-container">
+        <div class="orb-glow"></div>
+        <div class="orb-ring-outer"></div>
+        <div class="orb-ring-inner"></div>
+        <div class="orb-core"></div>
+      </div>
+      <div class="orb-state">Listening</div>
+      <div class="orb-transcript">"Also add rate limiting to the authentication endpoints..."</div>
+      <div class="waveform">
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+      </div>
+      <div class="shortcuts-hint">
+        <span><kbd>Space</kbd> push-to-talk</span>
+        <span><kbd>Esc</kbd> interrupt</span>
+        <span><kbd>Ctrl+B</kbd> toggle panels</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="right-panel" id="rightPanel">
+    <div class="tabs">
+      <div class="tab active">Agents</div>
+      <div class="tab">Files</div>
+      <div class="tab">Terminal</div>
+      <div class="tab">Diagram</div>
+    </div>
+    <div class="tab-content">
+      <div class="narration-box">
+        <span class="speaker-icon">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+        </span>
+        <span class="narration-text">"Creating authentication endpoints with Google OAuth support..."</span>
+      </div>
+      <div class="agent-timeline">
+        <div class="agent-step completed">
+          <div class="step-icon planner">P</div>
+          <div class="step-content">
+            <div class="step-header"><span class="step-agent planner">Planner</span><span class="step-status done">Done</span></div>
+            <div class="step-desc">Created 5-step development plan for auth service with OAuth</div>
+          </div>
+        </div>
+        <div class="agent-step completed">
+          <div class="step-icon executor">E</div>
+          <div class="step-content">
+            <div class="step-header"><span class="step-agent executor">Executor</span><span class="step-status done">Done</span></div>
+            <div class="step-desc">Initialized project, installed dependencies</div>
+            <div class="step-files"><span class="file-chip">requirements.txt</span><span class="file-chip">pyproject.toml</span></div>
+          </div>
+        </div>
+        <div class="agent-step active">
+          <div class="step-icon coding">C</div>
+          <div class="step-content">
+            <div class="step-header"><span class="step-agent coding">Coding</span><span class="step-status running">Running</span></div>
+            <div class="step-desc">Writing authentication endpoints with JWT + Google OAuth</div>
+            <div class="step-files"><span class="file-chip">app/auth/router.py</span><span class="file-chip">app/auth/oauth.py</span><span class="file-chip">app/models/user.py</span></div>
+          </div>
+        </div>
+        <div class="agent-step">
+          <div class="step-icon testing">T</div>
+          <div class="step-content">
+            <div class="step-header"><span class="step-agent testing">Testing</span><span class="step-status pending">Pending</span></div>
+            <div class="step-desc">Generate and run test cases for auth endpoints</div>
+          </div>
+        </div>
+        <div class="agent-step">
+          <div class="step-icon review">R</div>
+          <div class="step-content">
+            <div class="step-header"><span class="step-agent review">Review</span><span class="step-status pending">Pending</span></div>
+            <div class="step-desc">Security review of authentication implementation</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="bottom-bar">
+      <div class="quota">
+        <div class="quota-item">Pro: 23/100<div class="quota-bar"><div class="quota-fill pro" style="width:23%"></div></div></div>
+        <div class="quota-item">Flash: 48/500<div class="quota-bar"><div class="quota-fill flash" style="width:9.6%"></div></div></div>
+      </div>
+      <button class="interrupt-btn">
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+        Interrupt
+      </button>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('toggleLeft').addEventListener('click', () => {
+      document.getElementById('sidebar').classList.toggle('collapsed');
+    });
+    document.getElementById('toggleRight').addEventListener('click', () => {
+      document.getElementById('rightPanel').classList.toggle('collapsed');
+    });
+  </script>
+</body>
+</html>

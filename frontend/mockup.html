@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vyrexo UI — Voice-First Design</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #07070a;
+      color: #ededed;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ──────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 24px;
+      border-bottom: 1px solid #141418;
+      background: #0a0a0f;
+      height: 48px;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      font-size: 18px;
+      font-weight: 700;
+      color: #818cf8;
+      letter-spacing: -0.5px;
+    }
+
+    .mode-badge {
+      background: #6366f133;
+      color: #a5b4fc;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid #6366f144;
+    }
+
+    .project-path {
+      color: #3f3f46;
+      font-size: 12px;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 12px;
+      color: #52525b;
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #22c55e;
+      display: inline-block;
+      margin-right: 4px;
+      box-shadow: 0 0 6px #22c55e88;
+    }
+
+    /* ── Main Layout ─────────────────────────── */
+    .main {
+      display: flex;
+      height: calc(100vh - 48px);
+    }
+
+    /* ── Left Panel: Voice Orb ───────────────── */
+    .left-panel {
+      width: 40%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      border-right: 1px solid #141418;
+      position: relative;
+      background: radial-gradient(ellipse at center, #0f0f1a 0%, #07070a 70%);
+    }
+
+    /* ── The Orb ─────────────────────────────── */
+    .orb-container {
+      position: relative;
+      width: 200px;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .orb-glow {
+      position: absolute;
+      width: 200px;
+      height: 200px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #6366f140 0%, transparent 70%);
+      animation: orb-breathe 4s ease-in-out infinite;
+    }
+
+    .orb-ring-outer {
+      position: absolute;
+      width: 160px;
+      height: 160px;
+      border-radius: 50%;
+      border: 1px solid #6366f120;
+      animation: orb-breathe 4s ease-in-out infinite 0.5s;
+    }
+
+    .orb-ring-inner {
+      position: absolute;
+      width: 130px;
+      height: 130px;
+      border-radius: 50%;
+      border: 1px solid #6366f130;
+      animation: orb-breathe 4s ease-in-out infinite 1s;
+    }
+
+    .orb-core {
+      position: relative;
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #818cf8, #4f46e5, #3730a3);
+      box-shadow:
+        0 0 40px #6366f166,
+        0 0 80px #6366f133,
+        inset 0 0 30px #818cf855;
+      animation: orb-pulse 4s ease-in-out infinite;
+    }
+
+    /* Speaking state - more dynamic */
+    .orb-container.speaking .orb-core {
+      animation: orb-speak 0.6s ease-in-out infinite alternate;
+      box-shadow:
+        0 0 50px #818cf888,
+        0 0 100px #6366f144,
+        inset 0 0 30px #a5b4fc66;
+    }
+
+    .orb-container.speaking .orb-glow {
+      animation: orb-speak-glow 0.8s ease-in-out infinite alternate;
+    }
+
+    /* Listening state */
+    .orb-container.listening .orb-core {
+      animation: orb-listen 1.2s ease-in-out infinite;
+      background: radial-gradient(circle at 35% 35%, #a78bfa, #7c3aed, #5b21b6);
+      box-shadow:
+        0 0 50px #7c3aed88,
+        0 0 100px #7c3aed44,
+        inset 0 0 30px #c4b5fd66;
+    }
+
+    .orb-container.listening .orb-ring-outer,
+    .orb-container.listening .orb-ring-inner {
+      border-color: #7c3aed40;
+    }
+
+    /* Thinking state */
+    .orb-container.thinking .orb-core {
+      animation: orb-think 2s linear infinite;
+      background: conic-gradient(from 0deg, #6366f1, #818cf8, #a5b4fc, #6366f1);
+    }
+
+    @keyframes orb-breathe {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.08); opacity: 0.7; }
+    }
+
+    @keyframes orb-pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+
+    @keyframes orb-speak {
+      0% { transform: scale(1); }
+      100% { transform: scale(1.12); }
+    }
+
+    @keyframes orb-speak-glow {
+      0% { transform: scale(1); opacity: 0.5; }
+      100% { transform: scale(1.2); opacity: 0.9; }
+    }
+
+    @keyframes orb-listen {
+      0%, 100% { transform: scale(1); }
+      25% { transform: scale(1.06); }
+      50% { transform: scale(0.97); }
+      75% { transform: scale(1.08); }
+    }
+
+    @keyframes orb-think {
+      0% { transform: rotate(0deg) scale(1.02); }
+      100% { transform: rotate(360deg) scale(1.02); }
+    }
+
+    /* ── State Label ─────────────────────────── */
+    .orb-state {
+      margin-top: 32px;
+      font-size: 13px;
+      color: #6366f1;
+      font-weight: 500;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .orb-state .subtitle {
+      display: block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #52525b;
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 400;
+      font-style: italic;
+    }
+
+    /* ── Waveform (visible when listening) ──── */
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 24px;
+      margin-top: 16px;
+    }
+
+    .waveform-bar {
+      width: 3px;
+      background: #6366f1;
+      border-radius: 2px;
+      animation: wave 0.8s ease-in-out infinite;
+    }
+
+    .waveform-bar:nth-child(1) { height: 6px; animation-delay: 0s; }
+    .waveform-bar:nth-child(2) { height: 12px; animation-delay: 0.1s; }
+    .waveform-bar:nth-child(3) { height: 20px; animation-delay: 0.15s; }
+    .waveform-bar:nth-child(4) { height: 14px; animation-delay: 0.25s; }
+    .waveform-bar:nth-child(5) { height: 24px; animation-delay: 0.1s; }
+    .waveform-bar:nth-child(6) { height: 16px; animation-delay: 0.2s; }
+    .waveform-bar:nth-child(7) { height: 10px; animation-delay: 0.3s; }
+    .waveform-bar:nth-child(8) { height: 18px; animation-delay: 0.05s; }
+    .waveform-bar:nth-child(9) { height: 8px; animation-delay: 0.25s; }
+
+    @keyframes wave {
+      0%, 100% { transform: scaleY(1); }
+      50% { transform: scaleY(0.3); }
+    }
+
+    /* ── Live Transcript (subtle, below orb) ── */
+    .live-transcript {
+      margin-top: 20px;
+      padding: 8px 16px;
+      background: #ffffff06;
+      border: 1px solid #ffffff08;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #818cf8;
+      font-style: italic;
+      max-width: 320px;
+      text-align: center;
+    }
+
+    /* ── Collapsible Transcript History ─────── */
+    .transcript-toggle {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #3f3f46;
+      cursor: pointer;
+      padding: 4px 12px;
+      border-radius: 12px;
+      transition: all 0.2s;
+    }
+
+    .transcript-toggle:hover {
+      color: #6366f1;
+      background: #6366f110;
+    }
+
+    .transcript-toggle svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    /* ── Right Panel ─────────────────────────── */
+    .right-panel {
+      width: 60%;
+      display: flex;
+      flex-direction: column;
+      background: #09090d;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #141418;
+      padding: 0 8px;
+    }
+
+    .tab {
+      padding: 10px 18px;
+      font-size: 12.5px;
+      color: #3f3f46;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+
+    .tab.active {
+      color: #a5b4fc;
+      border-bottom-color: #6366f1;
+    }
+
+    .tab:hover:not(.active) {
+      color: #71717a;
+    }
+
+    .tab-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+    }
+
+    /* ── Narration Box ───────────────────────── */
+    .narration-box {
+      padding: 10px 14px;
+      background: #6366f108;
+      border: 1px solid #6366f118;
+      border-left: 3px solid #6366f1;
+      border-radius: 6px;
+      font-size: 12.5px;
+      color: #a5b4fc;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .speaker-icon {
+      color: #6366f1;
+      flex-shrink: 0;
+      opacity: 0.7;
+    }
+
+    .narration-text {
+      font-style: italic;
+    }
+
+    /* ── Agent Timeline ──────────────────────── */
+    .agent-timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .agent-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0c0c11;
+      border: 1px solid #14141a;
+      transition: all 0.2s;
+    }
+
+    .agent-step.active {
+      border-color: #6366f125;
+      background: #6366f106;
+    }
+
+    .agent-step.completed {
+      opacity: 0.55;
+    }
+
+    .step-icon {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .step-icon.planner { background: #7c3aed18; color: #a78bfa; }
+    .step-icon.coding { background: #2563eb18; color: #60a5fa; }
+    .step-icon.testing { background: #16a34a18; color: #4ade80; }
+    .step-icon.review { background: #ea580c18; color: #fb923c; }
+    .step-icon.executor { background: #52525218; color: #a1a1aa; }
+    .step-icon.docs { background: #0891b218; color: #22d3ee; }
+
+    .step-content { flex: 1; min-width: 0; }
+
+    .step-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .step-agent {
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .step-agent.planner { color: #a78bfa; }
+    .step-agent.coding { color: #60a5fa; }
+    .step-agent.testing { color: #4ade80; }
+    .step-agent.review { color: #fb923c; }
+    .step-agent.executor { color: #a1a1aa; }
+
+    .step-status {
+      font-size: 9.5px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    .step-status.running {
+      background: #6366f118;
+      color: #818cf8;
+    }
+
+    .step-status.done {
+      background: #16a34a18;
+      color: #4ade80;
+    }
+
+    .step-status.pending {
+      background: #27272a;
+      color: #52525b;
+    }
+
+    .step-desc {
+      font-size: 12.5px;
+      color: #71717a;
+      margin-top: 3px;
+      line-height: 1.4;
+    }
+
+    .step-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+
+    .file-chip {
+      font-size: 10.5px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #18181b;
+      color: #818cf8;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      border: 1px solid #27272a;
+    }
+
+    /* ── Bottom Status Bar ───────────────────── */
+    .bottom-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 16px;
+      background: #08080c;
+      border-top: 1px solid #141418;
+      font-size: 11px;
+      color: #3f3f46;
+    }
+
+    .quota {
+      display: flex;
+      gap: 16px;
+    }
+
+    .quota-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .quota-bar {
+      width: 48px;
+      height: 3px;
+      background: #18181b;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .quota-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
+
+    .quota-fill.pro { background: #6366f1; }
+    .quota-fill.flash { background: #22d3ee; }
+
+    .interrupt-btn {
+      background: #dc262622;
+      color: #f87171;
+      border: 1px solid #dc262633;
+      padding: 4px 14px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.2s;
+    }
+
+    .interrupt-btn:hover {
+      background: #dc262644;
+      border-color: #dc262666;
+    }
+
+    /* ── Scrollbar ────────────────────────────── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <span class="logo">Vyrexo</span>
+      <span class="mode-badge">Normal</span>
+      <span class="project-path">~/projects/my-saas-app</span>
+    </div>
+    <div class="header-right">
+      <span><span class="status-dot"></span>Connected</span>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Left: Voice Orb -->
+    <div class="left-panel">
+
+      <div class="orb-container speaking">
+        <div class="orb-glow"></div>
+        <div class="orb-ring-outer"></div>
+        <div class="orb-ring-inner"></div>
+        <div class="orb-core"></div>
+      </div>
+
+      <div class="orb-state">
+        Speaking
+        <span class="subtitle">"Creating authentication endpoints with OAuth..."</span>
+      </div>
+
+      <div class="waveform">
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+        <div class="waveform-bar"></div>
+      </div>
+
+      <!-- Collapsible transcript toggle -->
+      <div class="transcript-toggle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="18 15 12 9 6 15"/>
+        </svg>
+        Show transcript
+      </div>
+    </div>
+
+    <!-- Right: Agent Activity -->
+    <div class="right-panel">
+      <div class="tabs">
+        <div class="tab active">Agents</div>
+        <div class="tab">Files</div>
+        <div class="tab">Terminal</div>
+        <div class="tab">Diagram</div>
+      </div>
+
+      <div class="tab-content">
+        <!-- Narration -->
+        <div class="narration-box">
+          <span class="speaker-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          </span>
+          <span class="narration-text">"Creating authentication endpoints with Google OAuth support..."</span>
+        </div>
+
+        <!-- Agent Timeline -->
+        <div class="agent-timeline">
+
+          <div class="agent-step completed">
+            <div class="step-icon planner">P</div>
+            <div class="step-content">
+              <div class="step-header">
+                <span class="step-agent planner">Planner</span>
+                <span class="step-status done">Done</span>
+              </div>
+              <div class="step-desc">Created 5-step development plan for auth service with OAuth</div>
+            </div>
+          </div>
+
+          <div class="agent-step completed">
+            <div class="step-icon executor">E</div>
+            <div class="step-content">
+              <div class="step-header">
+                <span class="step-agent executor">Executor</span>
+                <span class="step-status done">Done</span>
+              </div>
+              <div class="step-desc">Initialized project, installed dependencies</div>
+              <div class="step-files">
+                <span class="file-chip">requirements.txt</span>
+                <span class="file-chip">pyproject.toml</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="agent-step active">
+            <div class="step-icon coding">C</div>
+            <div class="step-content">
+              <div class="step-header">
+                <span class="step-agent coding">Coding</span>
+                <span class="step-status running">Running</span>
+              </div>
+              <div class="step-desc">Writing authentication endpoints with JWT + Google OAuth</div>
+              <div class="step-files">
+                <span class="file-chip">app/auth/router.py</span>
+                <span class="file-chip">app/auth/oauth.py</span>
+                <span class="file-chip">app/models/user.py</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="agent-step">
+            <div class="step-icon testing">T</div>
+            <div class="step-content">
+              <div class="step-header">
+                <span class="step-agent testing">Testing</span>
+                <span class="step-status pending">Pending</span>
+              </div>
+              <div class="step-desc">Generate and run test cases for auth endpoints</div>
+            </div>
+          </div>
+
+          <div class="agent-step">
+            <div class="step-icon review">R</div>
+            <div class="step-content">
+              <div class="step-header">
+                <span class="step-agent review">Review</span>
+                <span class="step-status pending">Pending</span>
+              </div>
+              <div class="step-desc">Security review of authentication implementation</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Bottom Bar -->
+      <div class="bottom-bar">
+        <div class="quota">
+          <div class="quota-item">
+            Pro: 23/100
+            <div class="quota-bar"><div class="quota-fill pro" style="width: 23%"></div></div>
+          </div>
+          <div class="quota-item">
+            Flash: 48/500
+            <div class="quota-bar"><div class="quota-fill flash" style="width: 9.6%"></div></div>
+          </div>
+        </div>
+        <button class="interrupt-btn">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+          Interrupt
+        </button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
