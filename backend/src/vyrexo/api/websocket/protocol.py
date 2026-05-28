@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 class ClientMessageType(str, Enum):
     VOICE_START = "voice.start"
     VOICE_STOP = "voice.stop"
+    VOICE_CONFIG = "voice.config"
     TEXT_INPUT = "text.input"
     EXECUTION_INTERRUPT = "execution.interrupt"
     MODE_SWITCH = "mode.switch"
@@ -47,6 +48,7 @@ class ServerMessageType(str, Enum):
     AGENT_STEP_COMPLETE = "agent.step.complete"
     AGENT_ACTION = "agent.action"
     AGENT_CONFLICT = "agent.conflict"
+    AGENT_NARRATION = "agent.narration"
 
     # Execution
     EXECUTION_OUTPUT = "execution.output"

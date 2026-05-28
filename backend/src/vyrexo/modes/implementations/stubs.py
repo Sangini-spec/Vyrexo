@@ -11,18 +11,31 @@ from vyrexo.voice.tts.base import VoiceConfig
 
 
 class DebugMode(InteractionMode):
-    """Phase 2: Live collaborative debugging via voice."""
+    """
+    Live collaborative debugging via voice.
+
+    When active, Rex:
+    - Speaks more slowly and clearly so steps are easy to follow.
+    - Tells agents (via a metadata flag) to narrate more granularly.
+    - Has the Reviewer run before the Coder so issues are identified
+      explicitly before any fix is attempted.
+    """
 
     name = "debug"
 
     def should_process_input(self, transcript: TranscriptionResult) -> bool:
+        # Tag the transcript so downstream agents know we're debugging
+        try:
+            transcript.metadata["debug_mode"] = True
+        except Exception:
+            pass
         return True
 
     def filter_agent_response(self, response: AgentResponse) -> AgentResponse | None:
         return response
 
     def get_voice_config(self) -> VoiceConfig:
-        return VoiceConfig(rate="-10%")  # Slower for clarity during debugging
+        return VoiceConfig(rate="-15%")  # Slower for clarity during debugging
 
 
 class RubberDuckMode(InteractionMode):

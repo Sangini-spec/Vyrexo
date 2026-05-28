@@ -154,9 +154,16 @@ class VoicePipeline:
 
         # Step 3: Text-to-Speech
         async for chunk in self._tts.synthesize(processed_text, self._voice_config):
+            # Publish the raw audio data so subscribers (e.g., WebSocket handler)
+            # can forward it as a binary frame to the client. The WebSocket handler
+            # strips bytes for JSON events; for this event the raw bytes ARE the payload.
             await self._event_bus.publish(Event(
                 type="voice.output.chunk",
-                payload={"size": len(chunk.data), "format": chunk.format},
+                payload={
+                    "audio": chunk.data,
+                    "format": chunk.format,
+                    "sample_rate": chunk.sample_rate,
+                },
                 session_id=context.session_id,
             ))
             yield chunk

@@ -36,3 +36,4 @@ Thumbs.db
 .coverage
 htmlcov/
 .mypy_cache/
+frontend/tsconfig.tsbuildinfo

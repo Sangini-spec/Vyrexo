@@ -30,6 +30,7 @@ EVENT_TO_WS: dict[str, ServerMessageType] = {
     "agent.plan.step.completed": ServerMessageType.AGENT_STEP_COMPLETE,
     "agent.action.*": ServerMessageType.AGENT_ACTION,
     "agent.conflict": ServerMessageType.AGENT_CONFLICT,
+    "agent.narration": ServerMessageType.AGENT_NARRATION,
     "execution.command.output": ServerMessageType.EXECUTION_OUTPUT,
     "execution.interrupt.acknowledged": ServerMessageType.EXECUTION_INTERRUPTED,
     "mode.transition": ServerMessageType.MODE_CHANGED,
@@ -134,6 +135,13 @@ class SessionWebSocketHandler:
                 session_id=self._session_id,
             ))
 
+        elif msg.type == ClientMessageType.VOICE_CONFIG:
+            await self._event_bus.publish(Event(
+                type="voice.config.requested",
+                payload=msg.payload,
+                session_id=self._session_id,
+            ))
+
     async def _handle_audio(self, data: bytes) -> None:
         """Handle incoming binary audio chunk from client."""
         await self._event_bus.publish(Event(
@@ -147,9 +155,18 @@ class SessionWebSocketHandler:
         if event.session_id and event.session_id != self._session_id:
             return
 
-        # Don't forward raw audio chunks back to client
+        # Don't echo the inbound mic audio back to the client
         if event.type == "voice.audio.chunk":
             return
+
+        # Outbound TTS audio chunks are sent as binary WebSocket frames
+        # so the browser can decode and play them directly.
+        if event.type == "voice.output.chunk":
+            audio = event.payload.get("audio")
+            if isinstance(audio, (bytes, bytearray)):
+                await self._conn_mgr.send_bytes(self._session_id, bytes(audio))
+                return
+            # If no audio bytes attached, fall through and forward as JSON metadata
 
         # Strip binary data from payload before JSON serialization
         payload: dict[str, Any] = {

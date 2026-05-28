@@ -10,14 +10,31 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from langchain_core.messages import HumanMessage, SystemMessage
 
+from vyrexo.agents.llm_factory import create_llm
 from vyrexo.agents.orchestrator import AgentOrchestrator
+from vyrexo.config import get_settings
 from vyrexo.context.engine import ContextEngine
 from vyrexo.conversation.intent import Intent, IntentClassifier
 from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
 from vyrexo.voice.stt.base import TranscriptionResult
+
+
+EXPLAIN_SYSTEM_PROMPT = """You are Rex, a friendly senior developer pair-programming with the user over voice. Your job right now is to explain code clearly, the way Claude Code does.
+
+When you explain:
+- Talk like you're sitting next to them. Conversational, not formal.
+- Identify what file or function you're looking at.
+- Walk through what it does in plain English first, then the interesting details.
+- Point out anything noteworthy: clever patterns, potential bugs, security concerns, performance issues.
+- Keep it concise enough to listen to (you will be spoken aloud). Aim for 4 to 8 sentences unless the code is genuinely complex.
+- Do NOT include code blocks or markdown formatting. This is going to be read out by a voice synthesizer.
+- End with something inviting like "want me to dig into any part of this?" if there's more to say.
+
+If the context provided doesn't actually answer the user's question, say so honestly and ask which file or function they mean."""
 
 logger = structlog.get_logger()
 
@@ -100,6 +117,15 @@ class ConversationManager:
             await self._orchestrator.interrupt()
             return "Got it, I've stopped what I was doing. What would you like instead?"
 
+        # If we have a paused state from a recent interrupt AND this is a command
+        # giving a new direction, resume from where we left off rather than restarting.
+        if intent == Intent.COMMAND and self._orchestrator.has_paused_state:
+            logger.info("conversation_resume", text=text[:60])
+            state = await self._orchestrator.resume(text)
+            if state is not None:
+                response = state.get("final_response", "Done.")
+                return response
+
         if intent == Intent.MODE_SWITCH:
             target = meta.get("target_mode", "normal")
             try:
@@ -111,6 +137,9 @@ class ConversationManager:
                     return f"Can't switch to {target} mode from {self._modes.state.value} mode."
             except ValueError:
                 return f"Unknown mode: {target}"
+
+        if intent == Intent.EXPLAIN:
+            return await self._handle_explain(text, session_id, project_path)
 
         if intent == Intent.QUESTION:
             return await self._handle_question(text, session_id, project_path)
@@ -128,11 +157,17 @@ class ConversationManager:
         emotion = transcript.metadata.get("emotion", "neutral")
         emotion_prefix = ""
         if emotion == "frustrated":
-            emotion_prefix = "I can see this is frustrating — let me help fix this right away. "
+            emotion_prefix = "I hear you, this is annoying. Let me sort it out. "
         elif emotion == "confused":
-            emotion_prefix = "No worries, let me break this down clearly. "
+            emotion_prefix = "Totally fair, let me break this down clearly. "
         elif emotion == "urgent":
-            emotion_prefix = "On it right now! "
+            emotion_prefix = "On it right now. "
+        elif emotion == "tired":
+            emotion_prefix = "Got it. I'll keep this short and just get it done. "
+        elif emotion == "excited":
+            emotion_prefix = "Love the energy. Let's go. "
+        elif emotion == "satisfied":
+            emotion_prefix = "Glad to hear that. "
 
         # Enrich with codebase context
         context_str = await self._context.get_context_for_agent(text)
@@ -150,6 +185,70 @@ class ConversationManager:
 
         response = state.get("final_response", "Done.")
         return f"{emotion_prefix}{response}" if emotion_prefix else response
+
+    async def _handle_explain(self, text: str, session_id: str, project_path: str) -> str:
+        """
+        Walk the user through code in a Claude Code-style explanation.
+
+        Pulls relevant snippets from the context engine, then calls Gemini directly
+        with a focused explanation prompt. Does NOT route through the full agent
+        pipeline so we get a fast, conversational answer suitable for voice.
+        """
+        # Narrate up front so the user hears something immediately
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Sure, let me take a look and walk you through it.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        # Pull the most relevant code chunks for the question
+        results = await self._context.search(text, n_results=5)
+
+        if not results:
+            return ("I can explain this, but I don't have the file indexed yet. "
+                    "Can you tell me which file or function you want me to walk through? "
+                    "Or load a project first.")
+
+        # Build a compact context blob for Gemini
+        context_lines: list[str] = []
+        for r in results[:5]:
+            file_path = r.get("file_path", "unknown")
+            fn = r.get("function_name") or ""
+            cls = r.get("class_name") or ""
+            label = file_path
+            if fn:
+                label += f" :: {fn}"
+            elif cls:
+                label += f" :: {cls}"
+            snippet = (r.get("content") or "").strip()
+            if snippet:
+                # Trim to keep prompt small
+                if len(snippet) > 1200:
+                    snippet = snippet[:1200] + "\n# ...truncated..."
+                context_lines.append(f"--- {label} ---\n{snippet}")
+
+        context_blob = "\n\n".join(context_lines) if context_lines else "(no relevant code found)"
+
+        # Call Gemini directly for a focused explanation
+        try:
+            settings = get_settings()
+            llm = create_llm(settings.llm, tier="light")
+            response = await llm.ainvoke([
+                SystemMessage(content=EXPLAIN_SYSTEM_PROMPT),
+                HumanMessage(content=(
+                    f"User asked: {text}\n\n"
+                    f"Here is the relevant code I found in their project:\n\n"
+                    f"{context_blob}\n\n"
+                    f"Please explain it the way you would talk to them in person."
+                )),
+            ])
+            explanation = (response.content or "").strip()
+            if not explanation:
+                explanation = "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
+            return explanation
+        except Exception as e:
+            logger.exception("explain_failed")
+            return f"Hmm, I hit a snag trying to explain that. Error was: {str(e)[:120]}"
 
     async def _handle_question(self, text: str, session_id: str, project_path: str) -> str:
         """Handle questions about the codebase using RAG."""

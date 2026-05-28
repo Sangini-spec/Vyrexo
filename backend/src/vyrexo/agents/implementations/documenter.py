@@ -72,6 +72,7 @@ class DocumentationAgent(BaseAgent):
             context += f"\n\nProject files that were created/modified:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("documenter_executing", task=task_desc[:80])
+        await self.narrate(state, "Time to write up the documentation. I'll keep it clear.")
 
         messages = [
             SystemMessage(content=DOCUMENTER_SYSTEM_PROMPT),
@@ -90,6 +91,9 @@ class DocumentationAgent(BaseAgent):
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = dict(tool_call["args"])
+
+                # Live narration
+                await self.narrate_tool_call(state, tool_name, tool_args)
 
                 if tool_name in FILE_TOOL_MAP:
                     tool_args["project_root"] = project_path
@@ -134,6 +138,13 @@ class DocumentationAgent(BaseAgent):
 
         state["final_response"] = final_text
         logger.info("documenter_completed", docs=len(docs_created))
+
+        if docs_created:
+            count = len(docs_created)
+            await self.narrate(state, f"Documentation is ready. I put together {count} doc file{'s' if count != 1 else ''}.")
+        else:
+            await self.narrate(state, "Documentation pass is done.")
+
         return state
 
     def get_tools(self) -> list[ToolDefinition]:

@@ -73,6 +73,7 @@ class TestingAgent(BaseAgent):
             context += f"\n\nFiles that were recently created/modified:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("tester_executing", task=task_desc[:80])
+        await self.narrate(state, "Let me write some tests and make sure this actually works.")
 
         all_tools = FILE_TOOLS + TERMINAL_TOOLS
         all_tool_map = {**FILE_TOOL_MAP, **TERMINAL_TOOL_MAP}
@@ -95,6 +96,9 @@ class TestingAgent(BaseAgent):
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = dict(tool_call["args"])
+
+                # Narrate before each action
+                await self.narrate_tool_call(state, tool_name, tool_args)
 
                 if tool_name in FILE_TOOL_MAP:
                     tool_args["project_root"] = project_path
@@ -150,6 +154,16 @@ class TestingAgent(BaseAgent):
 
         state["final_response"] = final_text
         logger.info("tester_completed", tests_created=len(test_files_created))
+
+        # Friendly summary
+        failed = sum(1 for r in test_results if r.get("exit_code") not in (0, None))
+        if test_files_created and failed == 0:
+            await self.narrate(state, "Tests are passing. Looking good!")
+        elif failed:
+            await self.narrate(state, f"Tests finished. {failed} of them came back with issues, I'll flag those.")
+        else:
+            await self.narrate(state, "Test pass is wrapped up.")
+
         return state
 
     def get_tools(self) -> list[ToolDefinition]:

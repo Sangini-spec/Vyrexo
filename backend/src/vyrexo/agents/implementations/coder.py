@@ -68,6 +68,7 @@ class CodingAgent(BaseAgent):
         project_path = state.get("project_path", ".")
 
         logger.info("coder_executing", task=task_desc[:80])
+        await self.narrate(state, "Let me start writing the code for this.")
 
         # Build tool definitions for Gemini
         tools_for_llm = self._build_tool_defs()
@@ -96,6 +97,9 @@ class CodingAgent(BaseAgent):
                 tool_args = tool_call["args"]
 
                 logger.info("coder_tool_call", tool=tool_name, args_keys=list(tool_args.keys()))
+
+                # Narrate what's about to happen so the user hears live commentary
+                await self.narrate_tool_call(state, tool_name, tool_args)
 
                 result = await self._execute_tool(tool_name, tool_args, project_path)
 
@@ -140,6 +144,15 @@ class CodingAgent(BaseAgent):
 
         state["final_response"] = final_text
         logger.info("coder_completed", files=len(files_modified), rounds=round_num + 1)
+
+        if files_modified:
+            count = len(files_modified)
+            await self.narrate(
+                state,
+                f"Done with the code part. I touched {count} file{'s' if count != 1 else ''}.",
+            )
+        else:
+            await self.narrate(state, "All set on the coding side.")
 
         return state
 

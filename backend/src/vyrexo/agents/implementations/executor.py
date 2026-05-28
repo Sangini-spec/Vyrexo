@@ -68,6 +68,7 @@ class ExecutionAgent(BaseAgent):
         project_path = state.get("project_path", ".")
 
         logger.info("executor_executing", task=task_desc[:80])
+        await self.narrate(state, "Okay, I'll handle the setup work now.")
 
         all_tools = TERMINAL_TOOLS + FILE_TOOLS + GIT_TOOLS
         all_tool_map = {**TERMINAL_TOOL_MAP, **FILE_TOOL_MAP, **GIT_TOOL_MAP}
@@ -91,6 +92,9 @@ class ExecutionAgent(BaseAgent):
                 tool_args = dict(tool_call["args"])
 
                 logger.info("executor_tool_call", tool=tool_name)
+
+                # Narrate the action so the user hears it as it happens
+                await self.narrate_tool_call(state, tool_name, tool_args)
 
                 # Inject paths
                 if tool_name in FILE_TOOL_MAP:
@@ -141,6 +145,12 @@ class ExecutionAgent(BaseAgent):
 
         state["final_response"] = final_text
         logger.info("executor_completed", commands=len(commands_run))
+
+        if commands_run:
+            count = len(commands_run)
+            await self.narrate(state, f"All set. I ran {count} command{'s' if count != 1 else ''} for you.")
+        else:
+            await self.narrate(state, "Setup done, nothing else needed there.")
 
         return state
 

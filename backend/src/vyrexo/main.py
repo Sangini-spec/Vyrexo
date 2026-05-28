@@ -5,6 +5,7 @@ Initializes all core systems: EventBus, VoicePipeline, ContextEngine,
 ConversationManager, AgentOrchestrator, Mode StateMachine.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -32,7 +33,12 @@ from vyrexo.modes.implementations import (
 )
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
 from vyrexo.storage.database import close_database, init_database
+from vyrexo.voice.middleware.base import VoiceContext
+from vyrexo.voice.pipeline import VoicePipeline
 from vyrexo.voice.stt.base import TranscriptionResult
+from vyrexo.voice.stt.whisper_local import WhisperLocalSTT
+from vyrexo.voice.tts.base import VoiceConfig
+from vyrexo.voice.tts.edge_tts_provider import VOICE_PRESETS, EdgeTTSProvider
 
 logger = structlog.get_logger()
 
@@ -43,11 +49,17 @@ mode_machine: InteractionStateMachine | None = None
 orchestrator: AgentOrchestrator | None = None
 context_engine: ContextEngine | None = None
 conversation_manager: ConversationManager | None = None
+voice_pipeline: VoicePipeline | None = None
+
+# One lock per session so narrations are spoken one at a time (no overlapping audio).
+_tts_locks: dict[str, asyncio.Lock] = {}
+# Per-session voice config (accent, rate). Updated via voice.config client messages.
+_session_voice_configs: dict[str, VoiceConfig] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global mode_machine, orchestrator, context_engine, conversation_manager
+    global mode_machine, orchestrator, context_engine, conversation_manager, voice_pipeline
 
     settings = get_settings()
     logger.info("vyrexo_starting", host=settings.server.host, port=settings.server.port)
@@ -65,6 +77,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         event_bus=event_bus,
         persist_dir=settings.chroma.persist_dir,
     )
+
+    # Initialize voice pipeline so Rex can actually speak with Edge-TTS
+    try:
+        voice_pipeline = VoicePipeline(
+            stt=WhisperLocalSTT(model_size=settings.stt.whisper_model_size),
+            tts=EdgeTTSProvider(default_voice=settings.tts.voice),
+            event_bus=event_bus,
+        )
+        logger.info("voice_pipeline_ready", tts_voice=settings.tts.voice)
+    except Exception as e:
+        logger.warning("voice_pipeline_skip", reason=str(e)[:100])
+        voice_pipeline = None
 
     # Initialize interaction mode state machine
     modes = {
@@ -89,6 +113,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Wire up event handlers
     event_bus.subscribe("conversation.turn.started", _handle_conversation_turn)
     event_bus.subscribe("execution.interrupt.requested", _handle_interrupt)
+    # Speak narrations and turn responses through Edge-TTS
+    event_bus.subscribe("agent.narration", _handle_narration)
+    event_bus.subscribe("conversation.turn.completed", _handle_turn_completed)
+    event_bus.subscribe("voice.config.requested", _handle_voice_config)
 
     # Initialize database (creates tables if they don't exist)
     try:
@@ -141,6 +169,77 @@ async def _handle_interrupt(event: Event) -> None:
     """Handle interrupt requests — pause the orchestrator."""
     if orchestrator is not None:
         await orchestrator.interrupt()
+
+
+def _voice_config_for(session_id: str) -> VoiceConfig:
+    """Return the voice config for this session, falling back to defaults."""
+    cfg = _session_voice_configs.get(session_id)
+    if cfg is not None:
+        return cfg
+    settings = get_settings()
+    return VoiceConfig(voice=settings.tts.voice)
+
+
+def _lock_for(session_id: str) -> asyncio.Lock:
+    """Get-or-create an asyncio lock per session so TTS plays one line at a time."""
+    lock = _tts_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _tts_locks[session_id] = lock
+    return lock
+
+
+async def _speak(session_id: str, text: str) -> None:
+    """Synthesize text through Edge-TTS and let the pipeline publish audio chunks.
+
+    The WebSocket handler will forward voice.output.chunk events as binary frames
+    so the browser plays them with the user's chosen voice.
+    """
+    if not text or voice_pipeline is None or not session_id:
+        return
+    voice_pipeline.set_voice_config(_voice_config_for(session_id))
+    ctx = VoiceContext(session_id=session_id)
+    lock = _lock_for(session_id)
+    async with lock:
+        try:
+            # Iterate the generator so the pipeline publishes chunks as events.
+            async for _chunk in voice_pipeline.synthesize_response(text, ctx):
+                pass
+        except Exception:
+            logger.exception("tts_speak_failed", session_id=session_id)
+
+
+async def _handle_narration(event: Event) -> None:
+    """Speak agent narration aloud through Edge-TTS."""
+    text = event.payload.get("text", "")
+    session_id = event.session_id or ""
+    await _speak(session_id, text)
+
+
+async def _handle_turn_completed(event: Event) -> None:
+    """Speak the final response of a conversation turn."""
+    text = event.payload.get("text", "")
+    session_id = event.session_id or ""
+    await _speak(session_id, text)
+
+
+async def _handle_voice_config(event: Event) -> None:
+    """Update the per-session voice config when the frontend sends one."""
+    session_id = event.session_id or ""
+    payload = event.payload or {}
+    voice_id = payload.get("voice")  # e.g. "american_male" or a raw edge-tts id like "en-US-GuyNeural"
+    rate = payload.get("rate", "+0%")
+
+    # Map the preset key to an actual edge-tts voice if needed
+    if voice_id and voice_id in VOICE_PRESETS:
+        edge_voice = VOICE_PRESETS[voice_id]
+    elif voice_id:
+        edge_voice = voice_id
+    else:
+        edge_voice = get_settings().tts.voice
+
+    _session_voice_configs[session_id] = VoiceConfig(voice=edge_voice, rate=rate)
+    logger.info("voice_config_updated", session_id=session_id, voice=edge_voice, rate=rate)
 
 
 # ── App Creation ─────────────────────────────────────────────────

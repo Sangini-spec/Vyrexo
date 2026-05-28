@@ -8,6 +8,7 @@ import { AgentTimeline, type AgentStep } from "@/components/agents/AgentTimeline
 import { ModeIndicator } from "@/components/shared/ModeIndicator";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useVoice } from "@/hooks/useVoice";
+import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
 
@@ -37,6 +38,9 @@ export default function App() {
     if (!loading && !user) router.push("/auth");
   }, [user, loading, router]);
 
+  // ── Backend-driven audio playback (Edge-TTS over WebSocket) ──
+  const { beginUtterance, pushChunk, endUtterance, stop: stopAudio } = useAudioPlayer();
+
   // ── WebSocket: handles all server events ────────────────────
   const onServerMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -48,16 +52,39 @@ export default function App() {
         setTranscript(msg.payload.text as string);
         break;
 
-      case "conversation.turn.completed":
+      case "voice.output.start":
+      case "voice.output.started":
+        beginUtterance();
+        setOrbState("speaking");
+        break;
+
+      case "voice.output.end":
+      case "voice.output.completed":
+        endUtterance();
+        break;
+
+      case "agent.narration": {
+        const narrText = (msg.payload.text as string) || "";
+        const agentName = (msg.payload.agent as string) || "rex";
+        if (narrText) {
+          setNarration(narrText);
+          setChatLog((prev) => [...prev, { role: agentName, text: narrText }]);
+        }
+        setOrbState("speaking");
+        break;
+      }
+
+      case "conversation.turn.completed": {
         const responseText = msg.payload.text as string;
         setNarration(responseText);
         setChatLog((prev) => [...prev, { role: "assistant", text: responseText }]);
         setOrbState("speaking");
-        // Speak the response using browser TTS
-        speakResponse(responseText);
+        // Backend will stream the synthesized audio; no browser TTS fallback needed.
         break;
+      }
 
-      case "agent.plan.created": {
+      case "agent.plan.created":
+      case "agent.plan": {
         const plan = msg.payload.plan as Array<Record<string, string>>;
         if (plan) {
           setSteps(plan.map((s) => ({
@@ -70,6 +97,7 @@ export default function App() {
       }
 
       case "agent.step.start":
+      case "agent.plan.step.started":
         setSteps((prev) =>
           prev.map((s, i) =>
             i === (msg.payload.step_index as number) ? { ...s, status: "running" as const } : s
@@ -79,6 +107,7 @@ export default function App() {
         break;
 
       case "agent.step.complete":
+      case "agent.plan.step.completed":
         setSteps((prev) =>
           prev.map((s, i) =>
             i === (msg.payload.step_index as number) ? { ...s, status: "completed" as const } : s
@@ -95,57 +124,22 @@ export default function App() {
         setOrbState("idle");
         break;
     }
-  }, []);
+  }, [beginUtterance, endUtterance]);
+
+  const onAudioMessage = useCallback((data: ArrayBuffer) => {
+    // Every binary frame from the backend is an MP3 chunk for the current utterance
+    pushChunk(data);
+  }, [pushChunk]);
 
   const { status: wsStatus, connect, disconnect, sendMessage } = useWebSocket({
     sessionId: activeSession || "default",
     onMessage: onServerMessage,
+    onAudio: onAudioMessage,
   });
 
-  // ── Browser TTS for speaking responses (reads settings) ─────
-  const speakResponse = useCallback((text: string) => {
-    if (!text) return;
-
-    const utterance = new SpeechSynthesisUtterance(text);
-
-    // Load voice settings from localStorage
-    try {
-      const saved = localStorage.getItem("vyrexo_voice");
-      if (saved) {
-        const prefs = JSON.parse(saved);
-
-        // Speed
-        const speeds: Record<string, number> = { slow: 0.8, normal: 1.0, fast: 1.2 };
-        utterance.rate = speeds[prefs.speed] || 1.0;
-
-        // Match voice accent/gender from browser voices
-        const voices = window.speechSynthesis.getVoices();
-        if (voices.length && prefs.voice) {
-          const accentMap: Record<string, string> = {
-            american_male: "en-US", american_female: "en-US",
-            british_male: "en-GB", british_female: "en-GB",
-            indian_male: "en-IN", indian_female: "en-IN",
-            australian_male: "en-AU", australian_female: "en-AU",
-          };
-          const lang = accentMap[prefs.voice] || "en-US";
-          const isFemale = prefs.voice?.includes("female");
-
-          // Try to find matching voice
-          const match = voices.find(
-            (v) => v.lang.startsWith(lang) && (isFemale ? v.name.toLowerCase().includes("female") || v.name.includes("Zira") || v.name.includes("Jenny") : true)
-          ) || voices.find((v) => v.lang.startsWith(lang));
-
-          if (match) utterance.voice = match;
-        }
-      }
-    } catch {}
-
-    utterance.pitch = 1.0;
-    utterance.onend = () => setOrbState("idle");
-    utterance.onerror = () => setOrbState("idle");
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  }, []);
+  // Voice synthesis is now driven by the backend (Edge-TTS streamed over WebSocket).
+  // The browser SpeechSynthesisUtterance fallback is no longer used; the chosen voice
+  // and speed flow from the Settings page through a voice.config WebSocket message.
 
   // ── Voice: wake word "Rex" + continuous conversation ────────
   const handleVoiceTranscript = useCallback(
@@ -204,14 +198,36 @@ export default function App() {
     }
   }, [activeSession, connect, disconnect, startListening, stopListening]);
 
-  // Update narration when WS connects
+  // Update narration when WS connects and push voice config to the backend
   useEffect(() => {
     if (wsStatus === "connected") {
       setNarration("Connected! Say 'Rex' to start, or click the orb");
+
+      // Push the user's saved voice preference so backend TTS uses the right voice
+      try {
+        const saved = localStorage.getItem("vyrexo_voice");
+        if (saved) {
+          const prefs = JSON.parse(saved);
+          const rateMap: Record<string, string> = {
+            slow: "-15%",
+            normal: "+0%",
+            fast: "+15%",
+          };
+          sendMessage({
+            type: "voice.config",
+            payload: {
+              voice: prefs.voice || "american_male",
+              rate: rateMap[prefs.speed] || "+0%",
+            },
+          });
+        }
+      } catch {
+        // Settings not set yet; backend will use default voice
+      }
     } else if (wsStatus === "connecting") {
       setNarration("Connecting to Vyrexo...");
     }
-  }, [wsStatus]);
+  }, [wsStatus, sendMessage]);
 
   // ── Project + VS Code ────────────────────────────────────────
   const handleConnectProject = useCallback(async () => {
@@ -279,7 +295,8 @@ export default function App() {
         forceActivate();
       }
       if (e.code === "Escape") {
-        window.speechSynthesis.cancel();
+        stopAudio();
+        try { window.speechSynthesis.cancel(); } catch {}
         sendMessage({ type: "execution.interrupt", payload: {} });
         setOrbState("idle");
         setNarration("Interrupted. What would you like instead?");
@@ -292,7 +309,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [forceActivate, sendMessage]);
+  }, [forceActivate, sendMessage, stopAudio]);
 
   // ── Loading / Auth guard ────────────────────────────────────
   if (loading) {
@@ -502,7 +519,8 @@ export default function App() {
           <span>{voiceMode === "active_conversation" ? "Conversation active" : "Waiting for 'Rex'"}</span>
           <button
             onClick={() => {
-              window.speechSynthesis.cancel();
+              stopAudio();
+              try { window.speechSynthesis.cancel(); } catch {}
               sendMessage({ type: "execution.interrupt", payload: {} });
               setOrbState("idle");
             }}

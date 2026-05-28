@@ -32,6 +32,7 @@ class EventType:
     AGENT_ACTION_GIT_OP = "agent.action.git_op"
     AGENT_CONFLICT = "agent.conflict"
     AGENT_ERROR = "agent.error"
+    AGENT_NARRATION = "agent.narration"
 
     # ── Execution Events ─────────────────────────────────────────
     EXECUTION_COMMAND_STARTED = "execution.command.started"

@@ -5,6 +5,7 @@
 export type ClientMessageType =
   | "voice.start"
   | "voice.stop"
+  | "voice.config"
   | "text.input"
   | "execution.interrupt"
   | "mode.switch"

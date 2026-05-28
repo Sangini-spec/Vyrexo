@@ -73,6 +73,7 @@ class ReviewAgent(BaseAgent):
             context += f"\n\nFiles to review:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("reviewer_executing", task=task_desc[:80], files=len(files_modified))
+        await self.narrate(state, "Let me take a careful look at what we just built.")
 
         messages = [
             SystemMessage(content=REVIEWER_SYSTEM_PROMPT),
@@ -91,6 +92,9 @@ class ReviewAgent(BaseAgent):
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = dict(tool_call["args"])
+
+                # Live narration before each read
+                await self.narrate_tool_call(state, tool_name, tool_args)
 
                 if tool_name in FILE_TOOL_MAP:
                     tool_args["project_root"] = project_path
@@ -130,6 +134,16 @@ class ReviewAgent(BaseAgent):
 
         state["final_response"] = final_text
         logger.info("reviewer_completed")
+
+        # Brief verbal summary
+        lowered = final_text.lower() if final_text else ""
+        if "needs fixes" in lowered:
+            await self.narrate(state, "Review done. There are a few things we should fix before shipping.")
+        elif "warning" in lowered:
+            await self.narrate(state, "Review done. Mostly looks good, just a few minor warnings.")
+        else:
+            await self.narrate(state, "Review done. The code looks clean. Nice work.")
+
         return state
 
     def get_tools(self) -> list[ToolDefinition]:
