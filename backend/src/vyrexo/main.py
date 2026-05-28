@@ -62,10 +62,19 @@ context_engine: ContextEngine | None = None
 conversation_manager: ConversationManager | None = None
 voice_pipeline: VoicePipeline | None = None
 
-# One lock per session so narrations are spoken one at a time (no overlapping audio).
-_tts_locks: dict[str, asyncio.Lock] = {}
 # Per-session voice config (accent, rate). Updated via voice.config client messages.
 _session_voice_configs: dict[str, VoiceConfig] = {}
+
+# Per-session TTS work queues. Producers (narration / turn-completed handlers)
+# push text onto the queue. A single worker per session drains it sequentially,
+# which means narrations are spoken in order without overlap — but synthesis
+# of the NEXT item begins as soon as the previous one finishes, so the
+# Edge-TTS handshake of item N+1 overlaps with the playback of item N on the
+# client. That eliminates the back-to-back stalls we had before.
+_tts_queues: dict[str, asyncio.Queue[str]] = {}
+_tts_workers: dict[str, asyncio.Task] = {}
+# Last spoken line per session so we can drop duplicates that arrive in quick succession
+_tts_recent: dict[str, tuple[str, float]] = {}
 
 
 @asynccontextmanager
@@ -97,6 +106,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             event_bus=event_bus,
         )
         logger.info("voice_pipeline_ready", tts_voice=settings.tts.voice)
+
+        # Pre-warm both engines in the background so the FIRST user-facing
+        # call doesn't pay the cold-start handshake (Edge-TTS opens a WebSocket
+        # to Microsoft, Whisper loads a multi-MB model into memory).
+        asyncio.create_task(_prewarm_voice_engines())
     except Exception as e:
         logger.warning("voice_pipeline_skip", reason=str(e)[:100])
         voice_pipeline = None
@@ -191,33 +205,87 @@ def _voice_config_for(session_id: str) -> VoiceConfig:
     return VoiceConfig(voice=settings.tts.voice)
 
 
-def _lock_for(session_id: str) -> asyncio.Lock:
-    """Get-or-create an asyncio lock per session so TTS plays one line at a time."""
-    lock = _tts_locks.get(session_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _tts_locks[session_id] = lock
-    return lock
+async def _prewarm_voice_engines() -> None:
+    """Cold-start both STT and TTS so the user's first request feels snappy.
 
-
-async def _speak(session_id: str, text: str) -> None:
-    """Synthesize text through Edge-TTS and let the pipeline publish audio chunks.
-
-    The WebSocket handler will forward voice.output.chunk events as binary frames
-    so the browser plays them with the user's chosen voice.
+    Edge-TTS: synthesize a single short word so DNS, TLS, and the WebSocket
+    handshake to Microsoft's edge servers happen before the user speaks.
+    Whisper: trigger model load so the first STT call doesn't pay the
+    multi-second model-load cost.
     """
-    if not text or voice_pipeline is None or not session_id:
+    if voice_pipeline is None:
         return
-    voice_pipeline.set_voice_config(_voice_config_for(session_id))
-    ctx = VoiceContext(session_id=session_id)
-    lock = _lock_for(session_id)
-    async with lock:
+    try:
+        # Warm Edge-TTS by synthesizing one silent-ish token. Discard the bytes.
+        async for _ in voice_pipeline._tts.synthesize("Ready.", _voice_config_for("")):
+            pass
+        logger.info("tts_prewarmed")
+    except Exception:
+        logger.debug("tts_prewarm_failed")
+
+    try:
+        # Force the Whisper model into memory by calling the lazy loader.
+        # We don't transcribe anything; just touch the model.
+        loader = getattr(voice_pipeline._stt, "_load_model", None)
+        if callable(loader):
+            await asyncio.to_thread(loader)
+            logger.info("stt_prewarmed")
+    except Exception:
+        logger.debug("stt_prewarm_failed")
+
+
+async def _tts_worker(session_id: str) -> None:
+    """Drain a session's TTS queue one item at a time, in order."""
+    queue = _tts_queues[session_id]
+    while True:
+        text = await queue.get()
         try:
-            # Iterate the generator so the pipeline publishes chunks as events.
+            if voice_pipeline is None or not text:
+                continue
+            voice_pipeline.set_voice_config(_voice_config_for(session_id))
+            ctx = VoiceContext(session_id=session_id)
             async for _chunk in voice_pipeline.synthesize_response(text, ctx):
                 pass
         except Exception:
-            logger.exception("tts_speak_failed", session_id=session_id)
+            logger.exception("tts_worker_failed", session_id=session_id)
+        finally:
+            queue.task_done()
+
+
+def _ensure_tts_worker(session_id: str) -> asyncio.Queue[str]:
+    """Get-or-create the per-session TTS queue and worker."""
+    queue = _tts_queues.get(session_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _tts_queues[session_id] = queue
+        _tts_workers[session_id] = asyncio.create_task(_tts_worker(session_id))
+    return queue
+
+
+async def _speak(session_id: str, text: str) -> None:
+    """Queue text for TTS playback. Synthesis happens in the per-session worker.
+
+    Same line within 2 seconds is dropped as a duplicate so we don't speak
+    the same narration twice (which happens when agents narrate the same
+    tool repeatedly).
+    """
+    if not text or voice_pipeline is None or not session_id:
+        return
+
+    import time
+    clean = text.strip()
+    if not clean:
+        return
+
+    # Drop a duplicate that arrived within 2 seconds
+    prev = _tts_recent.get(session_id)
+    now = time.monotonic()
+    if prev and prev[0] == clean and (now - prev[1]) < 2.0:
+        return
+    _tts_recent[session_id] = (clean, now)
+
+    queue = _ensure_tts_worker(session_id)
+    await queue.put(clean)
 
 
 async def _handle_narration(event: Event) -> None:

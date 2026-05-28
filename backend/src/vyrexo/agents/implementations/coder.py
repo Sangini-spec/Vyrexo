@@ -68,7 +68,8 @@ class CodingAgent(BaseAgent):
         project_path = state.get("project_path", ".")
 
         logger.info("coder_executing", task=task_desc[:80])
-        await self.narrate(state, "Let me start writing the code for this.")
+        # Intentionally no intro line here — the orchestrator already announced
+        # "Step N: Coding ..." so a second "let me start writing" would be redundant.
 
         # Build tool definitions for Gemini
         tools_for_llm = self._build_tool_defs()

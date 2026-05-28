@@ -73,7 +73,7 @@ class TestingAgent(BaseAgent):
             context += f"\n\nFiles that were recently created/modified:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("tester_executing", task=task_desc[:80])
-        await self.narrate(state, "Let me write some tests and make sure this actually works.")
+        # Step intro already spoken by orchestrator.
 
         all_tools = FILE_TOOLS + TERMINAL_TOOLS
         all_tool_map = {**FILE_TOOL_MAP, **TERMINAL_TOOL_MAP}

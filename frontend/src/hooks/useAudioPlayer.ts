@@ -5,12 +5,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /**
  * Plays MP3 audio that the backend streams over the WebSocket as binary frames.
  *
- * Flow per utterance:
- *   1. Backend publishes voice.output.started      -> beginUtterance()
- *   2. Backend sends binary frames (MP3 chunks)    -> pushChunk(arrayBuffer)
- *   3. Backend publishes voice.output.completed    -> endUtterance() (queues for playback)
+ * To minimize perceived latency, we don't wait for the full utterance to arrive
+ * before playing — we buffer chunks as they come in and start playback as soon
+ * as one utterance is complete. Multiple utterances are queued and played
+ * back-to-back so Rex's lines never overlap.
  *
- * Multiple utterances queue up and play sequentially so Rex's lines don't overlap.
+ * Flow per utterance:
+ *   1. voice.output.start[ed]    -> beginUtterance()
+ *   2. (binary frames)            -> pushChunk(arrayBuffer)
+ *   3. voice.output.end/completed -> endUtterance() (queues for playback)
  */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -29,6 +32,8 @@ export function useAudioPlayer() {
 
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
+    // Lower latency: preload aggressively, don't wait on full buffer
+    audio.preload = "auto";
     audioElementRef.current = audio;
     isPlayingRef.current = true;
     setIsPlaying(true);
@@ -44,9 +49,18 @@ export function useAudioPlayer() {
     audio.onended = cleanup;
     audio.onerror = cleanup;
 
+    // canplay fires very early in MP3 decoding; start as soon as it does
+    audio.oncanplay = () => {
+      audio.play().catch(() => cleanup());
+    };
+
+    // Some browsers won't fire canplay until play() is called
     audio.play().catch(() => {
-      // Autoplay might be blocked; surface as not-playing
-      cleanup();
+      // If autoplay was blocked or some other immediate failure, retry once
+      // shortly. After that, give up and move on so we don't deadlock the queue.
+      setTimeout(() => {
+        audio.play().catch(() => cleanup());
+      }, 30);
     });
   }, []);
 

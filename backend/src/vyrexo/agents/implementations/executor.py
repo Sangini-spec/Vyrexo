@@ -68,7 +68,7 @@ class ExecutionAgent(BaseAgent):
         project_path = state.get("project_path", ".")
 
         logger.info("executor_executing", task=task_desc[:80])
-        await self.narrate(state, "Okay, I'll handle the setup work now.")
+        # Step intro already spoken by orchestrator.
 
         all_tools = TERMINAL_TOOLS + FILE_TOOLS + GIT_TOOLS
         all_tool_map = {**TERMINAL_TOOL_MAP, **FILE_TOOL_MAP, **GIT_TOOL_MAP}

@@ -147,9 +147,13 @@ export default function App() {
     (text: string, isFinal: boolean) => {
       setTranscript(text);
       if (isFinal && text.trim()) {
-        setChatLog((prev) => [...prev, { role: "user", text: text.trim() }]);
-        sendMessage({ type: "text.input", payload: { text: text.trim() } });
+        const final = text.trim();
+        setChatLog((prev) => [...prev, { role: "user", text: final }]);
+        sendMessage({ type: "text.input", payload: { text: final } });
+        // Optimistic UI: show "thinking" + a placeholder line so the user sees
+        // their words landed instantly while the backend round-trip happens.
         setOrbState("thinking");
+        setNarration("Thinking...");
         setTranscript("");
       }
     },

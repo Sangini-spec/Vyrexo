@@ -73,7 +73,7 @@ class ReviewAgent(BaseAgent):
             context += f"\n\nFiles to review:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("reviewer_executing", task=task_desc[:80], files=len(files_modified))
-        await self.narrate(state, "Let me take a careful look at what we just built.")
+        # Step intro already spoken by orchestrator.
 
         messages = [
             SystemMessage(content=REVIEWER_SYSTEM_PROMPT),

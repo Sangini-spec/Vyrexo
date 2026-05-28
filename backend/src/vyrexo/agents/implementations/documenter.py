@@ -72,7 +72,7 @@ class DocumentationAgent(BaseAgent):
             context += f"\n\nProject files that were created/modified:\n" + "\n".join(f"- {f}" for f in files_modified)
 
         logger.info("documenter_executing", task=task_desc[:80])
-        await self.narrate(state, "Time to write up the documentation. I'll keep it clear.")
+        # Step intro already spoken by orchestrator.
 
         messages = [
             SystemMessage(content=DOCUMENTER_SYSTEM_PROMPT),

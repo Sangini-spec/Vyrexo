@@ -80,8 +80,9 @@ class AgentOrchestrator:
         }
 
         try:
-            # Step 1: Planning
-            await self._narrate(session_id, "Alright, let me think through this and put together a plan.")
+            # Step 1: Planning. We don't narrate here; the planner agent itself
+            # speaks a single short line so the user doesn't hear two "let me
+            # think" intros in a row.
             await self._publish_step_event("planner", "Creating development plan...", session_id)
             planner = AgentRegistry.create("planner")
             state = await planner.execute(state)
@@ -97,7 +98,7 @@ class AgentOrchestrator:
                 step_count = len(plan)
                 await self._narrate(
                     session_id,
-                    f"Okay, here's the plan. I'll go through {step_count} step{'s' if step_count != 1 else ''} now. Stay with me!",
+                    f"Got it. {step_count} step{'s' if step_count != 1 else ''}.",
                 )
 
             # Step 2: Execute each step in the plan
@@ -322,19 +323,20 @@ class AgentOrchestrator:
         ))
 
     def _friendly_step_intro(self, step_index: int, total_steps: int, agent_name: str, description: str) -> str:
-        """Build a natural intro line for a plan step that Rex will speak aloud."""
-        # Trim the description to something speakable, dropping markdown noise
-        short_desc = description.strip().rstrip(".").lower()
-        agent_phrase = {
-            "planner": "thinking through the next move",
-            "coding": "writing the code",
-            "executor": "running this on the system",
-            "testing": "running the tests",
-            "review": "reviewing what we have",
-            "documentation": "writing the documentation",
-        }.get(agent_name, "working on this")
-        ordinal = f"Step {step_index + 1} of {total_steps}"
-        return f"{ordinal}: {agent_phrase}. I'm going to {short_desc}."
+        """Build a SHORT intro line for a plan step. Speed > flavor."""
+        agent_verb = {
+            "planner": "Planning",
+            "coding": "Coding",
+            "executor": "Running",
+            "testing": "Testing",
+            "review": "Reviewing",
+            "documentation": "Writing docs for",
+        }.get(agent_name, "Working on")
+        # Trim the description hard so the spoken line stays under ~2 seconds
+        short_desc = description.strip().rstrip(".")
+        if len(short_desc) > 70:
+            short_desc = short_desc[:70].rsplit(" ", 1)[0] + "..."
+        return f"Step {step_index + 1}: {agent_verb} {short_desc}."
 
     def _build_summary(self, state: dict[str, Any]) -> str:
         """Build a natural language summary of what was done."""

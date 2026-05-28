@@ -79,47 +79,52 @@ class BaseAgent(ABC):
             session_id=session_id,
         ))
 
+    # Tool calls we silently skip because they finish in milliseconds and
+    # narrating each one only adds TTS latency for the user.
+    _SILENT_TOOLS: set[str] = {
+        "read_file",
+        "list_directory",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "search_codebase",
+    }
+
     async def narrate_tool_call(self, state: dict[str, Any], tool_name: str, args: dict[str, Any]) -> None:
         """
-        Build a natural-sounding narration for the tool the agent is about to run
-        and publish it. Keeps the user in the loop without flooding them with detail.
+        Build a SHORT narration for the tool the agent is about to run.
+        Skips fast/quiet tools (file reads, git inspections) so we only
+        speak about actions that actually take time or change state.
         """
+        if tool_name in self._SILENT_TOOLS:
+            return
+
         path = args.get("path") or args.get("file_path") or ""
         command = args.get("command") or ""
         message = args.get("message") or ""
 
-        if tool_name == "read_file" and path:
-            line = f"Reading {path} so I can see what's there."
-        elif tool_name == "write_file" and path:
-            line = f"Writing the changes into {path}."
+        if tool_name == "write_file" and path:
+            line = f"Writing {path}."
         elif tool_name == "create_file" and path:
-            line = f"Creating a new file at {path}."
+            line = f"Creating {path}."
         elif tool_name == "delete_file" and path:
             line = f"Removing {path}."
-        elif tool_name == "list_directory":
-            line = f"Taking a look at the project structure."
         elif tool_name == "run_command" and command:
-            short = command if len(command) <= 80 else command[:80] + "..."
-            line = f"Running this in your terminal: {short}"
-        elif tool_name == "git_status":
-            line = "Checking the git status real quick."
+            short = command if len(command) <= 50 else command[:50].rsplit(" ", 1)[0] + "..."
+            line = f"Running: {short}"
         elif tool_name == "git_add":
-            line = "Staging the changes for commit."
+            line = "Staging changes."
         elif tool_name == "git_commit" and message:
-            line = f"Committing with the message: {message}"
+            short_msg = message if len(message) <= 50 else message[:50] + "..."
+            line = f"Committing: {short_msg}"
         elif tool_name == "git_commit":
-            line = "Committing the changes now."
+            line = "Committing."
         elif tool_name == "git_push":
-            line = "Pushing this up to the remote."
+            line = "Pushing to remote."
         elif tool_name == "git_branch":
-            line = "Working with the git branches."
-        elif tool_name == "git_diff":
-            line = "Pulling up the diff so I know what changed."
-        elif tool_name == "git_log":
-            line = "Looking at the recent commit history."
-        elif tool_name == "search_codebase":
-            line = "Searching through the codebase for relevant pieces."
+            name = args.get("name") or ""
+            line = f"Creating branch {name}." if name else "Branching."
         else:
-            line = f"Running {tool_name} now."
+            line = f"Running {tool_name}."
 
         await self.narrate(state, line)

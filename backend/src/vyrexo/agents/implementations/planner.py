@@ -80,7 +80,7 @@ class PlannerAgent(BaseAgent):
             return state
 
         logger.info("planner_executing", request=user_request[:80])
-        await self.narrate(state, "Let me figure out the best way to approach this.")
+        await self.narrate(state, "On it.")
 
         # Call Gemini to create the plan
         response = await llm.ainvoke([
