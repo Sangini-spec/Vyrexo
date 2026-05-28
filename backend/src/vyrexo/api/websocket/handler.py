@@ -38,6 +38,9 @@ EVENT_TO_WS: dict[str, ServerMessageType] = {
 }
 
 # Patterns to subscribe to on the EventBus
+# NOTE: we intentionally subscribe to only `conversation.turn.completed`
+# (not the whole conversation.* family) — other conversation events carry
+# the *user's* text in their payload, which would echo back as if Rex said it.
 FORWARD_PATTERNS = [
     "voice.transcription.*",
     "voice.output.*",
@@ -46,7 +49,7 @@ FORWARD_PATTERNS = [
     "mode.*",
     "context.file.*",
     "session.*",
-    "conversation.*",
+    "conversation.turn.completed",
 ]
 
 

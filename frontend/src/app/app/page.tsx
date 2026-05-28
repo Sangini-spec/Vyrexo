@@ -64,22 +64,23 @@ export default function App() {
         break;
 
       case "agent.narration": {
+        // Live "what Rex is doing right now" — shows in the narration box only,
+        // NOT in the chat log (chat is reserved for actual conversation turns).
         const narrText = (msg.payload.text as string) || "";
-        const agentName = (msg.payload.agent as string) || "rex";
-        if (narrText) {
-          setNarration(narrText);
-          setChatLog((prev) => [...prev, { role: agentName, text: narrText }]);
-        }
+        if (narrText) setNarration(narrText);
         setOrbState("speaking");
         break;
       }
 
       case "conversation.turn.completed": {
-        const responseText = msg.payload.text as string;
-        setNarration(responseText);
-        setChatLog((prev) => [...prev, { role: "assistant", text: responseText }]);
+        // This is Rex's reply for the turn. Goes into the chat AND drives orb.
+        const responseText = (msg.payload.text as string) || "";
+        if (responseText.trim()) {
+          setNarration(responseText);
+          setChatLog((prev) => [...prev, { role: "assistant", text: responseText }]);
+        }
         setOrbState("speaking");
-        // Backend will stream the synthesized audio; no browser TTS fallback needed.
+        // Backend streams the synthesized audio over the WS; no browser TTS fallback.
         break;
       }
 

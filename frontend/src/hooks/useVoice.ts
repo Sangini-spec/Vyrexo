@@ -13,30 +13,46 @@ interface UseVoiceOptions {
 }
 
 /**
- * Voice hook with wake word "Rex" detection.
+ * Voice hook with wake-word "Rex" detection and resilient continuous listening.
  *
- * Flow:
- * 1. User says "Rex" (or "Hey Rex", "OK Rex", etc.) → activates
- * 2. Conversation mode: all speech goes to backend until explicitly ended
- * 3. User says "goodbye Rex" or clicks orb → deactivates back to wake word mode
+ * Web Speech API stops by itself after silence and sometimes fails to restart
+ * cleanly. This hook keeps a watchdog so recognition is restarted whenever it
+ * dies, as long as the mode is not "idle". Once the user says "Rex" anywhere
+ * in their speech, we switch to active conversation mode and forward
+ * everything (interim AND final) to the parent. Saying "goodbye rex" or
+ * "stop listening" deactivates back to wake-word mode.
  */
 export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceOptions) {
   const [mode, setMode] = useState<VoiceMode>("idle");
   const [hasPermission, setHasPermission] = useState(false);
   const recognitionRef = useRef<any>(null);
   const modeRef = useRef<VoiceMode>("idle");
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latch so we don't fire onTranscript twice for the same final string when
+  // SpeechRecognition emits stale results on restart.
+  const lastEmittedFinalRef = useRef<string>("");
+  // Track when we forwarded an interim transcript that already contained the wake word
+  // so we don't re-activate on every interim refinement.
+  const activatedThisUtteranceRef = useRef<boolean>(false);
 
   // Keep ref in sync with state for use in callbacks
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
 
-  const createRecognition = useCallback(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  const stripWake = (text: string): string => {
+    const lower = text.toLowerCase();
+    const idx = lower.lastIndexOf(WAKE_WORD);
+    if (idx < 0) return text.trim();
+    // Skip past the wake word and any common filler punctuation/spaces
+    return text.slice(idx + WAKE_WORD.length).replace(/^[\s,.;:!?-]+/, "").trim();
+  };
 
+  const buildRecognition = useCallback(() => {
+    const SpeechRecognition: any =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      console.error("Speech Recognition API not available");
+      console.error("[voice] SpeechRecognition not available in this browser");
       return null;
     }
 
@@ -46,91 +62,134 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
     recognition.lang = "en-US";
     recognition.maxAlternatives = 1;
 
-    return recognition;
-  }, []);
-
-  const startListening = useCallback(async () => {
-    // Request mic permission
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((t) => t.stop()); // Release immediately, Speech API handles its own stream
-      setHasPermission(true);
-    } catch {
-      console.error("Microphone permission denied");
-      setHasPermission(false);
-      return;
-    }
-
-    const recognition = createRecognition();
-    if (!recognition) return;
-
     recognition.onresult = (event: any) => {
       let finalText = "";
       let interimText = "";
-
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const text = event.results[i][0].transcript;
+        const t = event.results[i][0].transcript;
         if (event.results[i].isFinal) {
-          finalText += text;
+          finalText += t;
         } else {
-          interimText += text;
+          interimText += t;
         }
       }
 
       const currentMode = modeRef.current;
-      const spoken = (finalText || interimText).toLowerCase();
+      const spokenInterim = interimText.toLowerCase();
+      const spokenFinal = finalText.toLowerCase();
 
       if (currentMode === "waiting_for_wake") {
-        // Looking for "Rex" in speech
-        if (spoken.includes(WAKE_WORD)) {
-          // Extract command after wake word
-          const afterWake = spoken.split(WAKE_WORD).slice(1).join(" ").trim();
+        // Try to catch the wake word as early as possible — interim first, then final
+        const triggerSource = spokenInterim.includes(WAKE_WORD)
+          ? interimText
+          : spokenFinal.includes(WAKE_WORD)
+          ? finalText
+          : "";
+
+        if (triggerSource) {
           setMode("active_conversation");
           modeRef.current = "active_conversation";
+          activatedThisUtteranceRef.current = true;
           onActivated();
 
-          if (afterWake && finalText) {
-            onTranscript(afterWake, true);
-          } else if (afterWake) {
-            onTranscript(afterWake, false);
+          const command = stripWake(triggerSource);
+          if (command) {
+            // If we got it from the final, finalize the transcript
+            onTranscript(command, Boolean(spokenFinal && spokenFinal.includes(WAKE_WORD)));
           }
+          // Wait for the next event for the rest of the utterance
         }
-      } else if (currentMode === "active_conversation") {
-        // In conversation mode — forward everything
-        // Check for deactivation phrases
-        if (spoken.includes("goodbye rex") || spoken.includes("bye rex") || spoken.includes("stop listening")) {
+        return;
+      }
+
+      if (currentMode === "active_conversation") {
+        // Deactivation phrases
+        const deactivate =
+          spokenFinal.includes("goodbye rex") ||
+          spokenFinal.includes("bye rex") ||
+          spokenFinal.includes("stop listening") ||
+          spokenInterim.includes("goodbye rex");
+        if (deactivate) {
           setMode("waiting_for_wake");
           modeRef.current = "waiting_for_wake";
+          activatedThisUtteranceRef.current = false;
+          lastEmittedFinalRef.current = "";
           onDeactivated();
           return;
         }
 
         if (finalText) {
-          onTranscript(finalText.trim(), true);
+          const trimmed = finalText.trim();
+          if (trimmed && trimmed !== lastEmittedFinalRef.current) {
+            lastEmittedFinalRef.current = trimmed;
+            onTranscript(trimmed, true);
+          }
+          activatedThisUtteranceRef.current = false;
         } else if (interimText) {
+          // Surface interim text for live transcript display only
           onTranscript(interimText.trim(), false);
         }
       }
     };
 
     recognition.onerror = (event: any) => {
-      console.error("Speech error:", event.error);
-      if (event.error !== "no-speech" && event.error !== "aborted") {
-        // Restart on recoverable errors
-        setTimeout(() => {
-          try { recognition.start(); } catch {}
-        }, 500);
+      const err = event?.error || "";
+      if (err === "not-allowed" || err === "service-not-allowed") {
+        // User denied mic permission — surface and stop trying
+        console.warn("[voice] microphone permission denied");
+        setHasPermission(false);
+        modeRef.current = "idle";
+        setMode("idle");
+        return;
       }
+      // For all other errors (no-speech, audio-capture, aborted, network) we
+      // just let onend fire and the watchdog will restart.
+      console.debug("[voice] recognition error:", err);
     };
 
     recognition.onend = () => {
-      // Auto-restart to keep listening
+      // If we are still supposed to be listening, restart on the next tick.
+      // Web Speech stops automatically after silence, and we want continuous mode.
       if (modeRef.current !== "idle") {
-        setTimeout(() => {
-          try { recognition.start(); } catch {}
-        }, 100);
+        if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = setTimeout(() => {
+          const r = recognitionRef.current;
+          if (!r || modeRef.current === "idle") return;
+          try {
+            r.start();
+          } catch (e: any) {
+            // "already started" can happen on Chrome — just ignore
+            if (!String(e?.message || e).toLowerCase().includes("already started")) {
+              console.debug("[voice] restart error:", e);
+            }
+          }
+        }, 250);
       }
     };
+
+    return recognition;
+  }, [onTranscript, onActivated, onDeactivated]);
+
+  const startListening = useCallback(async () => {
+    if (recognitionRef.current && modeRef.current !== "idle") {
+      // Already running
+      return;
+    }
+
+    // Request mic permission first so the user sees the browser prompt
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // We don't need the stream itself — Web Speech holds its own. Just release it.
+      stream.getTracks().forEach((t) => t.stop());
+      setHasPermission(true);
+    } catch {
+      console.warn("[voice] mic permission denied");
+      setHasPermission(false);
+      return;
+    }
+
+    const recognition = buildRecognition();
+    if (!recognition) return;
 
     recognitionRef.current = recognition;
     setMode("waiting_for_wake");
@@ -138,19 +197,33 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
 
     try {
       recognition.start();
-    } catch {}
-  }, [createRecognition, onTranscript, onActivated, onDeactivated]);
+    } catch (e) {
+      console.debug("[voice] initial start error:", e);
+    }
+  }, [buildRecognition]);
 
   const stopListening = useCallback(() => {
-    setMode("idle");
     modeRef.current = "idle";
+    setMode("idle");
+    activatedThisUtteranceRef.current = false;
+    lastEmittedFinalRef.current = "";
+    if (restartTimerRef.current) {
+      clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
     if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch {}
+      try {
+        recognitionRef.current.stop();
+      } catch {}
       recognitionRef.current = null;
     }
   }, []);
 
-  // Force activate (click orb or space bar) — skip wake word
+  /**
+   * Manual push-to-talk: force the system into active conversation
+   * (skipping wake-word detection). Useful for clicking the orb or
+   * holding Space.
+   */
   const forceActivate = useCallback(() => {
     if (modeRef.current === "idle") {
       startListening().then(() => {
@@ -162,18 +235,22 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
       setMode("active_conversation");
       modeRef.current = "active_conversation";
       onActivated();
-    } else if (modeRef.current === "active_conversation") {
-      // Already active — toggle off
+    } else {
+      // Already active — toggle back to wake-word mode
       setMode("waiting_for_wake");
       modeRef.current = "waiting_for_wake";
       onDeactivated();
     }
   }, [startListening, onActivated, onDeactivated]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
+        try {
+          recognitionRef.current.stop();
+        } catch {}
       }
     };
   }, []);

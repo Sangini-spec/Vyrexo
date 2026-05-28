@@ -2,7 +2,27 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+
+function friendlyAuthError(message: string): string {
+  const lower = message.toLowerCase();
+  if (lower.includes("invalid login credentials")) {
+    return "That email and password don't match. Double-check, or sign up if you haven't yet.";
+  }
+  if (lower.includes("email not confirmed")) {
+    return "Your email isn't confirmed yet. Check your inbox (and spam) for the confirmation link.";
+  }
+  if (lower.includes("user already registered")) {
+    return "This email is already registered. Try logging in instead.";
+  }
+  if (lower.includes("provider is not enabled")) {
+    return "That sign-in option isn't configured in this Supabase project yet. Use email signup for now.";
+  }
+  if (lower.includes("password should be at least")) {
+    return "Password must be at least 6 characters.";
+  }
+  return message;
+}
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
@@ -10,53 +30,72 @@ export default function AuthPage() {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setInfo("");
+
+    if (!isSupabaseConfigured) {
+      setError("Supabase isn't configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to frontend/.env.local.");
+      return;
+    }
+
     setLoading(true);
 
     try {
       if (isLogin) {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+        // Only redirect if a real session came back
+        if (data.session) {
+          router.push("/app");
+        } else {
+          setError("Login didn't return a session. If you just signed up, please confirm your email first.");
+        }
       } else {
-        const { error } = await supabase.auth.signUp({
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
-          options: {
-            data: { full_name: name },
-          },
+          options: { data: { full_name: name } },
         });
         if (error) throw error;
+        // If email confirmation is on, session will be null and user has identities pending
+        if (data.session) {
+          router.push("/app");
+        } else {
+          setInfo(
+            `Account created. We sent a confirmation link to ${email}. Click it to verify your email, then come back here and log in.`
+          );
+          setIsLogin(true);
+        }
       }
-      router.push("/app");
     } catch (err: any) {
-      setError(err.message || "Something went wrong");
+      setError(friendlyAuthError(err?.message || "Something went wrong"));
     } finally {
       setLoading(false);
     }
   };
 
   const handleGoogleLogin = async () => {
+    setError("");
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/` },
+      options: { redirectTo: `${window.location.origin}/app` },
     });
-    if (error) setError(error.message);
+    if (error) setError(friendlyAuthError(error.message));
   };
 
   const handleGithubLogin = async () => {
+    setError("");
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
-      options: { redirectTo: `${window.location.origin}/` },
+      options: { redirectTo: `${window.location.origin}/app` },
     });
-    if (error) setError(error.message);
+    if (error) setError(friendlyAuthError(error.message));
   };
 
   return (
@@ -89,7 +128,7 @@ export default function AuthPage() {
           {/* Toggle */}
           <div className="flex rounded-lg bg-[var(--bg)] p-1 mb-6">
             <button
-              onClick={() => { setIsLogin(true); setError(""); }}
+              onClick={() => { setIsLogin(true); setError(""); setInfo(""); }}
               className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
                 isLogin
                   ? "bg-[var(--midnight)] text-white"
@@ -99,7 +138,7 @@ export default function AuthPage() {
               Log in
             </button>
             <button
-              onClick={() => { setIsLogin(false); setError(""); }}
+              onClick={() => { setIsLogin(false); setError(""); setInfo(""); }}
               className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
                 !isLogin
                   ? "bg-[var(--midnight)] text-white"
@@ -189,6 +228,12 @@ export default function AuthPage() {
               </div>
             )}
 
+            {info && (
+              <div className="text-xs text-emerald-300 bg-emerald-400/10 border border-emerald-400/20 rounded-lg px-3 py-2">
+                {info}
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loading}
@@ -202,7 +247,7 @@ export default function AuthPage() {
         <p className="text-center text-xs text-[var(--muted)] mt-6">
           {isLogin ? "Don't have an account? " : "Already have an account? "}
           <button
-            onClick={() => { setIsLogin(!isLogin); setError(""); }}
+            onClick={() => { setIsLogin(!isLogin); setError(""); setInfo(""); }}
             className="text-[var(--steel)] hover:text-[var(--ice)] transition-colors"
           >
             {isLogin ? "Sign up" : "Log in"}

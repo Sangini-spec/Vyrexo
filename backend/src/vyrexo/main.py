@@ -6,9 +6,20 @@ ConversationManager, AgentOrchestrator, Mode StateMachine.
 """
 
 import asyncio
+import io
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
+
+# Force UTF-8 stdout/stderr on Windows so emoji and special chars in narration
+# don't crash the structlog console formatter with charmap encoding errors.
+if sys.platform == "win32":
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
 
 import structlog
 from fastapi import FastAPI, WebSocket
