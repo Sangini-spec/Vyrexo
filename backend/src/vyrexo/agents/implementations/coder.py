@@ -92,7 +92,7 @@ class CodingAgent(BaseAgent):
         commands_run = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.ainvoke(messages, tools=tools_for_llm)
+            response = await llm.bind_tools(tools_for_llm).ainvoke(messages)
 
             # Check if Gemini wants to use tools
             if not response.tool_calls:

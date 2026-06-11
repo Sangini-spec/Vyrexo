@@ -81,7 +81,7 @@ class ExecutionAgent(BaseAgent):
         commands_run = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.ainvoke(messages, tools=all_tools)
+            response = await llm.bind_tools(all_tools).ainvoke(messages)
 
             if not response.tool_calls:
                 break

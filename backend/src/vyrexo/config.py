@@ -9,10 +9,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMSettings(BaseSettings):
+    # provider: "gemini" | "groq" | "openrouter" | "openai" | "anthropic"
     provider: str = "gemini"
     model_heavy: str = "gemini-2.5-pro"
     model_light: str = "gemini-2.5-flash"
     gemini_api_key: str = ""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
+    # Generic overrides for any OpenAI-compatible endpoint
+    api_key: str = ""
+    base_url: str = ""
 
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
@@ -61,8 +67,10 @@ class Settings(BaseSettings):
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
 
-    # Gemini key at top level for convenience (also accessible via llm.gemini_api_key)
+    # Provider keys at top level for convenience (no LLM_ prefix needed in .env)
     gemini_api_key: str = ""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -71,9 +79,13 @@ class Settings(BaseSettings):
     )
 
     def model_post_init(self, __context: object) -> None:
-        # Sync top-level GEMINI_API_KEY to llm settings
+        # Sync top-level API keys to the nested LLM settings so either form works
         if self.gemini_api_key and not self.llm.gemini_api_key:
             self.llm.gemini_api_key = self.gemini_api_key
+        if self.groq_api_key and not self.llm.groq_api_key:
+            self.llm.groq_api_key = self.groq_api_key
+        if self.openrouter_api_key and not self.llm.openrouter_api_key:
+            self.llm.openrouter_api_key = self.openrouter_api_key
 
 
 def get_settings() -> Settings:

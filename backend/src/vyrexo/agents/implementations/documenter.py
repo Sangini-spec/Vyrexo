@@ -82,7 +82,7 @@ class DocumentationAgent(BaseAgent):
         docs_created = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.ainvoke(messages, tools=FILE_TOOLS)
+            response = await llm.bind_tools(FILE_TOOLS).ainvoke(messages)
 
             if not response.tool_calls:
                 break
