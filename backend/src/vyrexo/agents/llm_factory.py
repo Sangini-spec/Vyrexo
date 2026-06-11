@@ -33,22 +33,24 @@ def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
             convert_system_message_to_human=False,
         )
 
-    # Groq, OpenRouter, and OpenAI all speak the OpenAI chat API, so they share
-    # one path — only the base_url and api_key differ. Agents bind tools via
+    # Groq, OpenRouter, OpenAI, and Ollama all speak the OpenAI chat API, so they
+    # share one path — only the base_url and api_key differ. Agents bind tools via
     # llm.bind_tools(), which converts our tool dicts to the OpenAI function
     # schema, so tool-calling works the same across all of these.
-    if provider in ("groq", "openrouter", "openai"):
+    if provider in ("groq", "openrouter", "openai", "ollama"):
         from langchain_openai import ChatOpenAI
 
         default_base_urls = {
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
             "openai": "",  # use OpenAI's default endpoint
+            "ollama": "http://localhost:11434/v1",  # local Ollama server
         }
         provider_keys = {
             "groq": settings.groq_api_key,
             "openrouter": settings.openrouter_api_key,
             "openai": settings.api_key,
+            "ollama": "ollama",  # Ollama ignores the key, but the client requires one
         }
         base_url = settings.base_url or default_base_urls[provider]
         api_key = settings.api_key or provider_keys[provider]
@@ -56,6 +58,9 @@ def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
         kwargs: dict = {"model": model_name, "api_key": api_key, "temperature": 0.1}
         if base_url:
             kwargs["base_url"] = base_url
+        # Local models on Ollama can be slow on first token; give them room.
+        if provider == "ollama":
+            kwargs["timeout"] = 600
         return ChatOpenAI(**kwargs)
 
     if provider == "anthropic":
