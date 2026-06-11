@@ -11,23 +11,28 @@ from vyrexo.voice.tts.base import TTSAudioChunk, TTSProvider, VoiceConfig
 
 logger = structlog.get_logger()
 
-# Curated voice list — best voices by accent and gender
-VOICE_PRESETS: dict[str, dict[str, str]] = {
-    # American
+# Curated voice list. The five named voices below are the friendly, natural-
+# sounding picks surfaced in the Voice Settings page; the accent_gender keys are
+# kept for backward compatibility with older saved preferences.
+VOICE_PRESETS: dict[str, str] = {
+    # ── The 5 curated, friendly voices (shown in the UI) ──
+    "andrew": "en-US-AndrewNeural",   # American male — warm & conversational
+    "ava": "en-US-AvaNeural",         # American female — friendly & natural
+    "brian": "en-US-BrianNeural",     # American male — casual & upbeat
+    "sonia": "en-GB-SoniaNeural",     # British female — crisp & clear
+    "ryan": "en-GB-RyanNeural",       # British male — calm & steady
+    # ── Legacy accent/gender keys (backward compatibility) ──
     "american_male": "en-US-GuyNeural",
     "american_female": "en-US-JennyNeural",
-    # British
     "british_male": "en-GB-RyanNeural",
     "british_female": "en-GB-SoniaNeural",
-    # Indian
     "indian_male": "en-IN-PrabhatNeural",
     "indian_female": "en-IN-NeerjaNeural",
-    # Australian
     "australian_male": "en-AU-WilliamNeural",
     "australian_female": "en-AU-NatashaNeural",
 }
 
-DEFAULT_VOICE = "en-US-GuyNeural"
+DEFAULT_VOICE = "en-US-AndrewNeural"
 
 
 class EdgeTTSProvider(TTSProvider):

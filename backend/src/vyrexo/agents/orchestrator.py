@@ -9,6 +9,8 @@ plug in automatically when registered.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import structlog
@@ -22,6 +24,28 @@ logger = structlog.get_logger()
 
 # How many times the verify→fix loop may run before giving up.
 MAX_REPAIR_ROUNDS = 3
+
+# ── Friendly companion small-talk ────────────────────────────────────────────
+# When a task goes quiet for a while (which happens during slow local-model
+# calls), Rex makes warm small-talk to keep the user company — JARVIS-style.
+# On fast providers there are no long gaps, so this naturally stays silent.
+SILENCE_THRESHOLD = 18.0       # seconds of dead air before a friendly check-in
+CHATTER_CHECK_INTERVAL = 6.0   # how often the companion checks for silence
+
+SMALL_TALK = [
+    "While that runs — how's your day going so far?",
+    "This part takes a moment. Working on anything fun lately?",
+    "Hang tight, I'm on it. How have you been, by the way?",
+    "Still crunching through this one. Anything new with you?",
+    "Give me a sec here. Got anything exciting planned?",
+    "Almost there. So, how's everything on your end?",
+    "Thanks for your patience — this one's a bit meaty. How are you holding up?",
+    "Working through it. What got you into building this, if you don't mind me asking?",
+    "Bear with me, I'm doing this properly. Had a good week so far?",
+    "Nearly done with this step. Anything else on your mind while I work?",
+    "Still here, still building. How's the coffee situation over there?",
+    "This is the slow part — appreciate you waiting. What are you hoping to build next?",
+]
 
 # Self-contained verifier run inside the project: syntax-compile every .py file,
 # then import the entry points (main.py / app.py) so missing modules and broken
@@ -85,6 +109,7 @@ class AgentOrchestrator:
         self._event_bus = event_bus
         self._is_running = False
         self._interrupted = False
+        self._last_activity = 0.0  # monotonic timestamp of the last narration
         # When the user interrupts mid-execution we stash the state here so the
         # next user instruction can resume from where we left off instead of
         # starting from scratch.
@@ -109,6 +134,17 @@ class AgentOrchestrator:
         """
         self._is_running = True
         self._interrupted = False
+        self._last_activity = time.monotonic()
+
+        # Companion small-talk: any narration (from agents or the orchestrator)
+        # counts as "activity"; the companion only speaks when there's been a
+        # real silent gap, so it fills slow-model dead air without talking over
+        # actual progress updates.
+        async def _touch_activity(_e: Event) -> None:
+            self._last_activity = time.monotonic()
+
+        unsub_activity = self._event_bus.subscribe("agent.narration", _touch_activity)
+        companion = asyncio.create_task(self._companion_chatter(session_id))
 
         # Initialize state
         state: dict[str, Any] = {
@@ -231,6 +267,11 @@ class AgentOrchestrator:
             ))
         finally:
             self._is_running = False
+            companion.cancel()
+            try:
+                unsub_activity()
+            except Exception:
+                pass
 
         return state
 
@@ -462,11 +503,39 @@ class AgentOrchestrator:
         """Orchestrator-level narration (agent-agnostic commentary)."""
         if not text:
             return
+        self._last_activity = time.monotonic()
         await self._event_bus.publish(Event(
             type="agent.narration",
             payload={"text": text, "agent": "orchestrator"},
             session_id=session_id,
         ))
+
+    async def _companion_chatter(self, session_id: str) -> None:
+        """Keep the user company with warm small-talk during long silent gaps.
+
+        Fires only when there's been ``SILENCE_THRESHOLD`` seconds with no
+        narration — i.e. genuine dead air while a slow step runs. On fast
+        providers the gaps never get long enough, so it stays quiet.
+        """
+        idx = 0
+        try:
+            # Initial grace so we never chatter the instant a task starts.
+            await asyncio.sleep(SILENCE_THRESHOLD)
+            while self._is_running and not self._interrupted:
+                if (time.monotonic() - self._last_activity) >= SILENCE_THRESHOLD:
+                    line = SMALL_TALK[idx % len(SMALL_TALK)]
+                    idx += 1
+                    self._last_activity = time.monotonic()  # space out the chatter
+                    await self._event_bus.publish(Event(
+                        type="agent.narration",
+                        payload={"text": line, "agent": "rex", "kind": "smalltalk"},
+                        session_id=session_id,
+                    ))
+                await asyncio.sleep(CHATTER_CHECK_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("companion_chatter_stopped")
 
     def _friendly_step_intro(self, step_index: int, total_steps: int, agent_name: str, description: str) -> str:
         """Build a SHORT intro line for a plan step. Speed > flavor."""

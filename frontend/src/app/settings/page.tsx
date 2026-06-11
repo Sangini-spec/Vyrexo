@@ -1,73 +1,79 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 
+// The 5 curated voices (must match backend CURATED_VOICES / VOICE_PRESETS keys).
 const VOICE_OPTIONS = [
-  { id: "american_male", label: "American Male", accent: "American", gender: "Male", preview: "Hi, I'm your coding assistant. Let's build something great." },
-  { id: "american_female", label: "American Female", accent: "American", gender: "Female", preview: "Hi, I'm your coding assistant. Let's build something great." },
-  { id: "british_male", label: "British Male", accent: "British", gender: "Male", preview: "Hello, I'm your coding assistant. Shall we begin?" },
-  { id: "british_female", label: "British Female", accent: "British", gender: "Female", preview: "Hello, I'm your coding assistant. Shall we begin?" },
-  { id: "indian_male", label: "Indian Male", accent: "Indian", gender: "Male", preview: "Hi, I'm your coding assistant. Let's get started." },
-  { id: "indian_female", label: "Indian Female", accent: "Indian", gender: "Female", preview: "Hi, I'm your coding assistant. Let's get started." },
-  { id: "australian_male", label: "Australian Male", accent: "Australian", gender: "Male", preview: "G'day, I'm your coding assistant. Ready when you are." },
-  { id: "australian_female", label: "Australian Female", accent: "Australian", gender: "Female", preview: "G'day, I'm your coding assistant. Ready when you are." },
+  { id: "andrew", name: "Andrew", accent: "American", gender: "Male", vibe: "Warm & conversational" },
+  { id: "ava", name: "Ava", accent: "American", gender: "Female", vibe: "Friendly & natural" },
+  { id: "brian", name: "Brian", accent: "American", gender: "Male", vibe: "Casual & upbeat" },
+  { id: "sonia", name: "Sonia", accent: "British", gender: "Female", vibe: "Crisp & clear" },
+  { id: "ryan", name: "Ryan", accent: "British", gender: "Male", vibe: "Calm & steady" },
 ];
 
 const SPEED_OPTIONS = [
-  { value: "slow", label: "Slow", rate: 0.8 },
-  { value: "normal", label: "Normal", rate: 1.0 },
-  { value: "fast", label: "Fast", rate: 1.2 },
+  { value: "slow", label: "Slow", rate: "-15%" },
+  { value: "normal", label: "Normal", rate: "+0%" },
+  { value: "fast", label: "Fast", rate: "+15%" },
 ];
 
 export default function SettingsPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
-  const [selectedVoice, setSelectedVoice] = useState("american_male");
+  const [selectedVoice, setSelectedVoice] = useState("andrew");
   const [speed, setSpeed] = useState("normal");
-  const [accentFilter, setAccentFilter] = useState("All");
   const [saved, setSaved] = useState(false);
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     if (!loading && !user) router.push("/auth");
   }, [user, loading, router]);
 
-  // Load saved settings
   useEffect(() => {
-    const saved = localStorage.getItem("vyrexo_voice");
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setSelectedVoice(parsed.voice || "american_male");
-      setSpeed(parsed.speed || "normal");
+    const stored = localStorage.getItem("vyrexo_voice");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        // Map any legacy accent_gender key to a curated voice if possible.
+        if (VOICE_OPTIONS.some((v) => v.id === parsed.voice)) setSelectedVoice(parsed.voice);
+        setSpeed(parsed.speed || "normal");
+      } catch {}
     }
   }, []);
+
+  // Stop any preview audio on unmount.
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+    };
+  }, []);
+
+  const rateForSpeed = (s: string) => SPEED_OPTIONS.find((o) => o.value === s)?.rate || "+0%";
+
+  const handlePreview = async (voiceId: string) => {
+    // Stop a previous preview if one is playing.
+    audioRef.current?.pause();
+    setPreviewing(voiceId);
+    try {
+      const url = `/api/voice/preview?voice=${encodeURIComponent(voiceId)}&rate=${encodeURIComponent(rateForSpeed(speed))}`;
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => setPreviewing((p) => (p === voiceId ? null : p));
+      audio.onerror = () => setPreviewing((p) => (p === voiceId ? null : p));
+      await audio.play();
+    } catch {
+      setPreviewing(null);
+    }
+  };
 
   const handleSave = () => {
     localStorage.setItem("vyrexo_voice", JSON.stringify({ voice: selectedVoice, speed }));
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
-
-  const handlePreview = (voiceId: string) => {
-    const voice = VOICE_OPTIONS.find((v) => v.id === voiceId);
-    if (!voice) return;
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(voice.preview);
-    utterance.rate = SPEED_OPTIONS.find((s) => s.value === speed)?.rate || 1.0;
-
-    // Try to match browser voice to selected accent
-    const voices = window.speechSynthesis.getVoices();
-    const lang = voice.accent === "British" ? "en-GB" : voice.accent === "Indian" ? "en-IN" : voice.accent === "Australian" ? "en-AU" : "en-US";
-    const matchedVoice = voices.find((v) => v.lang.startsWith(lang));
-    if (matchedVoice) utterance.voice = matchedVoice;
-
-    window.speechSynthesis.speak(utterance);
-  };
-
-  const accents = ["All", ...new Set(VOICE_OPTIONS.map((v) => v.accent))];
-  const filteredVoices = accentFilter === "All" ? VOICE_OPTIONS : VOICE_OPTIONS.filter((v) => v.accent === accentFilter);
 
   if (loading || !user) return null;
 
@@ -76,32 +82,22 @@ export default function SettingsPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)]">
         <div className="flex items-center gap-4">
-          <a
-            href="/"
-            className="text-lg font-bold"
-            style={{
-              background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
+          <a href="/" className="text-lg font-bold" style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             Vyrexo
           </a>
           <span className="text-[var(--muted)] text-sm">/</span>
           <span className="text-sm text-[var(--text3)]">Voice Settings</span>
         </div>
-        <a href="/" className="text-xs text-[var(--muted)] hover:text-[var(--steel)] transition-colors">
-          Back to app
-        </a>
+        <a href="/app" className="text-xs text-[var(--muted)] hover:text-[var(--steel)] transition-colors">Back to app</a>
       </div>
 
       <div className="max-w-2xl mx-auto px-6 py-10">
         <h1 className="text-xl font-semibold text-[var(--text)]">Voice Settings</h1>
-        <p className="text-sm text-[var(--muted2)] mt-1">Choose how Rex sounds when talking to you</p>
+        <p className="text-sm text-[var(--muted2)] mt-1">Pick how Rex sounds during your day-to-day coding. Hit play to hear the real voice.</p>
 
         {/* Speed */}
         <div className="mt-8">
-          <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">Speed</label>
+          <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">Speaking speed</label>
           <div className="flex gap-2 mt-3">
             {SPEED_OPTIONS.map((s) => (
               <button
@@ -119,59 +115,55 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Accent filter */}
-        <div className="mt-8">
-          <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">Accent</label>
-          <div className="flex gap-2 mt-3">
-            {accents.map((a) => (
-              <button
-                key={a}
-                onClick={() => setAccentFilter(a)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  accentFilter === a
-                    ? "bg-[var(--midnight)] text-white"
-                    : "bg-[var(--surface)] border border-[var(--border2)] text-[var(--muted2)] hover:border-[var(--muted)]"
-                }`}
-              >
-                {a}
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* Voice selection */}
-        <div className="mt-6 grid grid-cols-2 gap-3">
-          {filteredVoices.map((voice) => (
-            <div
-              key={voice.id}
-              onClick={() => setSelectedVoice(voice.id)}
-              className={`p-4 rounded-xl border cursor-pointer transition-all ${
-                selectedVoice === voice.id
-                  ? "border-[var(--steel)] bg-[#3B59981A]"
-                  : "border-[var(--border2)] bg-[var(--surface)] hover:border-[var(--muted)]"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-medium text-[var(--text2)]">{voice.label}</div>
-                  <div className="text-xs text-[var(--muted)] mt-0.5">{voice.accent} &middot; {voice.gender}</div>
-                </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handlePreview(voice.id); }}
-                  className="w-8 h-8 rounded-full bg-[var(--border)] border border-[var(--border2)] flex items-center justify-center text-[var(--muted2)] hover:text-[var(--steel)] hover:border-[var(--steel)] transition-all"
-                  title="Preview voice"
+        <div className="mt-8">
+          <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">Voice</label>
+          <div className="mt-3 flex flex-col gap-3">
+            {VOICE_OPTIONS.map((voice) => {
+              const isSelected = selectedVoice === voice.id;
+              const isPlaying = previewing === voice.id;
+              return (
+                <div
+                  key={voice.id}
+                  onClick={() => setSelectedVoice(voice.id)}
+                  className={`flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all ${
+                    isSelected ? "border-[var(--steel)] bg-[#3B59981A]" : "border-[var(--border2)] bg-[var(--surface)] hover:border-[var(--muted)]"
+                  }`}
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                </button>
-              </div>
-              {selectedVoice === voice.id && (
-                <div className="mt-2 flex items-center gap-1 text-[10px] text-[var(--steel)]">
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
-                  Selected
+                  <div className="flex items-center gap-3">
+                    {/* Preview button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handlePreview(voice.id); }}
+                      className={`w-10 h-10 rounded-full flex items-center justify-center transition-all flex-shrink-0 ${
+                        isPlaying
+                          ? "bg-[var(--steel)] text-white"
+                          : "bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--steel)] hover:border-[var(--steel)]"
+                      }`}
+                      title={`Preview ${voice.name}`}
+                    >
+                      {isPlaying ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+                      ) : (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+                      )}
+                    </button>
+                    <div>
+                      <div className="text-sm font-medium text-[var(--text2)]">
+                        {voice.name} <span className="text-[var(--muted)] font-normal">· {voice.accent} {voice.gender}</span>
+                      </div>
+                      <div className="text-xs text-[var(--muted)] mt-0.5">{voice.vibe}</div>
+                    </div>
+                  </div>
+                  {isSelected && (
+                    <div className="flex items-center gap-1 text-[11px] text-[var(--steel)] flex-shrink-0">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                      Selected
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+              );
+            })}
+          </div>
         </div>
 
         {/* Save */}
@@ -182,7 +174,7 @@ export default function SettingsPage() {
           >
             Save Settings
           </button>
-          {saved && <span className="text-xs text-[#4ade80]">Saved!</span>}
+          {saved && <span className="text-xs text-[#4ade80]">Saved! Rex will use this voice.</span>}
         </div>
       </div>
     </div>

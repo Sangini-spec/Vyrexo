@@ -38,7 +38,7 @@ class STTSettings(BaseSettings):
 
 class TTSSettings(BaseSettings):
     provider: str = "edge"
-    voice: str = "en-US-GuyNeural"
+    voice: str = "en-US-AndrewNeural"
 
     model_config = SettingsConfigDict(env_prefix="TTS_", extra="ignore")
 
