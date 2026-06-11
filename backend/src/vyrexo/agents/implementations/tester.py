@@ -87,7 +87,7 @@ class TestingAgent(BaseAgent):
         test_results = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.bind_tools(all_tools).ainvoke(messages)
+            response = await self.call_llm(llm, messages, all_tools, state=state)
 
             if not response.tool_calls:
                 break
@@ -108,10 +108,8 @@ class TestingAgent(BaseAgent):
                 fn = all_tool_map.get(tool_name)
                 if fn is None:
                     result = {"error": f"Unknown tool: {tool_name}"}
-                elif asyncio.iscoroutinefunction(fn):
-                    result = await fn(**tool_args)
                 else:
-                    result = fn(**tool_args)
+                    result = await self.invoke_tool(fn, tool_args)
 
                 if tool_name in ("write_file", "create_file") and "error" not in result:
                     test_files_created.append(result.get("path", ""))

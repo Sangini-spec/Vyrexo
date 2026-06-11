@@ -82,7 +82,7 @@ class DocumentationAgent(BaseAgent):
         docs_created = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.bind_tools(FILE_TOOLS).ainvoke(messages)
+            response = await self.call_llm(llm, messages, FILE_TOOLS, state=state)
 
             if not response.tool_calls:
                 break
@@ -101,10 +101,8 @@ class DocumentationAgent(BaseAgent):
                 fn = FILE_TOOL_MAP.get(tool_name)
                 if fn is None:
                     result = {"error": f"Unknown tool: {tool_name}"}
-                elif asyncio.iscoroutinefunction(fn):
-                    result = await fn(**tool_args)
                 else:
-                    result = fn(**tool_args)
+                    result = await self.invoke_tool(fn, tool_args)
 
                 if tool_name in ("write_file", "create_file") and "error" not in result:
                     docs_created.append(result.get("path", ""))

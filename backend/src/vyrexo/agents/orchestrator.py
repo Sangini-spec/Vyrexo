@@ -20,6 +20,53 @@ from vyrexo.utils.errors import friendly_error
 
 logger = structlog.get_logger()
 
+# How many times the verify→fix loop may run before giving up.
+MAX_REPAIR_ROUNDS = 3
+
+# Self-contained verifier run inside the project: syntax-compile every .py file,
+# then import the entry points (main.py / app.py) so missing modules and broken
+# imports surface. Prints VERIFY_OK on success, or VERIFY_FAILED + the errors.
+VERIFY_SCRIPT = r'''
+import sys, py_compile, importlib, pathlib
+root = pathlib.Path('.').resolve()
+SKIP = {'venv', '.venv', 'env', 'site-packages', '__pycache__', '.git',
+        'node_modules', 'build', 'dist', '.next', '.mypy_cache', '.pytest_cache'}
+pyfiles = [p for p in root.rglob('*.py') if not (set(p.parts) & SKIP)]
+errors = []
+for p in pyfiles:
+    try:
+        py_compile.compile(str(p), doraise=True)
+    except py_compile.PyCompileError as e:
+        errors.append('SyntaxError in %s: %s' % (p.relative_to(root), getattr(e, 'msg', str(e))))
+if not errors:
+    sys.path.insert(0, str(root))
+    entries = [p for p in pyfiles if p.name in ('main.py', 'app.py')]
+    for p in entries:
+        mod = '.'.join(p.relative_to(root).with_suffix('').parts)
+        try:
+            importlib.import_module(mod)
+        except Exception as e:
+            errors.append('Importing %s (%s) failed: %s: %s' % (
+                mod, p.relative_to(root), type(e).__name__, e))
+if errors:
+    print('VERIFY_FAILED')
+    for e in errors[:10]:
+        print('- ' + e)
+    sys.exit(1)
+print('VERIFY_OK (%d files checked)' % len(pyfiles))
+'''
+
+# Repair task handed to the coder when verification fails. The exact error
+# report is injected so the coder fixes the real problem (create missing files,
+# correct imports, install missing deps via run_command, etc.).
+REPAIR_TASK = (
+    "The project currently FAILS to build/import. Fix it so it imports cleanly.\n\n"
+    "Verification output:\n{report}\n\n"
+    "Read the relevant files, then create any missing modules/files, correct the "
+    "imports, and fix syntax errors. If a third-party package is missing, install "
+    "it with run_command (pip install). Make the actual edits — do not just describe them."
+)
+
 
 class AgentOrchestrator:
     """
@@ -156,6 +203,18 @@ class AgentOrchestrator:
                     session_id=session_id,
                 ))
 
+            # Verify the build and repair any failures — but only for a real
+            # connected project that actually had code written or commands run
+            # (skip pure reviews/questions and the no-project case so we never
+            # compile the server's own repo).
+            agents_used = {s.get("agent_name") for s in plan}
+            if (
+                not self._interrupted
+                and project_path not in ("", ".")
+                and (agents_used & {"coding", "executor"})
+            ):
+                state = await self._verify_and_repair(state, session_id, project_path)
+
             # Build final response summary
             if not state.get("final_response"):
                 state["final_response"] = self._build_summary(state)
@@ -174,6 +233,90 @@ class AgentOrchestrator:
             self._is_running = False
 
         return state
+
+    # ── Build verification & repair ──────────────────────────────────────────
+
+    async def _verify_and_repair(
+        self, state: dict[str, Any], session_id: str, project_path: str
+    ) -> dict[str, Any]:
+        """Run a build/import check; if it fails, feed the error back to the
+        coder and loop until the project is green (or we hit the round cap).
+
+        This is what turns "the pipeline finished" into "the project actually
+        imports and runs" — it catches missing modules, broken imports, and
+        syntax errors that individual agent steps can leave behind.
+        """
+        for round_num in range(MAX_REPAIR_ROUNDS):
+            ok, report = await self._run_verification(project_path)
+            if ok:
+                msg = (
+                    "Verified — the project builds and imports cleanly."
+                    if round_num == 0
+                    else "Fixed it — the project builds and imports cleanly now."
+                )
+                await self._narrate(session_id, msg)
+                state.setdefault("artifacts", {})["verified"] = True
+                return state
+
+            if self._interrupted:
+                break
+
+            await self._narrate(
+                session_id,
+                "The build has an issue — let me read the error and fix it.",
+            )
+            logger.info("verify_failed_repairing", round=round_num + 1, report=report[:300])
+
+            # Hand the exact failure to the coder as a focused repair task.
+            plan = state.get("plan", [])
+            repair_step = {
+                "index": len(plan),
+                "description": REPAIR_TASK.format(report=report),
+                "agent_name": "coding",
+                "status": "running",
+                "result": None,
+            }
+            plan.append(repair_step)
+            state["plan"] = plan
+            state["current_step"] = len(plan) - 1
+
+            coder = AgentRegistry.create("coding")
+            state = await coder.execute(state)
+
+        # Final check after the repair rounds
+        ok, report = await self._run_verification(project_path)
+        state.setdefault("artifacts", {})["verified"] = ok
+        if ok:
+            await self._narrate(session_id, "The project builds and imports cleanly now.")
+        else:
+            await self._narrate(
+                session_id,
+                "I couldn't fully get it building after a few tries — there may be "
+                "a remaining issue worth a closer look.",
+            )
+            logger.warning("verify_unresolved", report=report[:300])
+        return state
+
+    async def _run_verification(self, project_path: str) -> tuple[bool, str]:
+        """Syntax-compile every .py file and import the entry points.
+
+        Returns (ok, report). A project with no Python entry files passes the
+        syntax stage and is treated as clean (JS/other builds aren't checked here).
+        """
+        import base64
+
+        from vyrexo.agents.tools.terminal import run_command
+
+        encoded = base64.b64encode(VERIFY_SCRIPT.encode("utf-8")).decode("ascii")
+        command = f'python -c "import base64;exec(base64.b64decode(\'{encoded}\').decode())"'
+        try:
+            result = await run_command(command=command, working_dir=project_path, timeout=90)
+        except Exception as e:
+            return False, f"Could not run verification: {e}"
+
+        out = ((result.get("stdout") or "") + "\n" + (result.get("stderr") or "")).strip()
+        ok = result.get("success", False) and "VERIFY_OK" in out
+        return ok, out[:1500]
 
     async def interrupt(self) -> None:
         """Interrupt the current execution."""

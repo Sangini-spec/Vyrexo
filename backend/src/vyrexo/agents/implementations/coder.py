@@ -92,7 +92,7 @@ class CodingAgent(BaseAgent):
         commands_run = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.bind_tools(tools_for_llm).ainvoke(messages)
+            response = await self.call_llm(llm, messages, tools_for_llm, state=state)
 
             # Check if Gemini wants to use tools
             if not response.tool_calls:
@@ -179,11 +179,8 @@ class CodingAgent(BaseAgent):
         elif name == "run_command":
             args["working_dir"] = project_root
 
-        # Some tools are async, some are sync
-        if asyncio.iscoroutinefunction(fn):
-            return await fn(**args)
-        else:
-            return fn(**args)
+        # Drop any model-invented extra args, then call (sync or async).
+        return await self.invoke_tool(fn, args)
 
     def _build_tool_defs(self) -> list[dict]:
         """Build tool definitions in the format LangChain expects."""

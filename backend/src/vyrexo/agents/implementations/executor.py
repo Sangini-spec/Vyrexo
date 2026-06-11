@@ -81,7 +81,7 @@ class ExecutionAgent(BaseAgent):
         commands_run = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
-            response = await llm.bind_tools(all_tools).ainvoke(messages)
+            response = await self.call_llm(llm, messages, all_tools, state=state)
 
             if not response.tool_calls:
                 break
@@ -107,10 +107,8 @@ class ExecutionAgent(BaseAgent):
                 fn = all_tool_map.get(tool_name)
                 if fn is None:
                     result = {"error": f"Unknown tool: {tool_name}"}
-                elif asyncio.iscoroutinefunction(fn):
-                    result = await fn(**tool_args)
                 else:
-                    result = fn(**tool_args)
+                    result = await self.invoke_tool(fn, tool_args)
 
                 if tool_name == "run_command":
                     commands_run.append(tool_args.get("command", ""))
