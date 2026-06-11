@@ -37,3 +37,6 @@ Thumbs.db
 htmlcov/
 .mypy_cache/
 frontend/tsconfig.tsbuildinfo
+
+# Logs
+*.log
