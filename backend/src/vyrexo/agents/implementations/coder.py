@@ -45,7 +45,15 @@ Rules:
 6. Handle errors appropriately
 7. Create parent directories if needed (write_file does this automatically)
 
-When you're done, respond with a summary of what you created/modified."""
+CRITICAL — you must ACTUALLY APPLY changes, not just describe them:
+- The task is only complete once you have called write_file (or create_file for
+  new files) to save the changed code to disk. Reading or explaining is NOT enough.
+- If you are not sure which file holds the code, call list_directory first to see
+  the real files, then read the correct one — do not guess filenames.
+- Workflow: list_directory / read_file (the real file) -> make the edit ->
+  write_file with the FULL updated file contents. Do not stop after only reading.
+
+When you're done, respond with a short summary of the files you actually wrote."""
 
 MAX_TOOL_ROUNDS = 15  # Max Gemini -> tool -> Gemini cycles
 

@@ -44,6 +44,11 @@ Rules:
    or describes the change — the user wants it implemented, not just analyzed.
 6. For build/fix requests, a good shape is: (executor setup if needed) →
    coding to implement → testing → review. "review" alone is NOT enough.
+7. When the request involves existing code, the relevant files (with their
+   paths) are included below the request as context. Name the EXACT file path
+   in each step's description (e.g. "Fix the off-by-one bug in calc.py's
+   max_value function") so the coder edits the right file. Group multiple fixes
+   to the SAME file into a single coding step rather than splitting them.
 
 Respond with a JSON array of steps. Each step has:
 - "description": What to do (be specific)
