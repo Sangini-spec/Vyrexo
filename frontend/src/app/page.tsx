@@ -262,11 +262,11 @@ export default function LandingPage() {
 
         {/* Main headline — typewriter */}
         <div className={`transition-all duration-[2s] delay-500 ${heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
-          <h1 className="text-center leading-[1.05] max-w-[900px]">
-            <span className="block text-[clamp(2rem,5vw,3.8rem)] font-medium text-[#a0a0b8] tracking-tight" style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+          <h1 className="text-center leading-[1.1] max-w-[1000px]">
+            <span className="block text-[clamp(2.2rem,5.5vw,4.2rem)] font-light italic text-[#b5b5c8] tracking-tight" style={{ fontFamily: "'Playfair Display', Georgia, serif" }}>
               <Typewriter text="Good evening, Developer." speed={50} delay={800} />
             </span>
-            <span className="block text-[clamp(2.5rem,6.5vw,5.5rem)] tracking-tight mt-3 font-bold" style={{ fontFamily: "'Segoe UI', system-ui, sans-serif", background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+            <span className="block text-[clamp(2.2rem,5vw,3.8rem)] tracking-tight mt-4 font-extrabold" style={{ fontFamily: "'Outfit', sans-serif", background: "linear-gradient(135deg, #4A72B2, #8CA2C5, #D2DBE8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
               <Typewriter text="I am Rex" speed={60} delay={2500} />
             </span>
           </h1>
@@ -274,7 +274,7 @@ export default function LandingPage() {
 
         {/* Subtitle */}
         <div className={`transition-all duration-[2s] delay-[3.5s] ${heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"}`}>
-          <p className="text-[16px] text-[#7a7a98] text-center max-w-[520px] mt-8 leading-[1.9] font-normal">
+          <p className="text-[19px] text-[#8e8eab] text-center max-w-[640px] mt-10 leading-[1.8] font-normal">
             Your voice-first AI coding agent. I plan, code, test, review, and document. All through natural conversation.
           </p>
         </div>
@@ -519,13 +519,13 @@ export default function LandingPage() {
           <span className="text-[11px] tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             Vyrexo
           </span>
-          <div className="flex gap-8 text-[10px] tracking-[2px] uppercase text-[#1a1a2a]">
-            <a href="#system" className="hover:text-[#5a7aa0] transition-colors duration-500">System</a>
-            <a href="#protocol" className="hover:text-[#5a7aa0] transition-colors duration-500">Protocol</a>
-            <a href="#agents" className="hover:text-[#5a7aa0] transition-colors duration-500">Agents</a>
-            <Link href="/auth" className="hover:text-[#5a7aa0] transition-colors duration-500">Login</Link>
+          <div className="flex gap-8 text-[11px] tracking-[2px] uppercase text-[#6a6a80]">
+            <a href="#system" className="hover:text-[#8a9cb8] transition-colors duration-500">System</a>
+            <a href="#protocol" className="hover:text-[#8a9cb8] transition-colors duration-500">Protocol</a>
+            <a href="#agents" className="hover:text-[#8a9cb8] transition-colors duration-500">Agents</a>
+            <Link href="/auth" className="hover:text-[#8a9cb8] transition-colors duration-500">Login</Link>
           </div>
-          <div className="text-[9px] text-[#1a1a2a] tracking-[1px]">Built for developers who&apos;d rather talk than type.</div>
+          <div className="text-[12px] text-[#6a6a80] tracking-[1px]">Built for developers who&apos;d rather talk than type.</div>
         </div>
       </footer>
 

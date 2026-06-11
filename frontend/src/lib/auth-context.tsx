@@ -1,8 +1,20 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import type { User, Session } from "@supabase/supabase-js";
+
+// Local dev fallback user. Only used when Supabase env vars are absent, so the
+// /app voice interface is reachable without auth during local development.
+// As soon as NEXT_PUBLIC_SUPABASE_URL/ANON_KEY are set, real auth takes over.
+const DEV_USER = {
+  id: "dev-local-user",
+  email: "dev@localhost",
+  app_metadata: {},
+  user_metadata: { name: "Local Dev" },
+  aud: "authenticated",
+  created_at: new Date().toISOString(),
+} as unknown as User;
 
 interface AuthContextType {
   user: User | null;
@@ -24,6 +36,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Dev fallback: no Supabase configured → log in as a local dev user so the
+    // app is usable locally. Remove env vars are added → this branch is skipped.
+    if (!isSupabaseConfigured) {
+      setUser(DEV_USER);
+      setLoading(false);
+      return;
+    }
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);

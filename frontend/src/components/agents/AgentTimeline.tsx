@@ -29,6 +29,14 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
+  if (steps.length === 0 && !narration) {
+    return (
+      <div className="text-center text-[var(--muted)] text-xs mt-8">
+        No tasks yet — give Rex a command and its plan will show up here.
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Narration box */}

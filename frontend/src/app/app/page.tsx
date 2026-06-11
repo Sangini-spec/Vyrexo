@@ -4,8 +4,9 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar, type Session } from "@/components/shared/Sidebar";
 import { Orb, type OrbState } from "@/components/voice/Orb";
-import { AgentTimeline, type AgentStep } from "@/components/agents/AgentTimeline";
+import { type AgentStep } from "@/components/agents/AgentTimeline";
 import { ModeIndicator } from "@/components/shared/ModeIndicator";
+import { RightPanel, type RightTab, type CodeEvent } from "@/components/shared/RightPanel";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useVoice } from "@/hooks/useVoice";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
@@ -17,6 +18,48 @@ const DEMO_SESSIONS: Record<string, Session[]> = {
     { id: "session-1", name: "New Session", icon: "\u{1F680}", status: "active", time: "now" },
   ],
 };
+
+// Home-screen quick actions. Each carries a concrete prompt (not just its
+// label) so clicking it kicks off real agent work. All operate inside a
+// project folder, so the work is scoped (and "create" tasks don't dump files
+// into the server's own directory).
+interface QuickAction {
+  title: string;
+  desc: string;
+  prompt: string;
+  connectHint: string;
+}
+
+const QUICK_ACTIONS: QuickAction[] = [
+  {
+    title: "Create a REST API",
+    desc: "FastAPI with auth and database",
+    prompt:
+      "Build a working REST API using FastAPI in this project. Actually create and write the real files — project structure, JWT-based authentication, a couple of example CRUD endpoints with request/response models, and a database layer — and install the dependencies. Implement it fully, don't just describe it, then run a quick check that it imports.",
+    connectHint: "First, pick the folder you want me to build the API in.",
+  },
+  {
+    title: "Build a React app",
+    desc: "Next.js with components",
+    prompt:
+      "Build a working starter web app using Next.js and React in this project. Actually create and write the real files — a clean project structure, a sample home page, and a few reusable components — and install the dependencies. Implement it fully, don't just describe it.",
+    connectHint: "First, pick the folder you want me to build the app in.",
+  },
+  {
+    title: "Debug my project",
+    desc: "Find and fix issues",
+    prompt:
+      "Go through this project, find the bugs and issues, and actually fix them by editing the real files. Implement the fixes (don't just list them), then run the tests to verify, and tell me what you changed.",
+    connectHint: "First, connect the project you want me to debug.",
+  },
+  {
+    title: "Review my code",
+    desc: "Security and quality check",
+    prompt:
+      "Review the code in this project for security vulnerabilities, bugs, and quality problems. Summarize the issues you find with suggested fixes.",
+    connectHint: "First, connect the project you want me to review.",
+  },
+];
 
 export default function App() {
   const { user, loading, signOut } = useAuth();
@@ -32,6 +75,42 @@ export default function App() {
   const [narration, setNarration] = useState("Say 'Rex' to start, or click the orb");
   const [textInput, setTextInput] = useState("");
   const [chatLog, setChatLog] = useState<Array<{ role: string; text: string }>>([]);
+
+  // Right panel: 4 tabs (Chat / Code / Task / Preview)
+  const [activeRightTab, setActiveRightTab] = useState<RightTab>("task");
+  const [codeEvents, setCodeEvents] = useState<CodeEvent[]>([]);
+  const [previewUrl, setPreviewUrl] = useState("");
+
+  // Connected project — all agent tasks for the session run inside this folder.
+  const [activeProject, setActiveProject] = useState<{ path: string; name: string } | null>(null);
+  // Mirror in a ref so the WS-connected effect can read it without re-subscribing,
+  // and track the last path we told the backend about to avoid duplicate sends.
+  const activeProjectRef = useRef<{ path: string; name: string } | null>(null);
+  const sentProjectPathRef = useRef<string>("");
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
+
+  // A quick-action command waiting to run. It's sent once the WebSocket is
+  // connected and (if the action needs one) a project is bound — so clicking a
+  // home-screen card reliably kicks off real work instead of dropping the
+  // message during the connection handshake.
+  const [pendingCmd, setPendingCmd] = useState<{ text: string; needsProject: boolean } | null>(null);
+  // True once the backend has confirmed (via project.loaded) that the project
+  // is bound for the CURRENT connection. Project-scoped commands wait for this
+  // so work never runs before the project directory is actually set server-side.
+  const [projectBound, setProjectBound] = useState(false);
+
+  // A yes/no proposal from Rex (e.g. "Should I implement these fixes?"). When
+  // set, we show Approve/Decline buttons — Claude-Code style.
+  const [pendingProposal, setPendingProposal] = useState<string | null>(null);
+
+  // Tracks whether Rex is currently speaking, read synchronously inside the
+  // voice callback so the user talking over Rex (barge-in) triggers an interrupt.
+  const speakingRef = useRef(false);
+  useEffect(() => {
+    speakingRef.current = orbState === "speaking";
+  }, [orbState]);
 
   // Redirect to auth if not logged in
   useEffect(() => {
@@ -73,16 +152,28 @@ export default function App() {
       }
 
       case "conversation.turn.completed": {
-        // This is Rex's reply for the turn. Goes into the chat AND drives orb.
+        // This is Rex's reply for the turn. The full (possibly long, markdown)
+        // text goes into the Chat tab; the narration box keeps a short line.
         const responseText = (msg.payload.text as string) || "";
         if (responseText.trim()) {
-          setNarration(responseText);
           setChatLog((prev) => [...prev, { role: "assistant", text: responseText }]);
+          const isReport = responseText.length > 180 || responseText.includes("\n");
+          if (isReport) {
+            setNarration("Done — the details are in the Chat tab.");
+            setActiveRightTab("chat");
+          } else {
+            setNarration(responseText);
+          }
         }
         setOrbState("speaking");
         // Backend streams the synthesized audio over the WS; no browser TTS fallback.
         break;
       }
+
+      case "action.proposed":
+        // Rex is asking to proceed (e.g. implement the reviewed fixes).
+        setPendingProposal((msg.payload.prompt as string) || "Want me to go ahead?");
+        break;
 
       case "agent.plan.created":
       case "agent.plan": {
@@ -116,6 +207,50 @@ export default function App() {
         );
         break;
 
+      case "agent.action": {
+        // A tool the agent ran (file read/write, command, git op) — feeds Code tab.
+        setCodeEvents((prev) => [
+          ...prev,
+          {
+            kind: "action",
+            agent: msg.payload.agent as string,
+            tool: msg.payload.tool as string,
+            category: msg.payload.category as string,
+            path: msg.payload.path as string,
+            command: msg.payload.command as string,
+            message: msg.payload.message as string,
+          },
+        ]);
+        break;
+      }
+
+      case "execution.output": {
+        const out = (msg.payload.output as string) || (msg.payload.text as string) || "";
+        if (out) setCodeEvents((prev) => [...prev, { kind: "output", text: out }]);
+        break;
+      }
+
+      case "project.loaded": {
+        if (msg.payload.ok) {
+          const name = (msg.payload.name as string) || "project";
+          const path = (msg.payload.path as string) || "";
+          const files = (msg.payload.files_indexed as number) ?? 0;
+          setActiveProject({ path, name });
+          setProjectBound(true);
+          try {
+            localStorage.setItem("vyrexo_project", JSON.stringify({ path, name }));
+          } catch {}
+          setNarration(`Connected to ${name}${files ? ` — indexed ${files} file${files === 1 ? "" : "s"}` : ""}. Everything I build now happens in this project.`);
+        } else {
+          setActiveProject(null);
+          setProjectBound(false);
+          sentProjectPathRef.current = "";
+          try { localStorage.removeItem("vyrexo_project"); } catch {}
+          setNarration((msg.payload.error as string) || "Couldn't connect that project.");
+        }
+        break;
+      }
+
       case "mode.changed":
         setMode(msg.payload.to as string);
         break;
@@ -148,6 +283,14 @@ export default function App() {
       setTranscript(text);
       if (isFinal && text.trim()) {
         const final = text.trim();
+        // Barge-in: if Rex is mid-sentence and the user speaks, talking over it
+        // means "stop and listen to me" — kill local audio and tell the backend
+        // to interrupt before sending the new instruction.
+        if (speakingRef.current) {
+          stopAudio();
+          sendMessage({ type: "execution.interrupt", payload: {} });
+        }
+        setPendingProposal(null); // a spoken reply answers any pending proposal
         setChatLog((prev) => [...prev, { role: "user", text: final }]);
         sendMessage({ type: "text.input", payload: { text: final } });
         // Optimistic UI: show "thinking" + a placeholder line so the user sees
@@ -157,7 +300,7 @@ export default function App() {
         setTranscript("");
       }
     },
-    [sendMessage]
+    [sendMessage, stopAudio]
   );
 
   const handleActivated = useCallback(() => {
@@ -186,6 +329,7 @@ export default function App() {
       setSteps([]);
       setNarration("Connecting...");
       setChatLog([]);
+      setCodeEvents([]);
       setTranscript("");
     },
     [activeSession, disconnect]
@@ -234,61 +378,156 @@ export default function App() {
     }
   }, [wsStatus, sendMessage]);
 
+  // Restore a previously connected project on load so tasks stay scoped to it.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("vyrexo_project");
+      if (saved) {
+        const p = JSON.parse(saved);
+        if (p?.path) setActiveProject({ path: p.path, name: p.name || "project" });
+      }
+    } catch {}
+  }, []);
+
+  // A fresh socket means the backend hasn't been told our project yet.
+  useEffect(() => {
+    if (wsStatus !== "connected") {
+      sentProjectPathRef.current = "";
+      setProjectBound(false);
+    }
+  }, [wsStatus]);
+
+  // Bind the connected project to the backend session whenever the socket is up.
+  useEffect(() => {
+    if (wsStatus === "connected" && activeProject && sentProjectPathRef.current !== activeProject.path) {
+      sentProjectPathRef.current = activeProject.path;
+      sendMessage({ type: "project.set", payload: { path: activeProject.path } });
+    }
+  }, [wsStatus, activeProject, sendMessage]);
+
+  // Flush a queued quick-action command once we're connected (and, for actions
+  // that operate on existing code, once a project is bound).
+  useEffect(() => {
+    if (!pendingCmd) return;
+    if (wsStatus !== "connected") return;
+    // Wait until the backend confirms the project is bound for this connection.
+    if (pendingCmd.needsProject && !projectBound) return;
+    const text = pendingCmd.text;
+    setPendingCmd(null);
+    setChatLog((prev) => [...prev, { role: "user", text }]);
+    sendMessage({ type: "text.input", payload: { text } });
+    setOrbState("thinking");
+    setNarration("On it — let me get started.");
+  }, [pendingCmd, wsStatus, projectBound, sendMessage]);
+
   // ── Project + VS Code ────────────────────────────────────────
+  // Browsers cannot expose an absolute filesystem path, so the directory
+  // picker is used (when available) only to suggest a folder name; the user
+  // confirms the absolute path. The backend validates it, indexes it, and
+  // scopes every subsequent task in this session to that folder.
   const handleConnectProject = useCallback(async () => {
-    // Use browser's directory picker if available
+    let suggestedName = "";
     try {
       if ("showDirectoryPicker" in window) {
         const dirHandle = await (window as any).showDirectoryPicker();
-        const path = dirHandle.name; // Browser only gives the folder name, not full path
-        // For full path, user needs to type it — prompt with input
-        const fullPath = prompt("Enter the full project path:", `C:\\Users\\kashy\\${dirHandle.name}`);
-        if (fullPath) {
-          await fetch("http://127.0.0.1:8001/api/projects/load", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: fullPath }),
-          });
-          setNarration(`Project loaded: ${fullPath}`);
-        }
-      } else {
-        const fullPath = prompt("Enter the full project path:");
-        if (fullPath) {
-          await fetch("http://127.0.0.1:8001/api/projects/load", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: fullPath }),
-          });
-          setNarration(`Project loaded: ${fullPath}`);
-        }
+        suggestedName = dirHandle.name || "";
       }
-    } catch (err) {
-      console.error("Failed to connect project:", err);
+    } catch {
+      return; // user dismissed the picker
     }
-  }, []);
+
+    let lastBase = "";
+    try {
+      lastBase = localStorage.getItem("vyrexo_project_base") || "";
+    } catch {}
+
+    const def =
+      activeProjectRef.current?.path ||
+      (lastBase && suggestedName ? `${lastBase}\\${suggestedName}` : suggestedName);
+
+    const entered = prompt("Full path to your project folder (e.g. C:\\Users\\you\\my-app):", def);
+    if (!entered || !entered.trim()) return;
+
+    const path = entered.trim();
+    const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "project";
+
+    // Remember the parent directory to pre-fill the prompt next time.
+    try {
+      const base = path.replace(/[\\/]+$/, "").slice(0, -name.length).replace(/[\\/]+$/, "");
+      if (base) localStorage.setItem("vyrexo_project_base", base);
+    } catch {}
+
+    setActiveProject({ path, name });
+    setNarration(`Connecting to ${name}...`);
+    sentProjectPathRef.current = ""; // force a (re)send of the new path
+
+    if (!activeSession) {
+      // Start a session; the WS-connected effect binds the project once open.
+      handleSessionClick(`session-${Date.now()}`);
+    } else if (wsStatus === "connected") {
+      sentProjectPathRef.current = path;
+      sendMessage({ type: "project.set", payload: { path } });
+    }
+  }, [activeSession, wsStatus, sendMessage, handleSessionClick]);
 
   const handleOpenVSCode = useCallback(async () => {
     try {
       await fetch("http://127.0.0.1:8001/api/projects/vscode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "." }),
+        body: JSON.stringify({ path: activeProject?.path || "." }),
       });
     } catch (err) {
       console.error("Failed to open VS Code:", err);
     }
-  }, []);
+  }, [activeProject]);
+
+  // Run a home-screen quick action: queue its real command, then make sure we
+  // have a session and (for project-scoped work) a connected project. The
+  // pendingCmd effect sends the command once everything is ready.
+  const runQuickAction = useCallback(
+    (action: QuickAction) => {
+      setPendingCmd({ text: action.prompt, needsProject: true });
+
+      if (!activeProjectRef.current) {
+        // No project yet — open the connect flow (which also starts a session).
+        // The command flushes automatically once project.loaded confirms.
+        setNarration(action.connectHint);
+        handleConnectProject();
+        return;
+      }
+
+      // Project already connected — just make sure a session is live; the
+      // pendingCmd effect flushes the command as soon as the socket is up.
+      if (!activeSession) handleSessionClick(`session-${Date.now()}`);
+    },
+    [activeSession, handleConnectProject, handleSessionClick]
+  );
 
   // ── Text input ──────────────────────────────────────────────
   const handleTextSubmit = useCallback(() => {
     if (!textInput.trim()) return;
     const text = textInput.trim();
+    setPendingProposal(null); // any typed message supersedes a pending yes/no
     setChatLog((prev) => [...prev, { role: "user", text }]);
     sendMessage({ type: "text.input", payload: { text } });
     setTranscript(text);
     setTextInput("");
     setOrbState("thinking");
   }, [textInput, sendMessage]);
+
+  // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
+  const respondToProposal = useCallback(
+    (accept: boolean) => {
+      const text = accept ? "yes" : "no";
+      setPendingProposal(null);
+      setChatLog((prev) => [...prev, { role: "user", text }]);
+      sendMessage({ type: "text.input", payload: { text } });
+      setOrbState("thinking");
+      setNarration(accept ? "On it — implementing the fixes now." : "Okay, leaving the code as is.");
+    },
+    [sendMessage]
+  );
 
   // ── Keyboard shortcuts ──────────────────────────────────────
   useEffect(() => {
@@ -365,20 +604,10 @@ export default function App() {
 
           {/* Quick actions */}
           <div className="flex gap-[10px] mt-10">
-            {[
-              { title: "Create a REST API", desc: "FastAPI with auth and database" },
-              { title: "Build a React app", desc: "Next.js with components" },
-              { title: "Debug my project", desc: "Find and fix issues" },
-              { title: "Review my code", desc: "Security and quality check" },
-            ].map((action) => (
+            {QUICK_ACTIONS.map((action) => (
               <div
                 key={action.title}
-                onClick={() => {
-                  const sid = `session-${Date.now()}`;
-                  handleSessionClick(sid);
-                  // Send the quick action as first command after connection
-                  setTimeout(() => sendMessage({ type: "text.input", payload: { text: action.title } }), 1000);
-                }}
+                onClick={() => runQuickAction(action)}
                 className="p-[10px_16px] bg-[#0e0e14] border border-[var(--border2)] rounded-[10px] cursor-pointer max-w-[180px] hover:border-[#3B599833] hover:bg-[#3B599808] transition-all"
               >
                 <div className="text-[12.5px] text-[var(--text3)] font-medium">{action.title}</div>
@@ -429,6 +658,20 @@ export default function App() {
         {/* Floating bar */}
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-[10px] px-[14px] py-[5px] bg-[#0a0a0f99] backdrop-blur-xl border border-[var(--border2)] rounded-xl">
           <ModeIndicator mode={mode} />
+          <button
+            onClick={handleConnectProject}
+            title={activeProject ? `Working in ${activeProject.path} — click to change` : "Connect a project folder"}
+            className={`flex items-center gap-[5px] text-[11px] font-medium px-2 py-[3px] rounded-md border transition-all max-w-[180px] ${
+              activeProject
+                ? "text-[var(--ice)] border-[#3B599840] bg-[#3B599815] hover:bg-[#3B599825]"
+                : "text-[var(--muted)] border-[var(--border2)] bg-[var(--border)] hover:text-[var(--text3)] hover:border-[var(--steel)]"
+            }`}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            <span className="truncate">{activeProject ? activeProject.name : "Connect project"}</span>
+          </button>
           <div className={`w-[6px] h-[6px] rounded-full ${wsStatus === "connected" ? "bg-[#22c55e] shadow-[0_0_6px_#22c55e88]" : wsStatus === "connecting" ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`} />
           <span className="text-[11px] text-[var(--muted2)]">{wsStatus}</span>
           <span className="text-[10px] text-[var(--muted)] px-1.5 py-0.5 rounded bg-[var(--border)] border border-[var(--border2)]">
@@ -455,6 +698,25 @@ export default function App() {
         <div className="flex-1 flex flex-col items-center justify-center" style={{ background: "radial-gradient(ellipse at center, #0a0e1a 0%, #07070a 70%)" }}>
           <Orb state={orbState} transcript={transcript || undefined} onClick={forceActivate} />
 
+          {/* Proposal banner — Rex asking to proceed (e.g. implement fixes) */}
+          {pendingProposal && (
+            <div className="absolute bottom-[100px] left-1/2 -translate-x-1/2 flex items-center gap-3 w-full max-w-[440px] px-4 py-[10px] mx-4 bg-[#0e0e14] border border-[#3B599840] rounded-xl shadow-lg">
+              <span className="flex-1 text-xs text-[var(--ice)]">{pendingProposal}</span>
+              <button
+                onClick={() => respondToProposal(true)}
+                className="px-3 py-[5px] bg-[var(--midnight)] text-white text-xs font-semibold rounded-md hover:bg-[var(--steel)] transition-all"
+              >
+                Yes, implement
+              </button>
+              <button
+                onClick={() => respondToProposal(false)}
+                className="px-3 py-[5px] bg-transparent text-[var(--muted2)] text-xs font-medium rounded-md border border-[var(--border2)] hover:text-[var(--text3)] hover:border-[var(--steel)] transition-all"
+              >
+                Not now
+              </button>
+            </div>
+          )}
+
           {/* Text input */}
           <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex items-center gap-2 w-full max-w-[400px] px-4">
             <input
@@ -477,64 +739,26 @@ export default function App() {
         </div>
       </div>
 
-      {/* Right panel */}
-      <div className={`flex flex-col flex-shrink-0 bg-[#09090d] border-l border-[var(--border)] transition-all duration-300 overflow-hidden ${rightPanelCollapsed ? "w-0 border-l-0 opacity-0 pointer-events-none" : "w-[420px]"}`}>
-        <div className="flex border-b border-[var(--border)] px-[6px]">
-          {["Agents", "Chat"].map((tab, i) => (
-            <button key={tab} className={`py-[9px] px-4 text-xs font-medium border-b-2 transition-all ${i === 0 ? "text-[var(--steel)] border-[var(--steel)]" : "text-[var(--muted)] border-transparent"}`}>
-              {tab}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-3">
-          {/* Narration */}
-          <div className="flex items-center gap-2 p-[9px_12px] mb-3 rounded-md border-l-[3px] border-l-[var(--steel)] bg-[#7B93B008] border border-[#7B93B015]">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--steel)" strokeWidth="2" className="flex-shrink-0 opacity-70">
-              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-            </svg>
-            <span className="text-xs text-[var(--ice)] italic">{narration}</span>
-          </div>
-
-          {/* Agent steps */}
-          {steps.length > 0 ? (
-            <AgentTimeline steps={steps} />
-          ) : (
-            <div className="text-center text-[var(--muted)] text-xs mt-8">
-              Agent activity will appear here when you give a command
-            </div>
-          )}
-
-          {/* Chat log */}
-          {chatLog.length > 0 && (
-            <div className="mt-4 border-t border-[var(--border)] pt-3">
-              <div className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-2">Conversation</div>
-              {chatLog.map((msg, i) => (
-                <div key={i} className={`text-xs mb-2 ${msg.role === "user" ? "text-[var(--ice)]" : "text-[var(--text4)]"}`}>
-                  <span className="font-semibold text-[10px] uppercase tracking-wide">{msg.role === "user" ? "You" : "Rex"}: </span>
-                  {msg.text}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Bottom bar */}
-        <div className="flex items-center justify-between px-[14px] py-[6px] bg-[#08080c] border-t border-[var(--border)] text-[10.5px] text-[var(--muted)]">
-          <span>{voiceMode === "active_conversation" ? "Conversation active" : "Waiting for 'Rex'"}</span>
-          <button
-            onClick={() => {
-              stopAudio();
-              try { window.speechSynthesis.cancel(); } catch {}
-              sendMessage({ type: "execution.interrupt", payload: {} });
-              setOrbState("idle");
-            }}
-            className="flex items-center gap-1 bg-[#dc262622] text-[#f87171] border border-[#dc262633] px-3 py-[3px] rounded-[5px] text-[10.5px] font-semibold hover:bg-[#dc262644] transition-all"
-          >
-            Interrupt
-          </button>
-        </div>
-      </div>
+      {/* Right panel — 4 tabs: Chat / Code / Task / Preview */}
+      <RightPanel
+        collapsed={rightPanelCollapsed}
+        activeTab={activeRightTab}
+        onTabChange={setActiveRightTab}
+        narration={narration}
+        steps={steps}
+        chatLog={chatLog}
+        codeEvents={codeEvents}
+        previewUrl={previewUrl}
+        onPreviewUrlChange={setPreviewUrl}
+        voiceMode={voiceMode}
+        onInterrupt={() => {
+          stopAudio();
+          try { window.speechSynthesis.cancel(); } catch {}
+          sendMessage({ type: "execution.interrupt", payload: {} });
+          setOrbState("idle");
+          setNarration("Interrupted. What would you like instead?");
+        }}
+      />
     </div>
   );
 }

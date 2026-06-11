@@ -9,6 +9,7 @@ export type ClientMessageType =
   | "text.input"
   | "execution.interrupt"
   | "mode.switch"
+  | "project.set"
   | "session.heartbeat";
 
 export interface ClientMessage {
