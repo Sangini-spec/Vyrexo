@@ -31,10 +31,12 @@ EVENT_TO_WS: dict[str, ServerMessageType] = {
     "agent.action.*": ServerMessageType.AGENT_ACTION,
     "agent.conflict": ServerMessageType.AGENT_CONFLICT,
     "agent.narration": ServerMessageType.AGENT_NARRATION,
+    "action.proposed": ServerMessageType.ACTION_PROPOSED,
     "execution.command.output": ServerMessageType.EXECUTION_OUTPUT,
     "execution.interrupt.acknowledged": ServerMessageType.EXECUTION_INTERRUPTED,
     "mode.transition": ServerMessageType.MODE_CHANGED,
     "context.file.changed": ServerMessageType.CONTEXT_FILE_CHANGED,
+    "project.loaded": ServerMessageType.PROJECT_LOADED,
 }
 
 # Patterns to subscribe to on the EventBus
@@ -45,10 +47,12 @@ FORWARD_PATTERNS = [
     "voice.transcription.*",
     "voice.output.*",
     "agent.*",
+    "action.*",
     "execution.*",
     "mode.*",
     "context.file.*",
     "session.*",
+    "project.loaded",
     "conversation.turn.completed",
 ]
 
@@ -134,6 +138,13 @@ class SessionWebSocketHandler:
         elif msg.type == ClientMessageType.MODE_SWITCH:
             await self._event_bus.publish(Event(
                 type="mode.switch.requested",
+                payload=msg.payload,
+                session_id=self._session_id,
+            ))
+
+        elif msg.type == ClientMessageType.PROJECT_SET:
+            await self._event_bus.publish(Event(
+                type="project.set.requested",
                 payload=msg.payload,
                 session_id=self._session_id,
             ))

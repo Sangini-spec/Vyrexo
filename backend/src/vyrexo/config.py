@@ -1,4 +1,8 @@
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables from .env file
+load_dotenv(find_dotenv())
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict

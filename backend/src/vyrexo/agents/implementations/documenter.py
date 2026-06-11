@@ -123,7 +123,7 @@ class DocumentationAgent(BaseAgent):
                     name=tr["name"],
                 ))
 
-        final_text = response.content if hasattr(response, "content") else "Documentation generated."
+        final_text = self.response_text(response) or "Documentation generated."
 
         artifacts.setdefault("docs_created", []).extend(docs_created)
         state["artifacts"] = artifacts

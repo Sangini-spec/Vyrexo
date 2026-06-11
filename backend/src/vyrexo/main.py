@@ -65,6 +65,11 @@ voice_pipeline: VoicePipeline | None = None
 # Per-session voice config (accent, rate). Updated via voice.config client messages.
 _session_voice_configs: dict[str, VoiceConfig] = {}
 
+# Per-session connected project directory. All agent work for a session runs
+# inside this path. Set via project.set client messages; defaults to "." (the
+# server's CWD) until a project is connected.
+_session_projects: dict[str, str] = {}
+
 # Per-session TTS work queues. Producers (narration / turn-completed handlers)
 # push text onto the queue. A single worker per session drains it sequentially,
 # which means narrations are spoken in order without overlap — but synthesis
@@ -75,6 +80,19 @@ _tts_queues: dict[str, asyncio.Queue[str]] = {}
 _tts_workers: dict[str, asyncio.Task] = {}
 # Last spoken line per session so we can drop duplicates that arrive in quick succession
 _tts_recent: dict[str, tuple[str, float]] = {}
+
+
+def _drain_tts_queue(session_id: str) -> None:
+    """Empty any pending TTS items for a session (called on interrupt)."""
+    q = _tts_queues.get(session_id)
+    if q is None:
+        return
+    while not q.empty():
+        try:
+            q.get_nowait()
+            q.task_done()
+        except Exception:
+            break
 
 
 @asynccontextmanager
@@ -142,6 +160,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     event_bus.subscribe("agent.narration", _handle_narration)
     event_bus.subscribe("conversation.turn.completed", _handle_turn_completed)
     event_bus.subscribe("voice.config.requested", _handle_voice_config)
+    event_bus.subscribe("project.set.requested", _handle_project_set)
 
     # Initialize database (creates tables if they don't exist)
     try:
@@ -174,12 +193,16 @@ async def _handle_conversation_turn(event: Event) -> None:
     if not text.strip():
         return
 
+    # Run all work inside the session's connected project (set via project.set).
+    # Falls back to the server CWD if no project has been connected yet.
+    project_path = _session_projects.get(session_id) or "."
+
     # Process through the full pipeline:
     # intent classification → context retrieval → agent orchestration → response
     response = await conversation_manager.process_turn(
         transcript=TranscriptionResult(text=text),
         session_id=session_id,
-        project_path=".",  # TODO: get from session config
+        project_path=project_path,
     )
 
     # Publish response for TTS narration + WebSocket forwarding
@@ -191,9 +214,24 @@ async def _handle_conversation_turn(event: Event) -> None:
 
 
 async def _handle_interrupt(event: Event) -> None:
-    """Handle interrupt requests — pause the orchestrator."""
+    """Handle interrupt requests — pause the orchestrator and kill TTS immediately."""
+    session_id = event.session_id or ""
+
+    # 1. Stop the agent pipeline
     if orchestrator is not None:
         await orchestrator.interrupt()
+
+    # 2. Stop Edge-TTS mid-stream and drain any queued lines so Rex goes silent immediately
+    if voice_pipeline is not None:
+        await voice_pipeline.interrupt()
+    _drain_tts_queue(session_id)
+
+    # 3. Acknowledge so the frontend can reset its state
+    await event_bus.publish(Event(
+        type="execution.interrupt.acknowledged",
+        payload={"message": "Interrupted. What would you like instead?"},
+        session_id=session_id,
+    ))
 
 
 def _voice_config_for(session_id: str) -> VoiceConfig:
@@ -319,6 +357,62 @@ async def _handle_voice_config(event: Event) -> None:
 
     _session_voice_configs[session_id] = VoiceConfig(voice=edge_voice, rate=rate)
     logger.info("voice_config_updated", session_id=session_id, voice=edge_voice, rate=rate)
+
+
+async def _handle_project_set(event: Event) -> None:
+    """Bind a project directory to a session and index it for context.
+
+    After this, every turn for ``session_id`` runs inside ``path`` (file ops,
+    shell commands, and RAG all scope to the connected project). Publishes a
+    ``project.loaded`` event the frontend uses to show the project name (or an
+    error if the path is invalid).
+    """
+    session_id = event.session_id or ""
+    raw_path = ((event.payload or {}).get("path") or "").strip()
+
+    if not raw_path:
+        return
+
+    p = Path(raw_path).expanduser()
+    if not p.exists() or not p.is_dir():
+        logger.warning("project_set_invalid", session_id=session_id, path=raw_path)
+        await event_bus.publish(Event(
+            type="project.loaded",
+            payload={"ok": False, "error": "That folder could not be found.", "path": raw_path},
+            session_id=session_id,
+        ))
+        return
+
+    resolved = str(p.resolve())
+    _session_projects[session_id] = resolved
+    logger.info("project_set", session_id=session_id, path=resolved)
+
+    # Let the user know we're indexing (can take a moment on large projects)
+    await event_bus.publish(Event(
+        type="agent.narration",
+        payload={"text": f"Connecting to {p.name}. Indexing it now so I know your codebase.", "agent": "rex"},
+        session_id=session_id,
+    ))
+
+    files_indexed = 0
+    if context_engine is not None:
+        try:
+            stats = await context_engine.load_project(resolved)
+            files_indexed = int(stats.get("files_indexed", 0) or 0)
+        except Exception:
+            logger.exception("project_index_failed", path=resolved)
+
+    await event_bus.publish(Event(
+        type="project.loaded",
+        payload={
+            "ok": True,
+            "path": resolved,
+            "name": p.name,
+            "files_indexed": files_indexed,
+        },
+        session_id=session_id,
+    ))
+    logger.info("project_loaded", session_id=session_id, name=p.name, files=files_indexed)
 
 
 # ── App Creation ─────────────────────────────────────────────────

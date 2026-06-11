@@ -23,6 +23,7 @@ class ClientMessageType(str, Enum):
     TEXT_INPUT = "text.input"
     EXECUTION_INTERRUPT = "execution.interrupt"
     MODE_SWITCH = "mode.switch"
+    PROJECT_SET = "project.set"
     SESSION_HEARTBEAT = "session.heartbeat"
 
 
@@ -49,6 +50,7 @@ class ServerMessageType(str, Enum):
     AGENT_ACTION = "agent.action"
     AGENT_CONFLICT = "agent.conflict"
     AGENT_NARRATION = "agent.narration"
+    ACTION_PROPOSED = "action.proposed"
 
     # Execution
     EXECUTION_OUTPUT = "execution.output"
@@ -57,8 +59,9 @@ class ServerMessageType(str, Enum):
     # Mode
     MODE_CHANGED = "mode.changed"
 
-    # Context
+    # Context / Project
     CONTEXT_FILE_CHANGED = "context.file.changed"
+    PROJECT_LOADED = "project.loaded"
 
     # Conversation
     CONVERSATION_TURN_COMPLETED = "conversation.turn.completed"

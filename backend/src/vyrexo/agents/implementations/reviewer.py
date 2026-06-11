@@ -121,7 +121,7 @@ class ReviewAgent(BaseAgent):
                     name=tr["name"],
                 ))
 
-        final_text = response.content if hasattr(response, "content") else "Review completed."
+        final_text = self.response_text(response) or "Review completed."
 
         # Phase 2: Parse issues and populate state.conflicts if critical
         artifacts["review_result"] = final_text[:1000]

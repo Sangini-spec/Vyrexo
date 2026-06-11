@@ -127,7 +127,7 @@ class CodingAgent(BaseAgent):
                 ))
 
         # Update state with results
-        final_text = response.content if hasattr(response, "content") else "Code changes completed."
+        final_text = self.response_text(response) or "Code changes completed."
 
         artifacts = state.get("artifacts", {})
         artifacts.setdefault("files_modified", []).extend(files_modified)

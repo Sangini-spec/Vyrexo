@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vyrexo.events.bus import Event, EventBus
+from vyrexo.utils.llm import response_text
 
 
 @dataclass
@@ -56,6 +57,11 @@ class BaseAgent(ABC):
         """Return the system prompt for this agent. Override per agent."""
         return f"You are the {self.name} agent. {self.description}"
 
+    @staticmethod
+    def response_text(response: Any) -> str:
+        """Normalize an LLM response's content to plain text (str or list parts)."""
+        return response_text(response)
+
     async def narrate(self, state: dict[str, Any], text: str) -> None:
         """
         Publish a narration event so the user hears what the agent is doing
@@ -90,12 +96,58 @@ class BaseAgent(ABC):
         "search_codebase",
     }
 
+    # Maps each tool to the action category used in its agent.action.<category>
+    # event, so the frontend Code tab can group/colour file ops vs commands vs git.
+    _ACTION_CATEGORIES: dict[str, str] = {
+        "read_file": "file_read",
+        "list_directory": "file_read",
+        "write_file": "file_write",
+        "create_file": "file_write",
+        "delete_file": "file_write",
+        "run_command": "terminal_exec",
+        "git_add": "git_op",
+        "git_commit": "git_op",
+        "git_push": "git_op",
+        "git_branch": "git_op",
+        "git_status": "git_op",
+        "git_diff": "git_op",
+        "git_log": "git_op",
+    }
+
+    async def emit_action(self, state: dict[str, Any], tool_name: str, args: dict[str, Any]) -> None:
+        """
+        Publish a structured ``agent.action.<category>`` event describing a tool
+        the agent is running. Unlike narration (which is spoken and skips fast
+        tools), this fires for EVERY tool so the frontend Code/activity tab gets
+        a complete feed of files read/written, commands run, and git operations.
+        """
+        event_bus: EventBus | None = state.get("event_bus")
+        if event_bus is None:
+            return
+        session_id: str = state.get("session_id", "") or ""
+        category = self._ACTION_CATEGORIES.get(tool_name, "tool")
+        await event_bus.publish(Event(
+            type=f"agent.action.{category}",
+            payload={
+                "agent": self.name,
+                "tool": tool_name,
+                "category": category,
+                "path": args.get("path") or args.get("file_path") or "",
+                "command": args.get("command") or "",
+                "message": args.get("message") or "",
+            },
+            session_id=session_id,
+        ))
+
     async def narrate_tool_call(self, state: dict[str, Any], tool_name: str, args: dict[str, Any]) -> None:
         """
         Build a SHORT narration for the tool the agent is about to run.
         Skips fast/quiet tools (file reads, git inspections) so we only
         speak about actions that actually take time or change state.
         """
+        # Always surface the action in the structured feed, even for silent tools.
+        await self.emit_action(state, tool_name, args)
+
         if tool_name in self._SILENT_TOOLS:
             return
 

@@ -137,7 +137,7 @@ class TestingAgent(BaseAgent):
                     name=tr["name"],
                 ))
 
-        final_text = response.content if hasattr(response, "content") else "Testing completed."
+        final_text = self.response_text(response) or "Testing completed."
 
         artifacts.setdefault("test_files", []).extend(test_files_created)
         artifacts["test_results"] = test_results

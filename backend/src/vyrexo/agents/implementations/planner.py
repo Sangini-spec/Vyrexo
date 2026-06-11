@@ -37,6 +37,13 @@ Rules:
 2. Each step must specify which agent handles it
 3. Order steps logically (e.g., init project before writing code)
 4. Be specific about what each step should accomplish
+5. If the request asks to build, create, add, fix, refactor, debug, or change
+   anything, you MUST include implementation steps that actually do the work:
+   use "coding" to write/edit the real files (and "executor" for installs,
+   scaffolding, or running the project). Never return a plan that only reviews
+   or describes the change — the user wants it implemented, not just analyzed.
+6. For build/fix requests, a good shape is: (executor setup if needed) →
+   coding to implement → testing → review. "review" alone is NOT enough.
 
 Respond with a JSON array of steps. Each step has:
 - "description": What to do (be specific)
@@ -90,7 +97,7 @@ class PlannerAgent(BaseAgent):
 
         # Parse the plan from JSON response
         try:
-            plan_text = response.content.strip()
+            plan_text = self.response_text(response).strip()
             # Handle markdown code blocks
             if plan_text.startswith("```"):
                 plan_text = plan_text.split("```")[1]
@@ -113,7 +120,7 @@ class PlannerAgent(BaseAgent):
             logger.info("planner_created_plan", steps=len(plan))
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.error("planner_parse_error", error=str(e), response=response.content[:200])
+            logger.error("planner_parse_error", error=str(e), response=self.response_text(response)[:200])
             # Fallback: create a single coding step
             state["plan"] = [{
                 "index": 0,

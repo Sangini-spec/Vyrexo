@@ -16,6 +16,7 @@ import structlog
 from vyrexo.agents.registry import AgentRegistry
 from vyrexo.agents.state import AgentState
 from vyrexo.events.bus import Event, EventBus
+from vyrexo.utils.errors import friendly_error
 
 logger = structlog.get_logger()
 
@@ -161,10 +162,12 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.exception("orchestrator_error")
-            state["final_response"] = f"I encountered an error: {str(e)}"
+            # Speak a clean message, but keep the raw error in the event payload
+            # (the frontend can log it; it's never read aloud).
+            state["final_response"] = friendly_error(e)
             await self._event_bus.publish(Event(
                 type="agent.error",
-                payload={"error": str(e)},
+                payload={"error": str(e), "message": state["final_response"]},
                 session_id=session_id,
             ))
         finally:

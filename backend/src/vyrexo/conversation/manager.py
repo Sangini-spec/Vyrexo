@@ -20,6 +20,8 @@ from vyrexo.conversation.intent import Intent, IntentClassifier
 from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
+from vyrexo.utils.errors import friendly_error
+from vyrexo.utils.llm import response_text
 from vyrexo.voice.stt.base import TranscriptionResult
 
 
@@ -65,6 +67,11 @@ class ConversationManager:
         self._memory = memory_store
         self._modes = mode_machine
         self._intent_classifier = IntentClassifier()
+        # Per-session pending implementation proposal. After a read-only task
+        # (e.g. a review) we offer to implement the fixes; if the user agrees on
+        # their next turn, we run the full coder/executor/tester pipeline using
+        # the stashed context here. Maps session_id -> the analysis text to act on.
+        self._pending_impl: dict[str, str] = {}
 
     async def process_turn(
         self,
@@ -96,7 +103,7 @@ class ConversationManager:
         logger.info("intent_classified", intent=intent.value, text=text[:50])
 
         # Route based on intent
-        response = await self._route_intent(intent, meta, text, session_id, project_path)
+        response = await self._route_intent(intent, meta, transcript, session_id, project_path)
 
         # Store assistant response in memory
         await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
@@ -107,11 +114,25 @@ class ConversationManager:
         self,
         intent: Intent,
         meta: dict,
-        text: str,
+        transcript: TranscriptionResult,
         session_id: str,
         project_path: str,
     ) -> str:
         """Route to the appropriate handler based on intent."""
+        text = transcript.text
+
+        # If we previously offered to implement fixes and are waiting on the
+        # user, intercept their answer before normal intent routing.
+        pending = self._pending_impl.get(session_id)
+        if pending is not None:
+            if _is_affirmative(text):
+                self._pending_impl.pop(session_id, None)
+                return await self._run_implementation(pending, session_id, project_path)
+            if _is_negative(text):
+                self._pending_impl.pop(session_id, None)
+                return "No problem — I'll leave the code as it is. What would you like to do next?"
+            # Anything else is a fresh instruction; drop the offer and route it.
+            self._pending_impl.pop(session_id, None)
 
         if intent == Intent.INTERRUPT:
             await self._orchestrator.interrupt()
@@ -148,9 +169,7 @@ class ConversationManager:
             return self._handle_conversation(text)
 
         # COMMAND or GIT — send to agent orchestrator
-        if not self._modes.current.should_process_input(
-            TranscriptionResult(text=text)
-        ):
+        if not self._modes.current.should_process_input(transcript):
             return ""
 
         # Detect emotion and adapt response style
@@ -184,7 +203,59 @@ class ConversationManager:
         )
 
         response = state.get("final_response", "Done.")
+
+        # If the agents only analyzed the code (e.g. a review) without changing
+        # it, offer to implement the fixes — Claude-Code style. The user's next
+        # "yes" runs the full coder/executor/tester pipeline.
+        if self._was_analysis_only(state) and response.strip():
+            self._pending_impl[session_id] = response
+            await self._event_bus.publish(Event(
+                type="action.proposed",
+                payload={
+                    "action": "implement_fixes",
+                    "prompt": "Want me to go ahead and implement these fixes?",
+                },
+                session_id=session_id,
+            ))
+            response = (
+                f"{response}\n\n---\n\n"
+                "**Want me to go ahead and implement these fixes?** "
+                "Say yes and I'll make the changes and run the tests."
+            )
+
         return f"{emotion_prefix}{response}" if emotion_prefix else response
+
+    @staticmethod
+    def _was_analysis_only(state: dict) -> bool:
+        """True if the plan only analyzed code (review) without modifying it."""
+        plan = state.get("plan", []) or []
+        agents = {step.get("agent_name") for step in plan}
+        mutating = {"coding", "executor", "testing"}
+        return "review" in agents and not (agents & mutating)
+
+    async def _run_implementation(self, analysis: str, session_id: str, project_path: str) -> str:
+        """Run the full implementation pipeline to act on a prior analysis."""
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Great — let me implement those fixes now.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        instruction = (
+            "Implement the fixes and improvements identified in this review. "
+            "Make the actual code changes to the project files, then run the tests "
+            "to verify everything works.\n\nReview findings:\n"
+            f"{analysis}"
+        )
+        context_str = await self._context.get_context_for_agent(instruction)
+        enriched = f"{instruction}\n\n{context_str}" if context_str else instruction
+
+        state = await self._orchestrator.run(
+            user_message=enriched,
+            project_path=project_path,
+            session_id=session_id,
+        )
+        return state.get("final_response", "Done — I've implemented the fixes.")
 
     async def _handle_explain(self, text: str, session_id: str, project_path: str) -> str:
         """
@@ -242,20 +313,24 @@ class ConversationManager:
                     f"Please explain it the way you would talk to them in person."
                 )),
             ])
-            explanation = (response.content or "").strip()
+            explanation = response_text(response).strip()
             if not explanation:
                 explanation = "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
             return explanation
         except Exception as e:
             logger.exception("explain_failed")
-            return f"Hmm, I hit a snag trying to explain that. Error was: {str(e)[:120]}"
+            return friendly_error(e)
 
     async def _handle_question(self, text: str, session_id: str, project_path: str) -> str:
         """Handle questions about the codebase using RAG."""
-        results = await self._context.search(text, n_results=3)
+        try:
+            results = await self._context.search(text, n_results=3)
+        except Exception as e:
+            logger.exception("question_search_failed")
+            return friendly_error(e)
 
         if not results:
-            # No indexed codebase — fall back to agent
+            # No indexed codebase — fall back to agent (which wraps its own errors)
             state = await self._orchestrator.run(
                 user_message=text,
                 project_path=project_path,
@@ -301,3 +376,33 @@ class ConversationManager:
             return "No worries, I've got you! Just describe what you're trying to build, even roughly, and I'll figure out the rest. You can also ask me to debug, review code, or set up a project."
 
         return "I'm right here! Just tell me what you'd like to build, fix, or explore."
+
+
+# ── Confirmation helpers ─────────────────────────────────────────────────────
+
+_AFFIRMATIVE = (
+    "yes", "yeah", "yep", "yup", "sure", "go ahead", "go for it", "do it",
+    "please do", "proceed", "implement", "fix it", "fix them", "make the change",
+    "make the changes", "sounds good", "let's do it", "lets do it", "okay do",
+    "ok do", "absolutely", "please implement",
+)
+_NEGATIVE = (
+    "no thanks", "not now", "nope", "nah", "don't", "do not", "leave it",
+    "skip", "cancel", "stop", "later", "not yet",
+)
+
+
+def _is_affirmative(text: str) -> bool:
+    t = text.strip().lower()
+    if t in {"no", "nope", "nah"}:
+        return False
+    if any(p in t for p in _NEGATIVE):
+        return False
+    return any(p in t for p in _AFFIRMATIVE)
+
+
+def _is_negative(text: str) -> bool:
+    t = text.strip().lower()
+    if t in {"no", "nope", "nah"}:
+        return True
+    return any(p in t for p in _NEGATIVE)

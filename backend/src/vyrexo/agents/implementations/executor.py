@@ -129,7 +129,7 @@ class ExecutionAgent(BaseAgent):
                     name=tr["name"],
                 ))
 
-        final_text = response.content if hasattr(response, "content") else "Execution completed."
+        final_text = self.response_text(response) or "Execution completed."
 
         artifacts = state.get("artifacts", {})
         artifacts.setdefault("commands_run", []).extend(commands_run)
