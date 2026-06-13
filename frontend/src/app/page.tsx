@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
+import { useAuth } from "@/lib/auth-context";
+import { ThemeToggle } from "@/components/shared/ThemeToggle";
 
 // ── Typewriter Effect ──────────────────────────────────────────
 function Typewriter({ text, speed = 40, delay = 0, className = "" }: { text: string; speed?: number; delay?: number; className?: string }) {
@@ -209,15 +211,16 @@ function Ring({ progress, size = 80, label, value }: { progress: number; size?: 
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(90,122,160,0.5)" strokeWidth="2" strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round" className="transition-all duration-[2s] ease-out" />
       </svg>
       <div className="text-center -mt-[calc(50%+10px)] mb-4">
-        <div className="text-[22px] font-semibold text-[#a0b0c8]">{value}</div>
+        <div className="text-[24px] font-semibold text-[#a0b0c8]">{value}</div>
       </div>
-      <div className="text-[11px] text-[#6a6a80] uppercase tracking-[2px] font-medium">{label}</div>
+      <div className="text-[13px] text-[#6a6a80] uppercase tracking-[2px] font-medium">{label}</div>
     </div>
   );
 }
 
 // ── Main Landing Page ──────────────────────────────────────────
 export default function LandingPage() {
+  const { user } = useAuth();
   const [scrollY, setScrollY] = useState(0);
   const [heroVisible, setHeroVisible] = useState(false);
 
@@ -236,17 +239,31 @@ export default function LandingPage() {
       {/* ── Navbar ──────────────────────────────── */}
       <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-700 ${scrollY > 80 ? "bg-[var(--app-grad-to)]/60 backdrop-blur-2xl border-b border-[#ffffff05]" : ""}`}>
         <div className="max-w-[1200px] mx-auto px-8 py-5 flex items-center justify-between">
-          <Link href="/" className="text-[15px] font-semibold tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+          <Link href="/" className="text-[17px] font-semibold tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             Vyrexo
           </Link>
-          <div className="hidden md:flex items-center gap-10 text-[11px] tracking-[2px] uppercase text-[#6a6a80] font-semibold">
+          <div className="hidden md:flex items-center gap-10 text-[13px] tracking-[2px] uppercase text-[#6a6a80] font-semibold">
             <a href="#system" className="hover:text-[#8a9cb8] transition-colors duration-500">System</a>
             <a href="#protocol" className="hover:text-[#8a9cb8] transition-colors duration-500">Protocol</a>
             <a href="#agents" className="hover:text-[#8a9cb8] transition-colors duration-500">Agents</a>
           </div>
-          <Link href="/auth" className="text-[11px] tracking-[2px] uppercase text-[#8a9cb8] hover:text-[var(--text2)] font-bold border border-[#5a7aa030] hover:border-[#5a7aa060] px-5 py-2 rounded-full transition-all duration-500">
-            Initialize
-          </Link>
+          <div className="flex items-center gap-4">
+            <ThemeToggle />
+            {user ? (
+              <Link href="/app" className="text-[13px] tracking-[2px] uppercase text-[#8a9cb8] hover:text-[var(--text2)] font-bold border border-[#5a7aa030] hover:border-[#5a7aa060] px-5 py-2 rounded-full transition-all duration-500">
+                Open App
+              </Link>
+            ) : (
+              <>
+                <Link href="/auth" className="text-[13px] tracking-[2px] uppercase text-[#6a6a80] hover:text-[#8a9cb8] font-semibold transition-colors duration-500">
+                  Login
+                </Link>
+                <Link href="/auth" className="text-[13px] tracking-[2px] uppercase text-[#8a9cb8] hover:text-[var(--text2)] font-bold border border-[#5a7aa030] hover:border-[#5a7aa060] px-5 py-2 rounded-full transition-all duration-500">
+                  Initialize
+                </Link>
+              </>
+            )}
+          </div>
         </div>
       </nav>
 
@@ -315,7 +332,7 @@ export default function LandingPage() {
         <div className="max-w-[1100px] mx-auto">
           <Reveal>
             <div className="text-center mb-24">
-              <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">System Overview</span>
+              <span className="text-[13px] tracking-[5px] uppercase text-[#6a6a80] font-medium">System Overview</span>
               <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 What can{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
@@ -352,7 +369,7 @@ export default function LandingPage() {
                   {/* 3D tilt on hover via CSS */}
                   <div className="transition-transform duration-500 group-hover:translate-y-[-2px]">
                     {/* Tag */}
-                    <div className="text-[9px] tracking-[3px] text-[#5a7aa060] uppercase font-semibold mb-5">{f.tag}</div>
+                    <div className="text-[11px] tracking-[3px] text-[#5a7aa060] uppercase font-semibold mb-5">{f.tag}</div>
 
                     {/* Icon */}
                     <div className="w-14 h-14 rounded-xl bg-[#5a7aa008] border border-[#5a7aa015] flex items-center justify-center text-[#5a7aa0] mb-5 group-hover:bg-[#5a7aa012] group-hover:border-[#5a7aa030] group-hover:shadow-[0_0_30px_#5a7aa010] transition-all duration-700">
@@ -360,8 +377,8 @@ export default function LandingPage() {
                     </div>
 
                     {/* Content */}
-                    <h3 className="text-[16px] font-semibold text-[var(--text2)] mb-2">{f.title}</h3>
-                    <p className="text-[13px] text-[#6a6a80] leading-[1.8]">{f.desc}</p>
+                    <h3 className="text-[18px] font-semibold text-[var(--text2)] mb-2">{f.title}</h3>
+                    <p className="text-[15px] text-[#6a6a80] leading-[1.8]">{f.desc}</p>
                   </div>
 
                   {/* Corner glow on hover */}
@@ -381,7 +398,7 @@ export default function LandingPage() {
         <div className="max-w-[1200px] mx-auto relative">
           <Reveal>
             <div className="text-center mb-24">
-              <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Architecture</span>
+              <span className="text-[13px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Architecture</span>
               <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 Protocol{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
@@ -414,7 +431,7 @@ export default function LandingPage() {
                       }}
                     >
                       <span className="text-xl">{layer.icon}</span>
-                      <span className="text-[14px] font-semibold" style={{ color: layer.color }}>{layer.label}</span>
+                      <span className="text-[16px] font-semibold" style={{ color: layer.color }}>{layer.label}</span>
                       {/* Glow dot */}
                       <div className="ml-auto w-2 h-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-500" style={{ background: layer.color, boxShadow: `0 0 12px ${layer.color}88` }} />
                     </div>
@@ -426,10 +443,10 @@ export default function LandingPage() {
             {/* Right — layer description */}
             <Reveal delay={400} className="flex-1 max-w-[420px]">
               <div className="p-8 rounded-2xl border border-[#ffffff06] bg-[var(--card)]">
-                <h3 className="text-[24px] font-semibold text-[var(--text2)] tracking-tight mb-5" style={{ fontFamily: "Georgia, serif", fontStyle: "italic" }}>
+                <h3 className="text-[26px] font-semibold text-[var(--text2)] tracking-tight mb-5" style={{ fontFamily: "Georgia, serif", fontStyle: "italic" }}>
                   Protocol Stack
                 </h3>
-                <p className="text-[14px] text-[#7a7a90] leading-[1.9] mb-8">
+                <p className="text-[16px] text-[#7a7a90] leading-[1.9] mb-8">
                   Six interconnected layers power every interaction — from your voice command to the final git commit. Each layer communicates through an event-driven backbone.
                 </p>
                 <div className="flex flex-col gap-4">
@@ -442,8 +459,8 @@ export default function LandingPage() {
                     <div key={item.label} className="flex items-start gap-3">
                       <div className="w-2 h-2 rounded-full mt-2 flex-shrink-0" style={{ background: item.color, boxShadow: `0 0 8px ${item.color}44` }} />
                       <div>
-                        <span className="text-[13px] text-[#b0b8c8] font-semibold">{item.label}</span>
-                        <span className="text-[12px] text-[#5a5a70] ml-2">{item.desc}</span>
+                        <span className="text-[15px] text-[#b0b8c8] font-semibold">{item.label}</span>
+                        <span className="text-[14px] text-[#5a5a70] ml-2">{item.desc}</span>
                       </div>
                     </div>
                   ))}
@@ -459,7 +476,7 @@ export default function LandingPage() {
         <div className="max-w-[700px] mx-auto">
           <Reveal>
             <div className="text-center mb-20">
-              <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Agents</span>
+              <span className="text-[13px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Agents</span>
               <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 Six minds,{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
@@ -479,12 +496,12 @@ export default function LandingPage() {
           ].map((a, i) => (
             <Reveal key={a.name} delay={i * 60}>
               <div className="group flex items-center gap-5 py-4 px-5 rounded-lg border border-transparent hover:border-[#ffffff05] hover:bg-[#ffffff02] transition-all duration-700 mb-1">
-                <div className="w-8 h-8 rounded-md flex items-center justify-center text-[10px] font-bold flex-shrink-0 transition-all duration-500 group-hover:shadow-[0_0_20px_var(--glow)]" style={{ background: `${a.color}0a`, color: a.color, "--glow": `${a.color}22` } as any}>
+                <div className="w-8 h-8 rounded-md flex items-center justify-center text-[12px] font-bold flex-shrink-0 transition-all duration-500 group-hover:shadow-[0_0_20px_var(--glow)]" style={{ background: `${a.color}0a`, color: a.color, "--glow": `${a.color}22` } as any}>
                   {a.name[0]}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[14px] font-semibold text-[#a0a0b8] group-hover:text-[var(--text2)] transition-colors duration-500">{a.name}</div>
-                  <div className="text-[12px] text-[#5a5a70] group-hover:text-[#7a7a90] transition-colors duration-500">{a.role}</div>
+                  <div className="text-[16px] font-semibold text-[#a0a0b8] group-hover:text-[var(--text2)] transition-colors duration-500">{a.name}</div>
+                  <div className="text-[14px] text-[#5a5a70] group-hover:text-[#7a7a90] transition-colors duration-500">{a.role}</div>
                 </div>
                 <div className="w-[5px] h-[5px] rounded-full opacity-0 group-hover:opacity-100 transition-all duration-700" style={{ background: a.color, boxShadow: `0 0 10px ${a.color}66` }} />
               </div>
@@ -497,15 +514,15 @@ export default function LandingPage() {
       <section className="relative z-10 py-40 px-6">
         <Reveal>
           <div className="max-w-[500px] mx-auto text-center">
-            <p className="text-[13px] text-[#6a6a80] tracking-[3px] uppercase mb-6 font-medium">Ready?</p>
+            <p className="text-[15px] text-[#6a6a80] tracking-[3px] uppercase mb-6 font-medium">Ready?</p>
             <h2 className="text-[clamp(1.8rem,4vw,3rem)] font-medium text-[var(--text2)] tracking-tight leading-tight">
               Say{" "}
               <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
                 &ldquo;Hey Rex&rdquo;
               </span>
             </h2>
-            <p className="text-[14px] text-[#7a7a90] mt-4">and start building.</p>
-            <Link href="/auth" className="group mt-12 inline-flex items-center gap-3 px-10 py-4 rounded-full border border-[#5a7aa025] hover:border-[#5a7aa050] text-[14px] text-[#8a9cb8] font-medium tracking-[1px] transition-all duration-700 hover:shadow-[0_0_80px_#1a2a5020]">
+            <p className="text-[16px] text-[#7a7a90] mt-4">and start building.</p>
+            <Link href="/auth" className="group mt-12 inline-flex items-center gap-3 px-10 py-4 rounded-full border border-[#5a7aa025] hover:border-[#5a7aa050] text-[16px] text-[#8a9cb8] font-medium tracking-[1px] transition-all duration-700 hover:shadow-[0_0_80px_#1a2a5020]">
               <span className="w-[8px] h-[8px] rounded-full bg-[#5a7aa0] group-hover:shadow-[0_0_15px_#5a7aa088] transition-all duration-700" />
               Initialize
             </Link>
@@ -516,16 +533,16 @@ export default function LandingPage() {
       {/* ── Footer ─────────────────────────────── */}
       <footer className="relative z-10 border-t border-[#ffffff03] py-10 px-6">
         <div className="max-w-[1000px] mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-          <span className="text-[11px] tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+          <span className="text-[13px] tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             Vyrexo
           </span>
-          <div className="flex gap-8 text-[11px] tracking-[2px] uppercase text-[#6a6a80]">
+          <div className="flex gap-8 text-[13px] tracking-[2px] uppercase text-[#6a6a80]">
             <a href="#system" className="hover:text-[#8a9cb8] transition-colors duration-500">System</a>
             <a href="#protocol" className="hover:text-[#8a9cb8] transition-colors duration-500">Protocol</a>
             <a href="#agents" className="hover:text-[#8a9cb8] transition-colors duration-500">Agents</a>
             <Link href="/auth" className="hover:text-[#8a9cb8] transition-colors duration-500">Login</Link>
           </div>
-          <div className="text-[12px] text-[#6a6a80] tracking-[1px]">Built for developers who&apos;d rather talk than type.</div>
+          <div className="text-[14px] text-[#6a6a80] tracking-[1px]">Built for developers who&apos;d rather talk than type.</div>
         </div>
       </footer>
 
