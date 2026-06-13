@@ -20,6 +20,12 @@ class LLMSettings(BaseSettings):
     api_key: str = ""
     base_url: str = ""
 
+    # Conversational layer — can use a faster model/provider than the coding
+    # agents (e.g. Groq for snappy chat while coding stays on local Ollama).
+    # Empty => fall back to the main provider/model_light.
+    chat_provider: str = ""
+    chat_model: str = ""
+
     model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
 

@@ -120,6 +120,18 @@ export default function App() {
   // ── Backend-driven audio playback (Edge-TTS over WebSocket) ──
   const { beginUtterance, pushChunk, endUtterance, stop: stopAudio } = useAudioPlayer();
 
+  // When the user interrupts, the backend may still have audio chunks in flight.
+  // This flag makes us DISCARD any incoming audio until the next user turn, so
+  // Rex goes silent immediately instead of finishing buffered speech.
+  const audioMutedRef = useRef(false);
+  const muteAudio = useCallback(() => {
+    audioMutedRef.current = true;
+    stopAudio();
+  }, [stopAudio]);
+  const unmuteAudio = useCallback(() => {
+    audioMutedRef.current = false;
+  }, []);
+
   // ── WebSocket: handles all server events ────────────────────
   const onServerMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -133,6 +145,7 @@ export default function App() {
 
       case "voice.output.start":
       case "voice.output.started":
+        unmuteAudio(); // a fresh utterance is legitimately starting
         beginUtterance();
         setOrbState("speaking");
         break;
@@ -260,9 +273,10 @@ export default function App() {
         setOrbState("idle");
         break;
     }
-  }, [beginUtterance, endUtterance]);
+  }, [beginUtterance, endUtterance, unmuteAudio]);
 
   const onAudioMessage = useCallback((data: ArrayBuffer) => {
+    if (audioMutedRef.current) return; // discard audio that arrives after an interrupt
     // Every binary frame from the backend is an MP3 chunk for the current utterance
     pushChunk(data);
   }, [pushChunk]);
@@ -287,7 +301,7 @@ export default function App() {
         // means "stop and listen to me" — kill local audio and tell the backend
         // to interrupt before sending the new instruction.
         if (speakingRef.current) {
-          stopAudio();
+          muteAudio();
           sendMessage({ type: "execution.interrupt", payload: {} });
         }
         setPendingProposal(null); // a spoken reply answers any pending proposal
@@ -300,7 +314,7 @@ export default function App() {
         setTranscript("");
       }
     },
-    [sendMessage, stopAudio]
+    [sendMessage, muteAudio]
   );
 
   const handleActivated = useCallback(() => {
@@ -365,7 +379,7 @@ export default function App() {
           sendMessage({
             type: "voice.config",
             payload: {
-              voice: prefs.voice || "american_male",
+              voice: prefs.voice || "andrew",
               rate: rateMap[prefs.speed] || "+0%",
             },
           });
@@ -426,37 +440,24 @@ export default function App() {
   // confirms the absolute path. The backend validates it, indexes it, and
   // scopes every subsequent task in this session to that folder.
   const handleConnectProject = useCallback(async () => {
-    let suggestedName = "";
+    // Ask the local backend to open a native OS folder picker — it returns the
+    // real absolute path (browsers can't), so binding is reliable.
+    setNarration("Opening the folder picker — pick your project folder...");
+    let path = "";
     try {
-      if ("showDirectoryPicker" in window) {
-        const dirHandle = await (window as any).showDirectoryPicker();
-        suggestedName = dirHandle.name || "";
+      const res = await fetch("http://127.0.0.1:8001/api/projects/pick", { method: "POST" });
+      const data = await res.json();
+      if (!data.ok || !data.path) {
+        setNarration(data.cancelled ? "No folder selected." : (data.error || "Couldn't open the folder picker."));
+        return;
       }
+      path = data.path;
     } catch {
-      return; // user dismissed the picker
+      setNarration("Couldn't reach the folder picker. Is the backend running?");
+      return;
     }
 
-    let lastBase = "";
-    try {
-      lastBase = localStorage.getItem("vyrexo_project_base") || "";
-    } catch {}
-
-    const def =
-      activeProjectRef.current?.path ||
-      (lastBase && suggestedName ? `${lastBase}\\${suggestedName}` : suggestedName);
-
-    const entered = prompt("Full path to your project folder (e.g. C:\\Users\\you\\my-app):", def);
-    if (!entered || !entered.trim()) return;
-
-    const path = entered.trim();
     const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "project";
-
-    // Remember the parent directory to pre-fill the prompt next time.
-    try {
-      const base = path.replace(/[\\/]+$/, "").slice(0, -name.length).replace(/[\\/]+$/, "");
-      if (base) localStorage.setItem("vyrexo_project_base", base);
-    } catch {}
-
     setActiveProject({ path, name });
     setNarration(`Connecting to ${name}...`);
     sentProjectPathRef.current = ""; // force a (re)send of the new path
@@ -539,7 +540,7 @@ export default function App() {
         forceActivate();
       }
       if (e.code === "Escape") {
-        stopAudio();
+        muteAudio();
         try { window.speechSynthesis.cancel(); } catch {}
         sendMessage({ type: "execution.interrupt", payload: {} });
         setOrbState("idle");
@@ -553,7 +554,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [forceActivate, sendMessage, stopAudio]);
+  }, [forceActivate, sendMessage, muteAudio]);
 
   // ── Loading / Auth guard ────────────────────────────────────
   if (loading) {
@@ -752,7 +753,7 @@ export default function App() {
         onPreviewUrlChange={setPreviewUrl}
         voiceMode={voiceMode}
         onInterrupt={() => {
-          stopAudio();
+          muteAudio();
           try { window.speechSynthesis.cancel(); } catch {}
           sendMessage({ type: "execution.interrupt", payload: {} });
           setOrbState("idle");

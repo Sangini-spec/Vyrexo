@@ -10,13 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from vyrexo.agents.llm_factory import create_llm
+from vyrexo.agents.llm_factory import create_chat_llm, create_llm
 from vyrexo.agents.orchestrator import AgentOrchestrator
 from vyrexo.config import get_settings
 from vyrexo.context.engine import ContextEngine
-from vyrexo.conversation.intent import Intent, IntentClassifier
+from vyrexo.conversation.intent import EXPLAIN_PHRASES, GIT_KEYWORDS, Intent, IntentClassifier
 from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
@@ -37,6 +37,15 @@ When you explain:
 - End with something inviting like "want me to dig into any part of this?" if there's more to say.
 
 If the context provided doesn't actually answer the user's question, say so honestly and ask which file or function they mean."""
+
+CHAT_SYSTEM_PROMPT = """You are Rex, a warm, friendly AI coding companion talking with a developer over voice.
+
+Right now you're just chatting — being a good, personable teammate. Keep it natural and human:
+- Reply briefly (1-3 sentences) and conversationally, like a friend. This is spoken aloud, so no markdown, code blocks, or lists.
+- Actually respond to what they said — if they answer a question of yours, react to it genuinely before moving on. Real two-way conversation, not scripted lines.
+- Be warm and a little playful, never robotic or formal.
+- If they seem to want to build, fix, or look at code, gently steer toward it ("want me to jump on that?").
+- Don't invent facts about their project or claim you did work you didn't do."""
 
 logger = structlog.get_logger()
 
@@ -134,6 +143,12 @@ class ConversationManager:
             # Anything else is a fresh instruction; drop the offer and route it.
             self._pending_impl.pop(session_id, None)
 
+        # Instant, no-LLM answers for status/meta questions ("is a folder
+        # connected?", "what can you do?") — keeps the voice snappy.
+        quick = self._quick_answer(text, project_path)
+        if quick is not None:
+            return quick
+
         if intent == Intent.INTERRUPT:
             await self._orchestrator.interrupt()
             return "Got it, I've stopped what I was doing. What would you like instead?"
@@ -162,11 +177,14 @@ class ConversationManager:
         if intent == Intent.EXPLAIN:
             return await self._handle_explain(text, session_id, project_path)
 
+        # Conversation-first: if it isn't clearly about code or building, hand it
+        # to the fast chat brain (Groq) so chit-chat and casual questions stay
+        # snappy instead of crawling through the local build pipeline.
+        if not self._is_coding_request(text):
+            return await self._chat_reply(text, session_id, project_path)
+
         if intent == Intent.QUESTION:
             return await self._handle_question(text, session_id, project_path)
-
-        if intent == Intent.CONVERSATION:
-            return self._handle_conversation(text)
 
         # COMMAND or GIT — send to agent orchestrator
         if not self._modes.current.should_process_input(transcript):
@@ -300,10 +318,10 @@ class ConversationManager:
 
         context_blob = "\n\n".join(context_lines) if context_lines else "(no relevant code found)"
 
-        # Call Gemini directly for a focused explanation
+        # Use the fast chat model (e.g. Groq) so explanations come back quickly.
         try:
             settings = get_settings()
-            llm = create_llm(settings.llm, tier="light")
+            llm = create_chat_llm(settings.llm)
             response = await llm.ainvoke([
                 SystemMessage(content=EXPLAIN_SYSTEM_PROMPT),
                 HumanMessage(content=(
@@ -353,8 +371,99 @@ class ConversationManager:
 
         return "I couldn't find anything matching that in the codebase."
 
+    def _is_coding_request(self, text: str) -> bool:
+        """Heuristic: does this turn actually want code/building (→ slow local
+        pipeline), or is it conversation (→ fast Groq chat)?"""
+        t = text.lower()
+        if any(p in t for p in EXPLAIN_PHRASES):
+            return True
+        if any(kw in t for kw in GIT_KEYWORDS):
+            return True
+        signals = (
+            "create", "build", "make ", "add ", "implement", "write ", "wrote", "generate",
+            "scaffold", "set up", "setup", "install", "run ", "execute", "fix", "debug",
+            "refactor", "rewrite", "update", "modify", "delete", "remove", "rename",
+            "review", "optimi", "deploy", "ship", "endpoint", "function", "class ", "method",
+            "module", "file", "component", "api", "database", "schema", "route", "test",
+            "bug", "feature", "import", "dependency", "package", "compile", "lint", "script",
+            "config", "authentication", "auth ", "jwt", "crud", "where is", "which file",
+            "which function", "locate", "find the", "look at the code", "the code",
+        )
+        return any(s in t for s in signals)
+
+    def _quick_answer(self, text: str, project_path: str) -> str | None:
+        """Instant, no-LLM answers for status/meta questions. None if not one."""
+        import os
+
+        t = text.lower().strip()
+        connected = project_path not in ("", ".", None)
+        name = os.path.basename(project_path.rstrip("/\\")) if connected else ""
+
+        status_phrases = (
+            "connected folder", "folder connected", "project connected", "connected project",
+            "which folder", "what folder", "which project", "what project", "any folder",
+            "a folder connected", "folder am i", "folder are we", "is anything connected",
+            "what's connected", "whats connected", "connected to", "current folder",
+            "current project", "working folder", "working directory", "which directory",
+        )
+        if any(p in t for p in status_phrases):
+            if connected:
+                return (
+                    f"Yes — we're connected to the '{name}' project, and I'll do everything "
+                    f"inside that folder. Want me to look at something in it?"
+                )
+            return (
+                "No project folder is connected yet. Hit 'Connect a project folder', pick one, "
+                "and I'll work right inside it."
+            )
+
+        capability_phrases = (
+            "what can you do", "what do you do", "who are you", "what are you",
+            "your capabilities", "how can you help", "what can you help",
+        )
+        if any(p in t for p in capability_phrases):
+            return (
+                "I'm Rex, your voice coding partner. Connect a project folder and I can build "
+                "features, write and edit code, run commands and tests, review for bugs, and "
+                "explain how things work — just talk to me like a teammate. What should we start with?"
+            )
+        return None
+
+    async def _chat_reply(self, text: str, session_id: str, project_path: str) -> str:
+        """Warm, two-way conversational reply via the fast chat model (Groq)."""
+        import os
+
+        connected = project_path not in ("", ".", None)
+        ctx = (
+            f" They're currently working in the '{os.path.basename(project_path.rstrip('/\\'))}' project."
+            if connected else " No project folder is connected yet."
+        )
+
+        # Pull recent history so the chat is genuinely two-way (it remembers what
+        # was just said). The current user turn is already stored, so it's the
+        # last entry — no need to append it again.
+        messages: list = [SystemMessage(content=CHAT_SYSTEM_PROMPT + ctx)]
+        try:
+            history = await self._memory.retrieve(session_id, limit=8)
+            for entry in history:
+                if entry.role == "assistant":
+                    messages.append(AIMessage(content=entry.content))
+                else:
+                    messages.append(HumanMessage(content=entry.content))
+        except Exception:
+            messages.append(HumanMessage(content=text))
+
+        try:
+            llm = create_chat_llm(get_settings().llm)
+            response = await llm.ainvoke(messages)
+            reply = response_text(response).strip()
+            return reply or "I'm right here! What would you like to do?"
+        except Exception as e:
+            logger.warning("chat_reply_failed", error=str(e)[:120])
+            return self._handle_conversation(text)  # rule-based fallback
+
     def _handle_conversation(self, text: str) -> str:
-        """Handle simple conversational responses — always friendly and warm."""
+        """Rule-based fallback conversational responses — friendly and warm."""
         lower = text.lower()
 
         if any(w in lower for w in ["thanks", "thank you", "great", "perfect", "awesome"]):

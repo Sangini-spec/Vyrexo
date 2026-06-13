@@ -1,8 +1,13 @@
 """
 LLM Factory — Model-agnostic LLM creation.
 
-Swap the entire AI engine by changing one env variable.
-Agents specify "heavy" or "light" tier; factory picks the right model.
+Two kinds of LLM:
+  • create_llm(...)      → the coding agents (planner/coder/etc.), heavy tier
+  • create_chat_llm(...) → the conversational layer (chit-chat, simple Q&A)
+
+These can point at different providers — e.g. heavy coding on local Ollama while
+chat runs on fast Groq — so voice conversation stays snappy even when builds are
+slow. Swap providers/models entirely via env vars; agents need no code changes.
 """
 
 from __future__ import annotations
@@ -12,24 +17,15 @@ from langchain_core.language_models import BaseChatModel
 from vyrexo.config import LLMSettings
 
 
-def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
-    """
-    Create a LangChain-compatible LLM instance.
-
-    Args:
-        settings: LLM configuration
-        tier: "heavy" (Gemini Pro) or "light" (Gemini Flash)
-    """
-    model_name = settings.model_heavy if tier == "heavy" else settings.model_light
-    provider = settings.provider
-
+def _build_llm(provider: str, model_name: str, settings: LLMSettings, temperature: float = 0.1) -> BaseChatModel:
+    """Construct a LangChain chat model for the given provider + model."""
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=settings.gemini_api_key,
-            temperature=0.1,
+            temperature=temperature,
             convert_system_message_to_human=False,
         )
 
@@ -55,7 +51,7 @@ def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
         base_url = settings.base_url or default_base_urls[provider]
         api_key = settings.api_key or provider_keys[provider]
 
-        kwargs: dict = {"model": model_name, "api_key": api_key, "temperature": 0.1}
+        kwargs: dict = {"model": model_name, "api_key": api_key, "temperature": temperature}
         if base_url:
             kwargs["base_url"] = base_url
         # Local models on Ollama can be slow on first token; give them room.
@@ -69,3 +65,21 @@ def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
         return ChatAnthropic(model=model_name)
 
     raise ValueError(f"Unknown LLM provider: {provider}")
+
+
+def create_llm(settings: LLMSettings, tier: str = "heavy") -> BaseChatModel:
+    """Create the LLM for the coding agents. tier: "heavy" or "light"."""
+    model_name = settings.model_heavy if tier == "heavy" else settings.model_light
+    return _build_llm(settings.provider, model_name, settings)
+
+
+def create_chat_llm(settings: LLMSettings) -> BaseChatModel:
+    """Create the LLM for the conversational layer.
+
+    Uses ``chat_provider`` / ``chat_model`` when set (e.g. fast Groq), falling
+    back to the main coding provider/model otherwise. Slightly warmer sampling
+    since this is for friendly conversation, not precise code.
+    """
+    provider = settings.chat_provider or settings.provider
+    model_name = settings.chat_model or settings.model_light
+    return _build_llm(provider, model_name, settings, temperature=0.6)
