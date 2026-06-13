@@ -64,7 +64,7 @@ export function RightPanel({
 }: RightPanelProps) {
   return (
     <div
-      className={`flex flex-col flex-shrink-0 bg-[#09090d] border-l border-[var(--border)] transition-all duration-300 overflow-hidden ${
+      className={`flex flex-col flex-shrink-0 bg-[var(--panel)] border-l border-[var(--border)] transition-all duration-300 overflow-hidden ${
         collapsed ? "w-0 border-l-0 opacity-0 pointer-events-none" : "w-[420px]"
       }`}
     >
@@ -99,7 +99,7 @@ export function RightPanel({
       </div>
 
       {/* Bottom bar */}
-      <div className="flex items-center justify-between px-[14px] py-[6px] bg-[#08080c] border-t border-[var(--border)] text-[10.5px] text-[var(--muted)]">
+      <div className="flex items-center justify-between px-[14px] py-[6px] bg-[var(--panel-bar)] border-t border-[var(--border)] text-[10.5px] text-[var(--muted)]">
         <span>{voiceMode === "active_conversation" ? "Conversation active" : "Waiting for 'Rex'"}</span>
         <button
           onClick={onInterrupt}
@@ -181,7 +181,7 @@ function CodeTab({ codeEvents }: { codeEvents: CodeEvent[] }) {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-3 font-mono text-[11px] leading-relaxed bg-[#070709]">
+    <div className="h-full overflow-y-auto p-3 font-mono text-[11px] leading-relaxed bg-[var(--code-bg)]">
       {codeEvents.map((ev, i) => (
         <CodeLine key={i} ev={ev} />
       ))}
@@ -288,7 +288,7 @@ function PreviewTab({
           defaultValue={previewUrl}
           onKeyDown={(e) => e.key === "Enter" && load()}
           placeholder="http://localhost:3000"
-          className="flex-1 bg-[#0f0f14] border border-[var(--border2)] rounded-md py-[5px] px-2 text-[11px] text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
+          className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-md py-[5px] px-2 text-[11px] text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
         />
         <button
           onClick={load}

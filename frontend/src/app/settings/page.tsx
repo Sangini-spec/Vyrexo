@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { ThemeToggle } from "@/components/shared/ThemeToggle";
 
 // The 5 curated voices (must match backend CURATED_VOICES / VOICE_PRESETS keys).
 const VOICE_OPTIONS = [
@@ -78,7 +79,7 @@ export default function SettingsPage() {
   if (loading || !user) return null;
 
   return (
-    <div className="min-h-screen" style={{ background: "radial-gradient(ellipse at center, #0a0e1a 0%, #07070a 65%)" }}>
+    <div className="min-h-screen" style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)" }}>
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)]">
         <div className="flex items-center gap-4">
@@ -88,7 +89,10 @@ export default function SettingsPage() {
           <span className="text-[var(--muted)] text-sm">/</span>
           <span className="text-sm text-[var(--text3)]">Voice Settings</span>
         </div>
-        <a href="/app" className="text-xs text-[var(--muted)] hover:text-[var(--steel)] transition-colors">Back to app</a>
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <a href="/app" className="text-xs text-[var(--muted)] hover:text-[var(--steel)] transition-colors">Back to app</a>
+        </div>
       </div>
 
       <div className="max-w-2xl mx-auto px-6 py-10">

@@ -24,7 +24,7 @@ const AGENT_STYLES: Record<string, { icon: string; color: string; bg: string }> 
 const STATUS_STYLES: Record<string, string> = {
   running: "bg-[var(--steel-dim)] text-[var(--steel)]",
   completed: "bg-[#16a34a18] text-[#4ade80]",
-  pending: "bg-[#27272a] text-[var(--muted2)]",
+  pending: "bg-[var(--border2)] text-[var(--muted2)]",
   failed: "bg-[#dc262618] text-[#f87171]",
 };
 
@@ -104,7 +104,7 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
                     {step.files.map((file, j) => (
                       <span
                         key={j}
-                        className="text-[10px] px-[7px] py-[2px] rounded-[3px] bg-[#18181b] text-[var(--steel)] font-mono border border-[#27272a]"
+                        className="text-[10px] px-[7px] py-[2px] rounded-[3px] bg-[var(--surface2)] text-[var(--steel)] font-mono border border-[var(--border2)]"
                       >
                         {file}
                       </span>

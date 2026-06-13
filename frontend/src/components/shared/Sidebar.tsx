@@ -46,7 +46,7 @@ export function Sidebar({
         </a>
         <button
           onClick={onNewSession}
-          className="w-[30px] h-[30px] rounded-[7px] border border-[#27272a] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all"
+          className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all"
           title="New session"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -58,7 +58,7 @@ export function Sidebar({
       {/* Search */}
       <div className="p-[10px_12px]">
         <input
-          className="w-full bg-[#0f0f14] border border-[var(--border2)] rounded-[7px] py-[7px] px-[10px] pl-[30px] text-xs text-[var(--text3)] outline-none placeholder:text-[var(--muted)] focus:border-[#3B599844]"
+          className="w-full bg-[var(--input)] border border-[var(--border2)] rounded-[7px] py-[7px] px-[10px] pl-[30px] text-xs text-[var(--text3)] outline-none placeholder:text-[var(--muted)] focus:border-[#3B599844]"
           placeholder="Search sessions..."
           style={{
             backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%233f3f46' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E")`,

@@ -101,7 +101,7 @@ export default function AuthPage() {
   return (
     <div
       className="flex h-screen items-center justify-center"
-      style={{ background: "radial-gradient(ellipse at center, #0a0e1a 0%, #07070a 65%)" }}
+      style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)" }}
     >
       <div className="w-full max-w-[400px] px-6">
         {/* Logo */}

@@ -7,6 +7,7 @@ import { Orb, type OrbState } from "@/components/voice/Orb";
 import { type AgentStep } from "@/components/agents/AgentTimeline";
 import { ModeIndicator } from "@/components/shared/ModeIndicator";
 import { RightPanel, type RightTab, type CodeEvent } from "@/components/shared/RightPanel";
+import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useVoice } from "@/hooks/useVoice";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
@@ -559,7 +560,7 @@ export default function App() {
   // ── Loading / Auth guard ────────────────────────────────────
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center" style={{ background: "#07070a" }}>
+      <div className="flex h-screen items-center justify-center" style={{ background: "var(--app-grad-to)" }}>
         <div className="text-[var(--muted2)] text-sm">Loading...</div>
       </div>
     );
@@ -579,14 +580,14 @@ export default function App() {
         />
         <div
           className="flex-1 flex flex-col items-center justify-center relative"
-          style={{ background: "radial-gradient(ellipse at center, #0a0e1a 0%, #07070a 65%)" }}
+          style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)" }}
         >
           {/* User profile */}
           <div className="absolute top-4 right-5 flex items-center gap-3">
             <button onClick={signOut} className="text-[11px] text-[var(--muted)] hover:text-[var(--text3)] transition-colors">
               Sign out
             </button>
-            <div className="flex items-center gap-2 px-3 py-[5px] rounded-full border border-transparent hover:border-[#27272a] hover:bg-[#ffffff08] transition-all">
+            <div className="flex items-center gap-2 px-3 py-[5px] rounded-full border border-transparent hover:border-[var(--border2)] hover:bg-[#ffffff08] transition-all">
               <div className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}>
                 {user.user_metadata?.full_name?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || "U"}
               </div>
@@ -599,7 +600,7 @@ export default function App() {
           <Orb state="idle" onClick={() => handleSessionClick(`session-${Date.now()}`)} />
 
           <div className="mt-9 text-center">
-            <h2 className="text-[22px] font-semibold text-[#e4e4e7]">What are we building?</h2>
+            <h2 className="text-[22px] font-semibold text-[var(--text)]">What are we building?</h2>
             <p className="mt-2 text-sm text-[var(--muted2)]">Click the orb or select a session to start</p>
           </div>
 
@@ -609,7 +610,7 @@ export default function App() {
               <div
                 key={action.title}
                 onClick={() => runQuickAction(action)}
-                className="p-[10px_16px] bg-[#0e0e14] border border-[var(--border2)] rounded-[10px] cursor-pointer max-w-[180px] hover:border-[#3B599833] hover:bg-[#3B599808] transition-all"
+                className="p-[10px_16px] bg-[var(--card)] border border-[var(--border2)] rounded-[10px] cursor-pointer max-w-[180px] hover:border-[#3B599833] hover:bg-[#3B599808] transition-all"
               >
                 <div className="text-[12.5px] text-[var(--text3)] font-medium">{action.title}</div>
                 <div className="text-[11px] text-[var(--muted)] mt-[3px] leading-snug">{action.desc}</div>
@@ -630,7 +631,7 @@ export default function App() {
             Voice Settings
           </a>
 
-          <div className="absolute bottom-4 right-5 text-[10px] text-[#27272a]">Vyrexo v0.1.0</div>
+          <div className="absolute bottom-4 right-5 text-[10px] text-[var(--border2)]">Vyrexo v0.1.0</div>
         </div>
       </div>
     );
@@ -651,13 +652,13 @@ export default function App() {
       <div className="flex-1 flex flex-col relative">
         {/* Toggle left */}
         <div className="absolute top-3 left-3 z-50">
-          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[#27272a] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
+          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
           </button>
         </div>
 
         {/* Floating bar */}
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-[10px] px-[14px] py-[5px] bg-[#0a0a0f99] backdrop-blur-xl border border-[var(--border2)] rounded-xl">
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-[10px] px-[14px] py-[5px] bg-[var(--bar)] backdrop-blur-xl border border-[var(--border2)] rounded-xl">
           <ModeIndicator mode={mode} />
           <button
             onClick={handleConnectProject}
@@ -678,30 +679,31 @@ export default function App() {
           <span className="text-[10px] text-[var(--muted)] px-1.5 py-0.5 rounded bg-[var(--border)] border border-[var(--border2)]">
             {voiceMode === "active_conversation" ? "Voice Active" : voiceMode === "waiting_for_wake" ? "Say 'Rex'" : "Voice Off"}
           </span>
-          <button onClick={handleOpenVSCode} className="w-[30px] h-[30px] rounded-[7px] border border-[#27272a] bg-[var(--border)] flex items-center justify-center hover:border-[#1e6fff] hover:bg-[#1e6fff15] transition-all p-0" title="Open in VS Code">
+          <ThemeToggle />
+          <button onClick={handleOpenVSCode} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[#1e6fff] hover:bg-[#1e6fff15] transition-all p-0" title="Open in VS Code">
             <svg width="16" height="16" viewBox="0 0 100 100" fill="none">
               <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
             </svg>
           </button>
-          <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[#27272a] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all" title="Settings">
+          <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all" title="Settings">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </a>
         </div>
 
         {/* Toggle right */}
         <div className="absolute top-3 right-3 z-50">
-          <button onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[#27272a] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
+          <button onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
           </button>
         </div>
 
         {/* Orb center */}
-        <div className="flex-1 flex flex-col items-center justify-center" style={{ background: "radial-gradient(ellipse at center, #0a0e1a 0%, #07070a 70%)" }}>
+        <div className="flex-1 flex flex-col items-center justify-center" style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 70%)" }}>
           <Orb state={orbState} transcript={transcript || undefined} onClick={forceActivate} />
 
           {/* Proposal banner — Rex asking to proceed (e.g. implement fixes) */}
           {pendingProposal && (
-            <div className="absolute bottom-[100px] left-1/2 -translate-x-1/2 flex items-center gap-3 w-full max-w-[440px] px-4 py-[10px] mx-4 bg-[#0e0e14] border border-[#3B599840] rounded-xl shadow-lg">
+            <div className="absolute bottom-[100px] left-1/2 -translate-x-1/2 flex items-center gap-3 w-full max-w-[440px] px-4 py-[10px] mx-4 bg-[var(--card)] border border-[#3B599840] rounded-xl shadow-lg">
               <span className="flex-1 text-xs text-[var(--ice)]">{pendingProposal}</span>
               <button
                 onClick={() => respondToProposal(true)}
@@ -726,14 +728,14 @@ export default function App() {
               onChange={(e) => setTextInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
               placeholder="Type a command or say 'Rex'..."
-              className="flex-1 bg-[#0f0f14] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
+              className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
             />
             <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all">
               Send
             </button>
           </div>
 
-          <div className="absolute bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-3 text-[11px] text-[#27272a]">
+          <div className="absolute bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-3 text-[11px] text-[var(--border2)]">
             <span><kbd className="bg-[var(--border)] border border-[var(--border2)] rounded px-[6px] py-[1px] text-[10px] text-[var(--muted2)]">Space</kbd> push-to-talk</span>
             <span><kbd className="bg-[var(--border)] border border-[var(--border2)] rounded px-[6px] py-[1px] text-[10px] text-[var(--muted2)]">Esc</kbd> interrupt</span>
           </div>

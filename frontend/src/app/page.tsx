@@ -229,12 +229,12 @@ export default function LandingPage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#030306] text-[#c8c8d8] overflow-x-hidden relative">
+    <div className="min-h-screen bg-[var(--app-grad-to)] text-[var(--text2)] overflow-x-hidden relative">
       {/* Neural network background */}
       <NeuralCanvas />
 
       {/* ── Navbar ──────────────────────────────── */}
-      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-700 ${scrollY > 80 ? "bg-[#030306]/60 backdrop-blur-2xl border-b border-[#ffffff05]" : ""}`}>
+      <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-700 ${scrollY > 80 ? "bg-[var(--app-grad-to)]/60 backdrop-blur-2xl border-b border-[#ffffff05]" : ""}`}>
         <div className="max-w-[1200px] mx-auto px-8 py-5 flex items-center justify-between">
           <Link href="/" className="text-[15px] font-semibold tracking-[3px] uppercase" style={{ background: "linear-gradient(90deg, #5a7aa0, #8a9cb8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             Vyrexo
@@ -244,7 +244,7 @@ export default function LandingPage() {
             <a href="#protocol" className="hover:text-[#8a9cb8] transition-colors duration-500">Protocol</a>
             <a href="#agents" className="hover:text-[#8a9cb8] transition-colors duration-500">Agents</a>
           </div>
-          <Link href="/auth" className="text-[11px] tracking-[2px] uppercase text-[#8a9cb8] hover:text-[#c0c8d8] font-bold border border-[#5a7aa030] hover:border-[#5a7aa060] px-5 py-2 rounded-full transition-all duration-500">
+          <Link href="/auth" className="text-[11px] tracking-[2px] uppercase text-[#8a9cb8] hover:text-[var(--text2)] font-bold border border-[#5a7aa030] hover:border-[#5a7aa060] px-5 py-2 rounded-full transition-all duration-500">
             Initialize
           </Link>
         </div>
@@ -316,7 +316,7 @@ export default function LandingPage() {
           <Reveal>
             <div className="text-center mb-24">
               <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">System Overview</span>
-              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[#c0c0d0] tracking-tight">
+              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 What can{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
                   Rex
@@ -348,7 +348,7 @@ export default function LandingPage() {
               )},
             ].map((f, i) => (
               <Reveal key={f.title} delay={i * 80}>
-                <div className="group relative p-7 rounded-2xl border border-[#ffffff06] bg-[#080810] hover:border-[#5a7aa025] transition-all duration-700 h-full overflow-hidden cursor-default" style={{ transformStyle: "preserve-3d", perspective: "800px" }}>
+                <div className="group relative p-7 rounded-2xl border border-[#ffffff06] bg-[var(--card)] hover:border-[#5a7aa025] transition-all duration-700 h-full overflow-hidden cursor-default" style={{ transformStyle: "preserve-3d", perspective: "800px" }}>
                   {/* 3D tilt on hover via CSS */}
                   <div className="transition-transform duration-500 group-hover:translate-y-[-2px]">
                     {/* Tag */}
@@ -360,7 +360,7 @@ export default function LandingPage() {
                     </div>
 
                     {/* Content */}
-                    <h3 className="text-[16px] font-semibold text-[#c0c0d0] mb-2">{f.title}</h3>
+                    <h3 className="text-[16px] font-semibold text-[var(--text2)] mb-2">{f.title}</h3>
                     <p className="text-[13px] text-[#6a6a80] leading-[1.8]">{f.desc}</p>
                   </div>
 
@@ -377,12 +377,12 @@ export default function LandingPage() {
 
       {/* ── Protocol Layer (3D exploded stack) ──── */}
       <section id="protocol" className="relative z-10 py-36 px-6 overflow-hidden">
-        <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse 50% 40% at 40% 50%, #0a0e1a 0%, transparent 100%)" }} />
+        <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse 50% 40% at 40% 50%, var(--app-grad-from) 0%, transparent 100%)" }} />
         <div className="max-w-[1200px] mx-auto relative">
           <Reveal>
             <div className="text-center mb-24">
               <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Architecture</span>
-              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[#c0c0d0] tracking-tight">
+              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 Protocol{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
                   Layers
@@ -425,8 +425,8 @@ export default function LandingPage() {
 
             {/* Right — layer description */}
             <Reveal delay={400} className="flex-1 max-w-[420px]">
-              <div className="p-8 rounded-2xl border border-[#ffffff06] bg-[#080810]">
-                <h3 className="text-[24px] font-semibold text-[#c0c8d8] tracking-tight mb-5" style={{ fontFamily: "Georgia, serif", fontStyle: "italic" }}>
+              <div className="p-8 rounded-2xl border border-[#ffffff06] bg-[var(--card)]">
+                <h3 className="text-[24px] font-semibold text-[var(--text2)] tracking-tight mb-5" style={{ fontFamily: "Georgia, serif", fontStyle: "italic" }}>
                   Protocol Stack
                 </h3>
                 <p className="text-[14px] text-[#7a7a90] leading-[1.9] mb-8">
@@ -460,7 +460,7 @@ export default function LandingPage() {
           <Reveal>
             <div className="text-center mb-20">
               <span className="text-[11px] tracking-[5px] uppercase text-[#6a6a80] font-medium">Agents</span>
-              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[#c0c0d0] tracking-tight">
+              <h2 className="mt-6 text-[clamp(1.8rem,3.5vw,2.8rem)] font-medium text-[var(--text2)] tracking-tight">
                 Six minds,{" "}
                 <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
                   one voice
@@ -483,7 +483,7 @@ export default function LandingPage() {
                   {a.name[0]}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[14px] font-semibold text-[#a0a0b8] group-hover:text-[#c0c0d0] transition-colors duration-500">{a.name}</div>
+                  <div className="text-[14px] font-semibold text-[#a0a0b8] group-hover:text-[var(--text2)] transition-colors duration-500">{a.name}</div>
                   <div className="text-[12px] text-[#5a5a70] group-hover:text-[#7a7a90] transition-colors duration-500">{a.role}</div>
                 </div>
                 <div className="w-[5px] h-[5px] rounded-full opacity-0 group-hover:opacity-100 transition-all duration-700" style={{ background: a.color, boxShadow: `0 0 10px ${a.color}66` }} />
@@ -498,7 +498,7 @@ export default function LandingPage() {
         <Reveal>
           <div className="max-w-[500px] mx-auto text-center">
             <p className="text-[13px] text-[#6a6a80] tracking-[3px] uppercase mb-6 font-medium">Ready?</p>
-            <h2 className="text-[clamp(1.8rem,4vw,3rem)] font-medium text-[#c0c0d0] tracking-tight leading-tight">
+            <h2 className="text-[clamp(1.8rem,4vw,3rem)] font-medium text-[var(--text2)] tracking-tight leading-tight">
               Say{" "}
               <span style={{ fontFamily: "Georgia, serif", fontStyle: "italic", color: "#8a9cb8" }}>
                 &ldquo;Hey Rex&rdquo;
