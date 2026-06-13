@@ -33,6 +33,10 @@
   --code-bg: #070709;
   --bar: #0a0a0f99;
   --ice-text: #C0C8D4;
+
+  /* Landing hero */
+  --hero-greeting: #b5b5c8;
+  --hero-rex-grad: linear-gradient(135deg, #4A72B2, #8CA2C5, #D2DBE8);
 }
 
 :root[data-theme="light"] {
@@ -66,6 +70,10 @@
   --code-bg: #f4f6f9;
   --bar: #ffffffcc;
   --ice-text: #2f3c54;
+
+  /* Landing hero — darkened for contrast on a light background */
+  --hero-greeting: #3a4256;
+  --hero-rex-grad: linear-gradient(135deg, #2f4d82, #3B5998, #5a72a0);
 }
 
 body {

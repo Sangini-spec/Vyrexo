@@ -263,10 +263,10 @@ export default function LandingPage() {
         {/* Main headline — typewriter */}
         <div className={`transition-all duration-[2s] delay-500 ${heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"}`}>
           <h1 className="text-center leading-[1.1] max-w-[1000px]">
-            <span className="block text-[clamp(2.2rem,5.5vw,4.2rem)] font-light italic text-[#b5b5c8] tracking-tight" style={{ fontFamily: "'Playfair Display', Georgia, serif" }}>
+            <span className="block text-[clamp(2.2rem,5.5vw,4.2rem)] font-light italic text-[var(--hero-greeting)] tracking-tight" style={{ fontFamily: "'Playfair Display', Georgia, serif" }}>
               <Typewriter text="Good evening, Developer." speed={50} delay={800} />
             </span>
-            <span className="block text-[clamp(2.2rem,5vw,3.8rem)] tracking-tight mt-4 font-extrabold" style={{ fontFamily: "'Outfit', sans-serif", background: "linear-gradient(135deg, #4A72B2, #8CA2C5, #D2DBE8)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+            <span className="block text-[clamp(2.2rem,5vw,3.8rem)] tracking-tight mt-4 font-extrabold" style={{ fontFamily: "'Outfit', sans-serif", background: "var(--hero-rex-grad)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
               <Typewriter text="I am Rex" speed={60} delay={2500} />
             </span>
           </h1>
