@@ -25,7 +25,7 @@ import structlog
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from vyrexo.api.routes import health_router, sessions_router, projects_router, voice_router
+from vyrexo.api.routes import health_router, sessions_router, projects_router, voice_router, settings_router
 from vyrexo.api.websocket.handler import SessionWebSocketHandler
 from vyrexo.api.websocket.manager import ConnectionManager
 from vyrexo.agents.orchestrator import AgentOrchestrator
@@ -461,6 +461,7 @@ app.include_router(health_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
 
 
 # ── WebSocket Endpoint ───────────────────────────────────────────

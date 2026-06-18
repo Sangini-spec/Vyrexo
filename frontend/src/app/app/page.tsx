@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar, type Session } from "@/components/shared/Sidebar";
 import { Orb, type OrbState } from "@/components/voice/Orb";
@@ -14,11 +14,34 @@ import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
 
-const DEMO_SESSIONS: Record<string, Session[]> = {
-  Today: [
-    { id: "session-1", name: "New Session", icon: "\u{1F680}", status: "active", time: "now" },
-  ],
-};
+// A persisted, renamable chat session. Stored in localStorage so they survive
+// reloads; grouped/labelled for the Sidebar at render time.
+interface StoredSession {
+  id: string;
+  name: string;
+  icon: string;
+  createdAt: number;
+}
+
+const SESSION_ICONS = ["\u{1F680}", "\u{1F6E0}", "\u{1F4A1}", "\u{26A1}", "\u{1F9E9}", "\u{1F4E6}", "\u{1F52D}", "\u{1F3AF}"];
+
+function relTime(ts: number): string {
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return "now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? "yesterday" : `${d}d ago`;
+}
+
+function dayGroup(ts: number): string {
+  const d = Math.floor((Date.now() - ts) / 86400000);
+  if (d < 1) return "Today";
+  if (d < 2) return "Yesterday";
+  if (d < 7) return "This Week";
+  return "Earlier";
+}
 
 // Home-screen quick actions. Each carries a concrete prompt (not just its
 // label) so clicking it kicks off real agent work. All operate inside a
@@ -76,6 +99,44 @@ export default function App() {
   const [narration, setNarration] = useState("Say 'Rex' to start, or click the orb");
   const [textInput, setTextInput] = useState("");
   const [chatLog, setChatLog] = useState<Array<{ role: string; text: string }>>([]);
+
+  // ── Sessions (persisted + renamable) ────────────────────────
+  const [sessions, setSessions] = useState<StoredSession[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+
+  useEffect(() => {
+    let loaded: StoredSession[] | null = null;
+    try {
+      const raw = localStorage.getItem("vyrexo_sessions");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) loaded = parsed;
+      }
+    } catch {}
+    setSessions(loaded ?? [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }]);
+    setSessionsLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (sessionsLoaded) {
+      try { localStorage.setItem("vyrexo_sessions", JSON.stringify(sessions)); } catch {}
+    }
+  }, [sessions, sessionsLoaded]);
+
+  const groupedSessions = useMemo(() => {
+    const groups: Record<string, Session[]> = {};
+    for (const s of [...sessions].sort((a, b) => b.createdAt - a.createdAt)) {
+      const g = dayGroup(s.createdAt);
+      (groups[g] ||= []).push({
+        id: s.id,
+        name: s.name,
+        icon: s.icon,
+        status: s.id === activeSession ? "active" : "ended",
+        time: relTime(s.createdAt),
+      });
+    }
+    return groups;
+  }, [sessions, activeSession]);
 
   // Right panel: 4 tabs (Chat / Code / Task / Preview)
   const [activeRightTab, setActiveRightTab] = useState<RightTab>("task");
@@ -362,6 +423,37 @@ export default function App() {
     [activeSession, disconnect]
   );
 
+  // Create a brand-new session: add it to the (persisted) list and make it active.
+  const createSession = useCallback(() => {
+    const id = `session-${Date.now()}`;
+    setSessions((prev) => [
+      { id, name: "New Session", icon: SESSION_ICONS[prev.length % SESSION_ICONS.length], createdAt: Date.now() },
+      ...prev,
+    ]);
+    handleSessionClick(id);
+    return id;
+  }, [handleSessionClick]);
+
+  const handleRenameSession = useCallback((id: string, name: string) => {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+  }, []);
+
+  const handleDeleteSession = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        const next = prev.filter((s) => s.id !== id);
+        return next.length
+          ? next
+          : [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }];
+      });
+      if (id === activeSession) {
+        disconnect();
+        setActiveSession(null);
+      }
+    },
+    [activeSession, disconnect]
+  );
+
   // Connect WS + start voice when session is selected
   useEffect(() => {
     if (activeSession) {
@@ -478,12 +570,12 @@ export default function App() {
 
     if (!activeSession) {
       // Start a session; the WS-connected effect binds the project once open.
-      handleSessionClick(`session-${Date.now()}`);
+      createSession();
     } else if (wsStatus === "connected") {
       sentProjectPathRef.current = path;
       sendMessage({ type: "project.set", payload: { path } });
     }
-  }, [activeSession, wsStatus, sendMessage, handleSessionClick]);
+  }, [activeSession, wsStatus, sendMessage, createSession]);
 
   const handleOpenVSCode = useCallback(async () => {
     try {
@@ -514,9 +606,9 @@ export default function App() {
 
       // Project already connected — just make sure a session is live; the
       // pendingCmd effect flushes the command as soon as the socket is up.
-      if (!activeSession) handleSessionClick(`session-${Date.now()}`);
+      if (!activeSession) createSession();
     },
-    [activeSession, handleConnectProject, handleSessionClick]
+    [activeSession, handleConnectProject, createSession]
   );
 
   // ── Text input ──────────────────────────────────────────────
@@ -587,11 +679,14 @@ export default function App() {
     return (
       <div className="flex h-screen">
         <Sidebar
-          sessions={DEMO_SESSIONS}
+          sessions={groupedSessions}
+          activeSessionId={activeSession ?? undefined}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
           onSessionClick={handleSessionClick}
-          onNewSession={() => handleSessionClick(`session-${Date.now()}`)}
+          onNewSession={createSession}
+          onRenameSession={handleRenameSession}
+          onDeleteSession={handleDeleteSession}
         />
         <div
           className="flex-1 flex flex-col items-center justify-center relative"
@@ -612,7 +707,7 @@ export default function App() {
             </div>
           </div>
 
-          <Orb state="idle" onClick={() => handleSessionClick(`session-${Date.now()}`)} />
+          <Orb state="idle" onClick={createSession} />
 
           <div className="mt-9 text-center">
             <h2 className="text-[22px] font-semibold text-[var(--text)]">What are we building?</h2>
@@ -656,12 +751,14 @@ export default function App() {
   return (
     <div className="flex h-screen">
       <Sidebar
-        sessions={DEMO_SESSIONS}
+        sessions={groupedSessions}
         activeSessionId={activeSession}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         onSessionClick={handleSessionClick}
-        onNewSession={() => handleSessionClick(`session-${Date.now()}`)}
+        onNewSession={createSession}
+        onRenameSession={handleRenameSession}
+        onDeleteSession={handleDeleteSession}
       />
 
       <div className="flex-1 flex flex-col relative">
