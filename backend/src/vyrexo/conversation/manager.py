@@ -7,16 +7,18 @@ It classifies intent, enriches context, manages memory, and routes requests.
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import os
+from typing import Any, Awaitable, Callable
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from vyrexo.agents.llm_factory import create_chat_llm, create_llm
+from vyrexo.agents.llm_factory import create_chat_llm
 from vyrexo.agents.orchestrator import AgentOrchestrator
 from vyrexo.config import get_settings
 from vyrexo.context.engine import ContextEngine
-from vyrexo.conversation.intent import EXPLAIN_PHRASES, GIT_KEYWORDS, Intent, IntentClassifier
+from vyrexo.conversation.intent import EXPLAIN_PHRASES, Intent, IntentClassifier
 from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
@@ -62,7 +64,51 @@ You are given real excerpts retrieved from their project. Answer the question us
 - Cite the file/function you're drawing from in plain words ("in auth.py, the login function...").
 - If the excerpts don't actually contain the answer, say so honestly and ask which file or area to look at. Do NOT make anything up or rely on outside assumptions about their code."""
 
+# Fast intent router. The old rule-based classifier defaulted unknown input to
+# "command" → which kicked off the whole build pipeline for simple questions.
+# This LLM router decides, in ONE word, how to handle a turn so read-only
+# questions are answered by *looking*, never by building. (Claude-Code style.)
+ROUTER_PROMPT = """You decide how Rex — a voice coding assistant — should handle a developer's message. Output EXACTLY one word and nothing else.
+
+Categories:
+- chitchat: greetings, small talk, reactions, thanks, "how are you", "it's going great", "I'm back", anything social or not about their code.
+- question: they want to KNOW something (read-only). Asking about files, code, structure, what something does, how many files there are, whether something exists, status. Answering means LOOKING, not changing anything.
+- explain: they want a walkthrough or explanation of specific code.
+- command: they want Rex to DO something that creates, writes, edits, runs, installs, fixes, refactors, deletes, tests, or deploys code — i.e. actually CHANGES the project.
+
+Rules:
+- If they only want to see, list, count, find, read, or describe what's there → question (NEVER command).
+- Pick command ONLY when real work or a change is clearly requested.
+- When unsure between question and command, pick question.
+
+Examples:
+"hey rex how's it going" -> chitchat
+"it's going great don't worry about me" -> chitchat
+"can I stop you and ask a question" -> chitchat
+"thanks that's perfect" -> chitchat
+"what files are in the folder" -> question
+"how many files are there" -> question
+"are there even any files present" -> question
+"tell me what files are present in the project" -> question
+"what does this project do" -> question
+"where is the login handled" -> question
+"explain the main function" -> explain
+"walk me through app.py" -> explain
+"create a REST API with auth" -> command
+"add a /health endpoint to main.py" -> command
+"fix the bug in calc.py" -> command
+"install fastapi and run the server" -> command
+"refactor the database module" -> command
+
+Output only one word: chitchat, question, explain, or command."""
+
 logger = structlog.get_logger()
+
+# Directories we never list/count as part of "what files are here".
+_SCAN_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".next",
+    "dist", "build", ".mypy_cache", ".pytest_cache", ".idea", ".vscode", ".ruff_cache",
+}
 
 
 class ConversationManager:
@@ -100,6 +146,10 @@ class ConversationManager:
         # until the user says yes — Rex shows the plan and waits (Claude-Code
         # style). Maps session_id -> {instruction, plan, project_path}.
         self._pending_plan: dict[str, dict] = {}
+        # Per-session background build task. The slow agent pipeline runs here so
+        # the conversation loop stays live — the user can chat, ask questions, or
+        # interrupt WHILE a build runs instead of being blocked behind it.
+        self._build_tasks: dict[str, asyncio.Task] = {}
 
     async def process_turn(
         self,
@@ -119,7 +169,9 @@ class ConversationManager:
         # Store user message in memory
         await self._memory.store(session_id, MemoryEntry(role="user", content=text))
 
-        # Classify intent
+        # Classify intent (rule-based) — only the unambiguous signals (interrupt,
+        # mode switch, git) are taken from this. The command-vs-question-vs-chat
+        # decision is made by the LLM router inside _route_intent.
         intent, meta = self._intent_classifier.classify(text)
 
         await self._event_bus.publish(Event(
@@ -134,7 +186,8 @@ class ConversationManager:
         response = await self._route_intent(intent, meta, transcript, session_id, project_path)
 
         # Store assistant response in memory
-        await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
+        if response:
+            await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
 
         return response
 
@@ -147,117 +200,127 @@ class ConversationManager:
         project_path: str,
     ) -> str:
         """Route to the appropriate handler based on intent."""
-        text = transcript.text
+        text = transcript.text.strip()
 
-        # If we previously offered to implement fixes and are waiting on the
-        # user, intercept their answer before normal intent routing.
+        # ── Interrupt always wins, even mid-build ────────────────────────────
+        if intent == Intent.INTERRUPT or _is_stop(text):
+            await self._cancel_build(session_id)
+            await self._orchestrator.interrupt()
+            return "Got it, I've stopped. What would you like instead?"
+
+        # ── Pending "implement these fixes?" offer ───────────────────────────
         pending = self._pending_impl.get(session_id)
         if pending is not None:
-            if _is_affirmative(text):
+            # A short, clean "yes" implements; a clear "no" declines; anything
+            # longer is a fresh instruction (we drop the offer and route it).
+            if _is_affirmative(text) and _is_clean_confirmation(text):
                 self._pending_impl.pop(session_id, None)
                 return await self._run_implementation(pending, session_id, project_path)
             if _is_negative(text):
                 self._pending_impl.pop(session_id, None)
                 return "No problem — I'll leave the code as it is. What would you like to do next?"
-            # Anything else is a fresh instruction; drop the offer and route it.
             self._pending_impl.pop(session_id, None)
 
-        # If a PLAN is awaiting the user's approval, their answer decides whether
-        # we execute it. Nothing has been written yet at this point.
+        # ── Pending PLAN awaiting approval ───────────────────────────────────
+        # Nothing has been written yet. A clean "yes" runs it; a "no" cancels;
+        # a verbose "yes, but actually I just wanted X" is re-understood as a
+        # fresh request (so a clarification can't get steamrolled into a build).
         plan_pending = self._pending_plan.get(session_id)
         if plan_pending is not None:
-            if _is_affirmative(text):
-                self._pending_plan.pop(session_id, None)
-                await self._event_bus.publish(Event(
-                    type="agent.narration",
-                    payload={"text": "Great — starting on it now.", "agent": "rex"},
-                    session_id=session_id,
-                ))
-                state = await self._orchestrator.run(
-                    user_message=plan_pending["instruction"],
-                    project_path=plan_pending["project_path"],
-                    session_id=session_id,
-                    approved_plan=plan_pending["plan"],
-                )
-                return state.get("final_response", "Done.")
             if _is_negative(text):
                 self._pending_plan.pop(session_id, None)
                 return "Okay, I won't make any changes. Tell me what you'd like to adjust, or what else I can do."
-            # Not a clear yes/no — treat as a revised request and re-plan it.
+            if _is_affirmative(text) and _is_clean_confirmation(text):
+                self._pending_plan.pop(session_id, None)
+                return self._launch(
+                    session_id,
+                    lambda: self._orchestrator.run(
+                        user_message=plan_pending["instruction"],
+                        project_path=plan_pending["project_path"],
+                        session_id=session_id,
+                        approved_plan=plan_pending["plan"],
+                    ),
+                    "Great — starting now. I'll keep you posted as I go, and you can talk to me anytime.",
+                )
+            # Not a clean yes/no → drop the pending plan and route this turn fresh.
             self._pending_plan.pop(session_id, None)
 
-        # Instant, no-LLM answers for status/meta questions ("is a folder
-        # connected?", "what can you do?") — keeps the voice snappy.
+        # ── Instant, no-LLM answers (status, capabilities, file listing) ─────
         quick = self._quick_answer(text, project_path)
         if quick is not None:
             return quick
 
-        if intent == Intent.INTERRUPT:
-            await self._orchestrator.interrupt()
-            return "Got it, I've stopped what I was doing. What would you like instead?"
-
-        # If we have a paused state from a recent interrupt AND this is a command
-        # giving a new direction, resume from where we left off rather than restarting.
-        if intent == Intent.COMMAND and self._orchestrator.has_paused_state:
-            logger.info("conversation_resume", text=text[:60])
-            state = await self._orchestrator.resume(text)
-            if state is not None:
-                response = state.get("final_response", "Done.")
-                return response
-
+        # ── Mode switches ────────────────────────────────────────────────────
         if intent == Intent.MODE_SWITCH:
             target = meta.get("target_mode", "normal")
             try:
                 target_mode = ModeState(target)
                 success = await self._modes.transition(target_mode)
-                if success:
-                    return f"Switched to {target} mode."
-                else:
-                    return f"Can't switch to {target} mode from {self._modes.state.value} mode."
+                return (
+                    f"Switched to {target} mode." if success
+                    else f"Can't switch to {target} mode from {self._modes.state.value} mode."
+                )
             except ValueError:
                 return f"Unknown mode: {target}"
 
-        if intent == Intent.EXPLAIN:
-            return await self._handle_explain(text, session_id, project_path)
+        # ── If a build is already running, stay conversational ───────────────
+        # The slow pipeline runs in the background; this turn must NOT block on
+        # it. Chit-chat and questions are answered live; a new build request is
+        # politely deferred so we never run two pipelines at once.
+        if self._is_busy(session_id):
+            return await self._handle_while_busy(text, session_id, project_path)
 
-        # Conversation-first: if it isn't clearly about code or building, hand it
-        # to the fast chat brain (Groq) so chit-chat and casual questions stay
-        # snappy instead of crawling through the local build pipeline.
-        if not self._is_coding_request(text):
+        # ── Decide how to handle this turn (LLM router) ──────────────────────
+        kind = await self._route_kind(text, intent)
+
+        if kind == "chitchat":
             return await self._chat_reply(text, session_id, project_path)
-
-        if intent == Intent.QUESTION:
+        if kind == "explain":
+            return await self._handle_explain(text, session_id, project_path)
+        if kind == "question":
             return await self._handle_question(text, session_id, project_path)
 
-        # COMMAND or GIT — send to agent orchestrator
+        # kind == "command" or git → real work through the agent pipeline.
         if not self._modes.current.should_process_input(transcript):
             return ""
 
-        # Detect emotion and adapt response style
+        # If we have a paused state from a recent interrupt, resume (in the
+        # background) instead of starting over.
+        if self._orchestrator.has_paused_state:
+            logger.info("conversation_resume", text=text[:60])
+            return self._launch(
+                session_id,
+                lambda: self._orchestrator.resume(text),
+                "Got it — adjusting course and picking back up.",
+                offer_impl=False,
+            )
+
+        return await self._handle_command(text, transcript, session_id, project_path)
+
+    async def _handle_command(
+        self,
+        text: str,
+        transcript: TranscriptionResult,
+        session_id: str,
+        project_path: str,
+    ) -> str:
+        """A genuine build/change request: plan first, then gate on approval."""
+        # Detect emotion and adapt the opener
         emotion = transcript.metadata.get("emotion", "neutral")
-        emotion_prefix = ""
-        if emotion == "frustrated":
-            emotion_prefix = "I hear you, this is annoying. Let me sort it out. "
-        elif emotion == "confused":
-            emotion_prefix = "Totally fair, let me break this down clearly. "
-        elif emotion == "urgent":
-            emotion_prefix = "On it right now. "
-        elif emotion == "tired":
-            emotion_prefix = "Got it. I'll keep this short and just get it done. "
-        elif emotion == "excited":
-            emotion_prefix = "Love the energy. Let's go. "
-        elif emotion == "satisfied":
-            emotion_prefix = "Glad to hear that. "
+        emotion_prefix = {
+            "frustrated": "I hear you, this is annoying. Let me sort it out. ",
+            "confused": "Totally fair, let me break this down clearly. ",
+            "urgent": "On it right now. ",
+            "tired": "Got it. I'll keep this short and just get it done. ",
+            "excited": "Love the energy. Let's go. ",
+            "satisfied": "Glad to hear that. ",
+        }.get(emotion, "")
 
         # Enrich with codebase context
         context_str = await self._context.get_context_for_agent(text)
+        enriched_message = f"{text}\n\n{context_str}" if context_str else text
 
-        enriched_message = text
-        if context_str:
-            enriched_message = f"{text}\n\n{context_str}"
-
-        # ── Approval gate ────────────────────────────────────────────────
-        # Plan FIRST and never execute changes without the user's explicit OK.
+        # ── Approval gate: plan FIRST, never execute changes without an OK ───
         plan = await self._orchestrator.preview_plan(enriched_message, project_path, session_id)
         if not plan:
             return f"{emotion_prefix}I couldn't put a plan together for that — could you rephrase what you'd like me to do?"
@@ -267,7 +330,6 @@ class ConversationManager:
 
         if mutating:
             # This plan would change files / run commands — show it and WAIT.
-            # Nothing has been written at this point.
             self._pending_plan[session_id] = {
                 "instruction": enriched_message,
                 "plan": plan,
@@ -279,36 +341,103 @@ class ConversationManager:
                 "Should I go ahead and build this? Say **yes** to start, or tell me what to change."
             )
 
-        # Read-only plan (e.g. a review) — safe to run now without approval.
-        state = await self._orchestrator.run(
-            user_message=enriched_message,
-            project_path=project_path,
-            session_id=session_id,
-            approved_plan=plan,
+        # Read-only plan (e.g. a review) — safe to run, but it's still slow on
+        # the local model, so run it in the background and stay conversational.
+        return self._launch(
+            session_id,
+            lambda: self._orchestrator.run(
+                user_message=enriched_message,
+                project_path=project_path,
+                session_id=session_id,
+                approved_plan=plan,
+            ),
+            f"{emotion_prefix}On it — I'll take a look and report back in a moment.",
         )
 
-        response = state.get("final_response", "Done.")
+    async def _handle_while_busy(self, text: str, session_id: str, project_path: str) -> str:
+        """Handle a turn that arrives WHILE a background build is running.
 
-        # If the agents only analyzed the code (e.g. a review) without changing
-        # it, offer to implement the fixes — Claude-Code style. The user's next
-        # "yes" runs the full coder/executor/tester pipeline.
-        if self._was_analysis_only(state) and response.strip():
-            self._pending_impl[session_id] = response
-            await self._event_bus.publish(Event(
-                type="action.proposed",
-                payload={
-                    "action": "implement_fixes",
-                    "prompt": "Want me to go ahead and implement these fixes?",
-                },
-                session_id=session_id,
-            ))
-            response = (
-                f"{response}\n\n---\n\n"
-                "**Want me to go ahead and implement these fixes?** "
-                "Say yes and I'll make the changes and run the tests."
+        Keeps the conversation two-way: questions and chit-chat are answered
+        immediately (they don't touch the running pipeline); a new build request
+        is deferred so we never launch a second pipeline on top of the first.
+        """
+        kind = await self._route_kind(text, Intent.CONVERSATION)
+        if kind == "question":
+            return await self._handle_question(text, session_id, project_path)
+        if kind == "explain":
+            return await self._handle_explain(text, session_id, project_path)
+        if kind == "command":
+            return (
+                "I'm still working on the previous task. Say 'stop' if you'd like me to cancel it — "
+                "otherwise I'll finish this first and then jump straight on that."
             )
+        return await self._chat_reply(text, session_id, project_path)
 
-        return f"{emotion_prefix}{response}" if emotion_prefix else response
+    # ── Background execution ─────────────────────────────────────────────────
+
+    def _is_busy(self, session_id: str) -> bool:
+        task = self._build_tasks.get(session_id)
+        return task is not None and not task.done()
+
+    async def _cancel_build(self, session_id: str) -> None:
+        task = self._build_tasks.get(session_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _launch(
+        self,
+        session_id: str,
+        coro_factory: Callable[[], Awaitable[dict[str, Any]]],
+        ack: str,
+        *,
+        offer_impl: bool = True,
+    ) -> str:
+        """Run a slow orchestrator coroutine in the background.
+
+        Returns ``ack`` immediately (spoken right away) so the conversation loop
+        is never blocked. When the pipeline finishes it publishes its own
+        ``conversation.turn.completed`` with the summary — and, for an
+        analysis-only run, the "want me to implement these fixes?" offer.
+        """
+        async def _run() -> None:
+            try:
+                state = await coro_factory()
+                response = (state or {}).get("final_response", "Done.")
+
+                if offer_impl and self._was_analysis_only(state or {}) and response.strip():
+                    self._pending_impl[session_id] = response
+                    await self._event_bus.publish(Event(
+                        type="action.proposed",
+                        payload={
+                            "action": "implement_fixes",
+                            "prompt": "Want me to go ahead and implement these fixes?",
+                        },
+                        session_id=session_id,
+                    ))
+                    response = (
+                        f"{response}\n\n---\n\n"
+                        "**Want me to go ahead and implement these fixes?** "
+                        "Say yes and I'll make the changes and run the tests."
+                    )
+
+                await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
+                await self._event_bus.publish(Event(
+                    type="conversation.turn.completed",
+                    payload={"text": response},
+                    session_id=session_id,
+                ))
+            except asyncio.CancelledError:
+                logger.info("background_run_cancelled", session_id=session_id)
+            except Exception as e:
+                logger.exception("background_run_failed")
+                await self._event_bus.publish(Event(
+                    type="conversation.turn.completed",
+                    payload={"text": friendly_error(e)},
+                    session_id=session_id,
+                ))
+
+        self._build_tasks[session_id] = asyncio.create_task(_run())
+        return ack
 
     @staticmethod
     def _was_analysis_only(state: dict) -> bool:
@@ -329,13 +458,8 @@ class ConversationManager:
         return "\n".join(lines)
 
     async def _run_implementation(self, analysis: str, session_id: str, project_path: str) -> str:
-        """Run the full implementation pipeline to act on a prior analysis."""
-        await self._event_bus.publish(Event(
-            type="agent.narration",
-            payload={"text": "Great — let me implement those fixes now.", "agent": "rex"},
-            session_id=session_id,
-        ))
-
+        """Run the full implementation pipeline to act on a prior analysis (in
+        the background, so the conversation stays live)."""
         instruction = (
             "Implement the fixes and improvements identified in this review. "
             "Make the actual code changes to the project files, then run the tests "
@@ -345,60 +469,84 @@ class ConversationManager:
         context_str = await self._context.get_context_for_agent(instruction)
         enriched = f"{instruction}\n\n{context_str}" if context_str else instruction
 
-        state = await self._orchestrator.run(
-            user_message=enriched,
-            project_path=project_path,
-            session_id=session_id,
+        return self._launch(
+            session_id,
+            lambda: self._orchestrator.run(
+                user_message=enriched,
+                project_path=project_path,
+                session_id=session_id,
+            ),
+            "Great — implementing those fixes now. I'll let you know when it's done.",
+            offer_impl=False,
         )
-        return state.get("final_response", "Done — I've implemented the fixes.")
+
+    # ── Intent routing helper ────────────────────────────────────────────────
+
+    async def _route_kind(self, text: str, rule_intent: Intent) -> str:
+        """Decide how to handle a turn: chitchat | question | explain | command.
+
+        Uses the fast chat model so it's robust to natural speech (the old
+        rule-based default sent everything to the build pipeline). Falls back to
+        a conservative rule on error — biasing toward conversation, never an
+        accidental build.
+        """
+        if rule_intent == Intent.GIT:
+            return "command"
+        if rule_intent == Intent.EXPLAIN:
+            return "explain"
+
+        try:
+            llm = create_chat_llm(get_settings().llm)
+            resp = await llm.ainvoke([
+                SystemMessage(content=ROUTER_PROMPT),
+                HumanMessage(content=text.strip()),
+            ])
+            word = response_text(resp).strip().lower()
+            for k in ("chitchat", "question", "explain", "command"):
+                if k in word:
+                    logger.info("intent_routed", kind=k, text=text[:50])
+                    return k
+        except Exception as e:
+            logger.warning("intent_router_failed", error=str(e)[:120])
+
+        # Conservative fallback: only treat as a command on strong action verbs.
+        t = text.lower()
+        strong = (
+            "create ", "build ", "implement", "add ", "write ", "fix ", "fix the",
+            "refactor", "install", "delete", "remove", "rename", "generate",
+            "scaffold", "set up ", "setup ", "deploy", "rewrite", "make a", "make me",
+        )
+        if any(s in t for s in strong):
+            return "command"
+        if any(p in t for p in EXPLAIN_PHRASES):
+            return "explain"
+        return "question" if t.endswith("?") else "chitchat"
+
+    # ── Direct handlers ──────────────────────────────────────────────────────
 
     async def _handle_explain(self, text: str, session_id: str, project_path: str) -> str:
         """
         Walk the user through code in a Claude Code-style explanation.
 
-        Pulls relevant snippets from the context engine, then calls Gemini directly
-        with a focused explanation prompt. Does NOT route through the full agent
-        pipeline so we get a fast, conversational answer suitable for voice.
+        Pulls relevant snippets from the context engine, then calls the chat
+        model directly with a focused prompt. Does NOT route through the full
+        agent pipeline so we get a fast, conversational answer suitable for voice.
         """
-        # Narrate up front so the user hears something immediately
         await self._event_bus.publish(Event(
             type="agent.narration",
             payload={"text": "Sure, let me take a look and walk you through it.", "agent": "rex"},
             session_id=session_id,
         ))
 
-        # Pull the most relevant code chunks for the question
         results = await self._context.search(text, n_results=5)
-
         if not results:
             return ("I can explain this, but I don't have the file indexed yet. "
                     "Can you tell me which file or function you want me to walk through? "
                     "Or load a project first.")
 
-        # Build a compact context blob for Gemini
-        context_lines: list[str] = []
-        for r in results[:5]:
-            file_path = r.get("file_path", "unknown")
-            fn = r.get("function_name") or ""
-            cls = r.get("class_name") or ""
-            label = file_path
-            if fn:
-                label += f" :: {fn}"
-            elif cls:
-                label += f" :: {cls}"
-            snippet = (r.get("content") or "").strip()
-            if snippet:
-                # Trim to keep prompt small
-                if len(snippet) > 1200:
-                    snippet = snippet[:1200] + "\n# ...truncated..."
-                context_lines.append(f"--- {label} ---\n{snippet}")
-
-        context_blob = "\n\n".join(context_lines) if context_lines else "(no relevant code found)"
-
-        # Use the fast chat model (e.g. Groq) so explanations come back quickly.
+        context_blob = self._format_excerpts(results)
         try:
-            settings = get_settings()
-            llm = create_chat_llm(settings.llm)
+            llm = create_chat_llm(get_settings().llm)
             response = await llm.ainvoke([
                 SystemMessage(content=EXPLAIN_SYSTEM_PROMPT),
                 HumanMessage(content=(
@@ -409,9 +557,7 @@ class ConversationManager:
                 )),
             ])
             explanation = response_text(response).strip()
-            if not explanation:
-                explanation = "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
-            return explanation
+            return explanation or "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
         except Exception as e:
             logger.exception("explain_failed")
             return friendly_error(e)
@@ -442,24 +588,7 @@ class ConversationManager:
                 "Can you point me at a specific file or feature so I check the right place?"
             )
 
-        # Build a grounded context blob from the real excerpts.
-        context_lines: list[str] = []
-        for r in results:
-            label = r.get("file_path", "unknown")
-            fn = r.get("function_name") or ""
-            cls = r.get("class_name") or ""
-            if fn:
-                label += f" :: {fn}"
-            elif cls:
-                label += f" :: {cls}"
-            snippet = (r.get("content") or "").strip()
-            if snippet:
-                if len(snippet) > 1200:
-                    snippet = snippet[:1200] + "\n# ...truncated..."
-                context_lines.append(f"--- {label} ---\n{snippet}")
-        context_blob = "\n\n".join(context_lines) or "(no relevant code found)"
-
-        # Answer strictly from the retrieved code, fast, via the chat model.
+        context_blob = self._format_excerpts(results)
         try:
             llm = create_chat_llm(get_settings().llm)
             response = await llm.ainvoke([
@@ -477,34 +606,38 @@ class ConversationManager:
             logger.exception("question_answer_failed")
             return friendly_error(e)
 
-    def _is_coding_request(self, text: str) -> bool:
-        """Heuristic: does this turn actually want code/building (→ slow local
-        pipeline), or is it conversation (→ fast Groq chat)?"""
-        t = text.lower()
-        if any(p in t for p in EXPLAIN_PHRASES):
-            return True
-        if any(kw in t for kw in GIT_KEYWORDS):
-            return True
-        signals = (
-            "create", "build", "make ", "add ", "implement", "write ", "wrote", "generate",
-            "scaffold", "set up", "setup", "install", "run ", "execute", "fix", "debug",
-            "refactor", "rewrite", "update", "modify", "delete", "remove", "rename",
-            "review", "optimi", "deploy", "ship", "endpoint", "function", "class ", "method",
-            "module", "file", "component", "api", "database", "schema", "route", "test",
-            "bug", "feature", "import", "dependency", "package", "compile", "lint", "script",
-            "config", "authentication", "auth ", "jwt", "crud", "where is", "which file",
-            "which function", "locate", "find the", "look at the code", "the code",
-        )
-        return any(s in t for s in signals)
+    @staticmethod
+    def _format_excerpts(results: list[dict]) -> str:
+        """Build a compact, labelled context blob from retrieved code chunks."""
+        lines: list[str] = []
+        for r in results[:6]:
+            label = r.get("file_path", "unknown")
+            fn = r.get("function_name") or ""
+            cls = r.get("class_name") or ""
+            if fn:
+                label += f" :: {fn}"
+            elif cls:
+                label += f" :: {cls}"
+            snippet = (r.get("content") or "").strip()
+            if snippet:
+                if len(snippet) > 1200:
+                    snippet = snippet[:1200] + "\n# ...truncated..."
+                lines.append(f"--- {label} ---\n{snippet}")
+        return "\n\n".join(lines) or "(no relevant code found)"
+
+    # ── Instant answers (no LLM, no pipeline) ────────────────────────────────
 
     def _quick_answer(self, text: str, project_path: str) -> str | None:
-        """Instant, no-LLM answers for status/meta questions. None if not one."""
-        import os
+        """Instant, no-LLM answers for status/meta/file-listing questions.
 
+        Returns None if the turn isn't one of these — so we stay snappy on the
+        things that don't need a model at all (and never build to answer them).
+        """
         t = text.lower().strip()
         connected = project_path not in ("", ".", None)
         name = os.path.basename(project_path.rstrip("/\\")) if connected else ""
 
+        # "is a folder connected? which project are we in?"
         status_phrases = (
             "connected folder", "folder connected", "project connected", "connected project",
             "which folder", "what folder", "which project", "what project", "any folder",
@@ -523,6 +656,13 @@ class ConversationManager:
                 "and I'll work right inside it."
             )
 
+        # "what files are here? how many files? list the files" → just read the
+        # directory and answer (the Claude-Code `ls`), no model, no build.
+        listing = self._file_listing_answer(t, project_path, connected, name)
+        if listing is not None:
+            return listing
+
+        # "what can you do?"
         capability_phrases = (
             "what can you do", "what do you do", "who are you", "what are you",
             "your capabilities", "how can you help", "what can you help",
@@ -535,10 +675,69 @@ class ConversationManager:
             )
         return None
 
+    def _file_listing_answer(
+        self, t: str, project_path: str, connected: bool, name: str
+    ) -> str | None:
+        """Answer 'what/how many files are here' by listing the real directory."""
+        triggers = (
+            "how many file", "what file", "list the file", "list file", "list all file",
+            "files present", "files are there", "files in the", "any files", "any file ",
+            "what's in the folder", "whats in the folder", "what is in the folder",
+            "what's in the project", "files do we have", "files are present",
+            "show me the file", "show the file", "what files", "files there",
+        )
+        if not any(p in t for p in triggers):
+            return None
+
+        if not connected:
+            return (
+                "No project folder is connected yet, so there's nothing for me to list. "
+                "Connect a folder and I'll tell you exactly what's in it."
+            )
+
+        files, dirs = self._scan_top_level(project_path)
+        if not files and not dirs:
+            return f"The '{name}' folder looks empty — I don't see any files in it."
+
+        n = len(files)
+        head = f"The '{name}' folder has {n} file{'s' if n != 1 else ''}"
+        if dirs:
+            head += f" and {len(dirs)} folder{'s' if len(dirs) != 1 else ''}"
+        head += "."
+        if files:
+            shown = ", ".join(files[:12])
+            tail = "." if n <= 12 else f", plus {n - 12} more."
+            head += f" The files are: {shown}{tail}"
+        if dirs:
+            head += f" Folders: {', '.join(dirs[:8])}."
+        return head
+
+    @staticmethod
+    def _scan_top_level(project_path: str) -> tuple[list[str], list[str]]:
+        """Top-level files and folders in the project, skipping build/VCS noise."""
+        files: list[str] = []
+        dirs: list[str] = []
+        try:
+            with os.scandir(project_path) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir():
+                            if entry.name not in _SCAN_SKIP_DIRS:
+                                dirs.append(entry.name)
+                        elif entry.is_file():
+                            files.append(entry.name)
+                    except OSError:
+                        continue
+        except Exception:
+            return [], []
+        files.sort()
+        dirs.sort()
+        return files, dirs
+
+    # ── Conversational replies ───────────────────────────────────────────────
+
     async def _chat_reply(self, text: str, session_id: str, project_path: str) -> str:
         """Warm, two-way conversational reply via the fast chat model (Groq)."""
-        import os
-
         connected = project_path not in ("", ".", None)
         ctx = (
             f" They're currently working in the '{os.path.basename(project_path.rstrip('/\\'))}' project."
@@ -574,22 +773,16 @@ class ConversationManager:
 
         if any(w in lower for w in ["thanks", "thank you", "great", "perfect", "awesome"]):
             return "Happy to help! I'm here whenever you need me. What's next?"
-
         if any(w in lower for w in ["yes", "yeah", "yep", "correct", "right"]):
             return "Awesome, let's keep going! What would you like me to do next?"
-
         if any(w in lower for w in ["no", "nope", "nah"]):
             return "No worries at all! Tell me what you'd prefer and I'll get right on it."
-
         if any(w in lower for w in ["hello", "hi", "hey"]):
             return "Hey there! Great to have you. What are we building today?"
-
         if any(w in lower for w in ["how are you", "what's up"]):
             return "I'm doing great, thanks for asking! Ready to build something awesome with you."
-
         if any(w in lower for w in ["help", "confused", "stuck", "don't know"]):
             return "No worries, I've got you! Just describe what you're trying to build, even roughly, and I'll figure out the rest. You can also ask me to debug, review code, or set up a project."
-
         return "I'm right here! Just tell me what you'd like to build, fix, or explore."
 
 
@@ -605,6 +798,8 @@ _NEGATIVE = (
     "no thanks", "not now", "nope", "nah", "don't", "do not", "leave it",
     "skip", "cancel", "stop", "later", "not yet",
 )
+_STOP = {"stop", "stop it", "wait", "cancel", "hold on", "nevermind", "never mind",
+         "pause", "quiet", "shut up", "be quiet", "enough"}
 
 
 def _is_affirmative(text: str) -> bool:
@@ -621,3 +816,20 @@ def _is_negative(text: str) -> bool:
     if t in {"no", "nope", "nah"}:
         return True
     return any(p in t for p in _NEGATIVE)
+
+
+def _is_clean_confirmation(text: str) -> bool:
+    """A *clean* yes is short and carries no extra instruction.
+
+    "yes", "yes please", "go ahead", "yeah do it" → clean (run the plan).
+    "yes but I just wanted you to check the files…" → NOT clean: it carries a
+    different/narrower ask, so we re-understand it as a fresh turn instead of
+    blindly running the stored plan.
+    """
+    return len(text.split()) <= 6
+
+
+def _is_stop(text: str) -> bool:
+    """A spoken barge-in that means 'stop now' (not just a casual 'wait a sec')."""
+    t = text.strip().lower().rstrip(".!? ")
+    return t in _STOP

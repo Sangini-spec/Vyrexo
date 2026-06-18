@@ -346,6 +346,13 @@ async def _handle_narration(event: Event) -> None:
     """Speak agent narration aloud through Edge-TTS."""
     text = event.payload.get("text", "")
     session_id = event.session_id or ""
+    # Small-talk is just filler. If there's already speech queued, drop it so
+    # casual chatter never stacks up and pushes the real narration's audio
+    # minutes behind the text (the lag the user was hearing).
+    if event.payload.get("kind") == "smalltalk":
+        q = _tts_queues.get(session_id)
+        if q is not None and not q.empty():
+            return
     await _speak(session_id, text)
 
 

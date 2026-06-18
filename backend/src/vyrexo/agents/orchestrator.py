@@ -27,24 +27,22 @@ MAX_REPAIR_ROUNDS = 3
 
 # ── Friendly companion small-talk ────────────────────────────────────────────
 # When a task goes quiet for a while (which happens during slow local-model
-# calls), Rex makes warm small-talk to keep the user company — JARVIS-style.
-# On fast providers there are no long gaps, so this naturally stays silent.
-SILENCE_THRESHOLD = 18.0       # seconds of dead air before a friendly check-in
-CHATTER_CHECK_INTERVAL = 6.0   # how often the companion checks for silence
+# calls), Rex keeps the user company — JARVIS-style. Builds now run in the
+# background, so the user can actually reply and Rex hears them. We keep the
+# cadence relaxed (a longer silence threshold) and lean toward calm, reassuring
+# status lines rather than peppering the user with questions every few seconds.
+SILENCE_THRESHOLD = 35.0       # seconds of dead air before a friendly check-in
+CHATTER_CHECK_INTERVAL = 7.0   # how often the companion checks for silence
 
 SMALL_TALK = [
-    "While that runs — how's your day going so far?",
-    "This part takes a moment. Working on anything fun lately?",
-    "Hang tight, I'm on it. How have you been, by the way?",
-    "Still crunching through this one. Anything new with you?",
-    "Give me a sec here. Got anything exciting planned?",
-    "Almost there. So, how's everything on your end?",
-    "Thanks for your patience — this one's a bit meaty. How are you holding up?",
-    "Working through it. What got you into building this, if you don't mind me asking?",
-    "Bear with me, I'm doing this properly. Had a good week so far?",
-    "Nearly done with this step. Anything else on your mind while I work?",
-    "Still here, still building. How's the coffee situation over there?",
-    "This is the slow part — appreciate you waiting. What are you hoping to build next?",
+    "Still on it — this step takes the local model a little while.",
+    "Working through it. I'll let you know the moment it's ready.",
+    "Hang tight, making good progress here.",
+    "Almost through this part. So, how's your day going?",
+    "Still building — feel free to ask me anything while I work.",
+    "Bear with me, I'm doing this properly so it actually works.",
+    "Crunching through it. Anything you want me to keep in mind for this?",
+    "Nearly done with this step.",
 ]
 
 # Self-contained verifier run inside the project: syntax-compile every .py file,
