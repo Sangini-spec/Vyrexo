@@ -175,6 +175,43 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
 
 // ── Code tab (Replit-style: file tree + live code viewer) ─────────────────────
 
+/** Thin draggable divider for resizing the in-panel file tree. */
+function CodeResize({ onDelta }: { onDelta: (dx: number) => void }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      onDelta(e.clientX - lastX.current);
+      lastX.current = e.clientX;
+    };
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [onDelta]);
+  return (
+    <div
+      onMouseDown={(e) => {
+        dragging.current = true;
+        lastX.current = e.clientX;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      title="Drag to resize"
+      className="w-[4px] flex-shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--steel)] transition-colors"
+    />
+  );
+}
+
 function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; projectPath: string }) {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -182,6 +219,27 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
   const [openContent, setOpenContent] = useState("");
   const [loading, setLoading] = useState(false);
   const connected = projectPath !== "";
+
+  // The file tree is a panel-within-a-panel — collapsible + resizable like the
+  // main sidebars, so the code viewer can take the full width when you want it.
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  const [treeWidth, setTreeWidth] = useState(170);
+  useEffect(() => {
+    try {
+      setTreeCollapsed(localStorage.getItem("vyrexo_codetree_collapsed") === "1");
+      const w = parseInt(localStorage.getItem("vyrexo_codetree_w") || "", 10);
+      if (w) setTreeWidth(Math.max(110, Math.min(320, w)));
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("vyrexo_codetree_w", String(treeWidth)); } catch {}
+  }, [treeWidth]);
+  const toggleTree = () =>
+    setTreeCollapsed((c) => {
+      const n = !c;
+      try { localStorage.setItem("vyrexo_codetree_collapsed", n ? "1" : "0"); } catch {}
+      return n;
+    });
 
   const refreshTree = useCallback(async () => {
     if (!connected) return;
@@ -266,29 +324,48 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
 
   return (
     <div className="h-full flex min-h-0">
-      {/* File tree */}
-      <div className="w-[42%] max-w-[200px] min-w-[120px] border-r border-[var(--border)] overflow-y-auto py-1 bg-[var(--surface)]">
-        <div className="flex items-center justify-between px-2 py-1">
-          <span className="text-[9px] uppercase tracking-wide text-[var(--muted)]">Files</span>
-          <button onClick={refreshTree} title="Refresh" className="text-[var(--muted)] hover:text-[var(--steel)]">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          </button>
+      {/* File tree — collapsible + resizable */}
+      {!treeCollapsed && (
+        <div className="flex-shrink-0 border-r border-[var(--border)] overflow-y-auto py-1 bg-[var(--surface)]" style={{ width: treeWidth }}>
+          <div className="flex items-center justify-between px-2 py-1">
+            <span className="text-[9px] uppercase tracking-wide text-[var(--muted)]">Files</span>
+            <div className="flex items-center gap-[7px]">
+              <button onClick={refreshTree} title="Refresh" className="text-[var(--muted)] hover:text-[var(--steel)]">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </button>
+              <button onClick={toggleTree} title="Hide file tree" className="text-[var(--muted)] hover:text-[var(--steel)]">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+              </button>
+            </div>
+          </div>
+          {tree.length === 0 ? (
+            <p className="px-2 text-[10px] text-[var(--muted)]">Empty / indexing…</p>
+          ) : (
+            tree.map((n) => (
+              <TreeRow key={n.path} node={n} depth={0} expanded={expanded}
+                onToggle={(p) => setExpanded((prev) => { const s = new Set(prev); s.has(p) ? s.delete(p) : s.add(p); return s; })}
+                openPath={openPath} onOpen={(f) => openFile(f)} />
+            ))
+          )}
         </div>
-        {tree.length === 0 ? (
-          <p className="px-2 text-[10px] text-[var(--muted)]">Empty / indexing…</p>
-        ) : (
-          tree.map((n) => (
-            <TreeRow key={n.path} node={n} depth={0} expanded={expanded}
-              onToggle={(p) => setExpanded((prev) => { const s = new Set(prev); s.has(p) ? s.delete(p) : s.add(p); return s; })}
-              openPath={openPath} onOpen={(f) => openFile(f)} />
-          ))
-        )}
-      </div>
+      )}
+      {!treeCollapsed && (
+        <CodeResize onDelta={(dx) => setTreeWidth((w) => Math.max(110, Math.min(320, w + dx)))} />
+      )}
 
       {/* Code viewer */}
       <div className="flex-1 flex flex-col min-w-0 bg-[var(--code-bg)]">
-        <div className="px-3 py-[6px] border-b border-[var(--border)] text-[11px] text-[var(--text3)] font-mono truncate">
-          {openPath || "No file open"}
+        <div className="flex items-center gap-2 px-3 py-[6px] border-b border-[var(--border)]">
+          {treeCollapsed && (
+            <button
+              onClick={toggleTree}
+              title="Show file tree"
+              className="w-[22px] h-[22px] -ml-1 rounded-[5px] border border-[var(--border2)] bg-[var(--surface)] text-[var(--text4)] flex items-center justify-center flex-shrink-0 hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+            </button>
+          )}
+          <span className="text-[11px] text-[var(--text3)] font-mono truncate">{openPath || "No file open"}</span>
         </div>
         <div className="flex-1 overflow-auto">
           {openPath ? (
