@@ -146,7 +146,9 @@ export default function App() {
 
       case "voice.output.start":
       case "voice.output.started":
-        unmuteAudio(); // a fresh utterance is legitimately starting
+        // NOTE: do NOT unmute here. After an interrupt the backend may still
+        // emit utterances; unmuting on them would let audio sneak back. Audio
+        // is only re-enabled when the user sends a new turn.
         beginUtterance();
         setOrbState("speaking");
         break;
@@ -298,24 +300,34 @@ export default function App() {
       setTranscript(text);
       if (isFinal && text.trim()) {
         const final = text.trim();
-        // Barge-in: if Rex is mid-sentence and the user speaks, talking over it
-        // means "stop and listen to me" — kill local audio and tell the backend
-        // to interrupt before sending the new instruction.
-        if (speakingRef.current) {
+        const lower = final.toLowerCase().replace(/[.!?,]/g, "").trim();
+
+        // A spoken "stop" is a HARD interrupt: silence Rex and halt the work,
+        // and do NOT send it as a new turn (so it stays quiet).
+        const STOP_WORDS = ["stop", "stop it", "wait", "cancel", "hold on", "nevermind", "never mind", "pause", "quiet", "shut up", "be quiet", "enough"];
+        if (STOP_WORDS.some((w) => lower === w || lower.startsWith(w + " "))) {
           muteAudio();
           sendMessage({ type: "execution.interrupt", payload: {} });
+          setOrbState("idle");
+          setNarration("Stopped. What would you like instead?");
+          setTranscript("");
+          return;
         }
-        setPendingProposal(null); // a spoken reply answers any pending proposal
+
+        // Otherwise it's conversation (incl. answering small-talk). Stop the
+        // current line so we don't talk over the user, but DON'T interrupt the
+        // build — let the fast chat brain reply while any task keeps running.
+        if (speakingRef.current) stopAudio();
+        audioMutedRef.current = false; // a new turn → allow Rex's reply to play
+        setPendingProposal(null);
         setChatLog((prev) => [...prev, { role: "user", text: final }]);
         sendMessage({ type: "text.input", payload: { text: final } });
-        // Optimistic UI: show "thinking" + a placeholder line so the user sees
-        // their words landed instantly while the backend round-trip happens.
         setOrbState("thinking");
         setNarration("Thinking...");
         setTranscript("");
       }
     },
-    [sendMessage, muteAudio]
+    [sendMessage, muteAudio, stopAudio]
   );
 
   const handleActivated = useCallback(() => {
@@ -429,6 +441,7 @@ export default function App() {
     if (pendingCmd.needsProject && !projectBound) return;
     const text = pendingCmd.text;
     setPendingCmd(null);
+    audioMutedRef.current = false;
     setChatLog((prev) => [...prev, { role: "user", text }]);
     sendMessage({ type: "text.input", payload: { text } });
     setOrbState("thinking");
@@ -510,6 +523,7 @@ export default function App() {
   const handleTextSubmit = useCallback(() => {
     if (!textInput.trim()) return;
     const text = textInput.trim();
+    audioMutedRef.current = false; // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
     setChatLog((prev) => [...prev, { role: "user", text }]);
     sendMessage({ type: "text.input", payload: { text } });
@@ -522,11 +536,12 @@ export default function App() {
   const respondToProposal = useCallback(
     (accept: boolean) => {
       const text = accept ? "yes" : "no";
+      audioMutedRef.current = false;
       setPendingProposal(null);
       setChatLog((prev) => [...prev, { role: "user", text }]);
       sendMessage({ type: "text.input", payload: { text } });
       setOrbState("thinking");
-      setNarration(accept ? "On it — implementing the fixes now." : "Okay, leaving the code as is.");
+      setNarration(accept ? "On it — getting started now." : "Okay, leaving it as is.");
     },
     [sendMessage]
   );

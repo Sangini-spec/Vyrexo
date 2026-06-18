@@ -96,6 +96,10 @@ class ConversationManager:
         # their next turn, we run the full coder/executor/tester pipeline using
         # the stashed context here. Maps session_id -> the analysis text to act on.
         self._pending_impl: dict[str, str] = {}
+        # Per-session pending PLAN awaiting approval. Coding tasks never execute
+        # until the user says yes — Rex shows the plan and waits (Claude-Code
+        # style). Maps session_id -> {instruction, plan, project_path}.
+        self._pending_plan: dict[str, dict] = {}
 
     async def process_turn(
         self,
@@ -157,6 +161,30 @@ class ConversationManager:
                 return "No problem — I'll leave the code as it is. What would you like to do next?"
             # Anything else is a fresh instruction; drop the offer and route it.
             self._pending_impl.pop(session_id, None)
+
+        # If a PLAN is awaiting the user's approval, their answer decides whether
+        # we execute it. Nothing has been written yet at this point.
+        plan_pending = self._pending_plan.get(session_id)
+        if plan_pending is not None:
+            if _is_affirmative(text):
+                self._pending_plan.pop(session_id, None)
+                await self._event_bus.publish(Event(
+                    type="agent.narration",
+                    payload={"text": "Great — starting on it now.", "agent": "rex"},
+                    session_id=session_id,
+                ))
+                state = await self._orchestrator.run(
+                    user_message=plan_pending["instruction"],
+                    project_path=plan_pending["project_path"],
+                    session_id=session_id,
+                    approved_plan=plan_pending["plan"],
+                )
+                return state.get("final_response", "Done.")
+            if _is_negative(text):
+                self._pending_plan.pop(session_id, None)
+                return "Okay, I won't make any changes. Tell me what you'd like to adjust, or what else I can do."
+            # Not a clear yes/no — treat as a revised request and re-plan it.
+            self._pending_plan.pop(session_id, None)
 
         # Instant, no-LLM answers for status/meta questions ("is a folder
         # connected?", "what can you do?") — keeps the voice snappy.
@@ -228,11 +256,35 @@ class ConversationManager:
         if context_str:
             enriched_message = f"{text}\n\n{context_str}"
 
-        # Run the agent pipeline
+        # ── Approval gate ────────────────────────────────────────────────
+        # Plan FIRST and never execute changes without the user's explicit OK.
+        plan = await self._orchestrator.preview_plan(enriched_message, project_path, session_id)
+        if not plan:
+            return f"{emotion_prefix}I couldn't put a plan together for that — could you rephrase what you'd like me to do?"
+
+        agents_in_plan = {s.get("agent_name") for s in plan}
+        mutating = bool(agents_in_plan & {"coding", "executor", "testing"})
+
+        if mutating:
+            # This plan would change files / run commands — show it and WAIT.
+            # Nothing has been written at this point.
+            self._pending_plan[session_id] = {
+                "instruction": enriched_message,
+                "plan": plan,
+                "project_path": project_path,
+            }
+            summary = self._format_plan(plan)
+            return (
+                f"{emotion_prefix}Here's my plan:\n\n{summary}\n\n"
+                "Should I go ahead and build this? Say **yes** to start, or tell me what to change."
+            )
+
+        # Read-only plan (e.g. a review) — safe to run now without approval.
         state = await self._orchestrator.run(
             user_message=enriched_message,
             project_path=project_path,
             session_id=session_id,
+            approved_plan=plan,
         )
 
         response = state.get("final_response", "Done.")
@@ -265,6 +317,16 @@ class ConversationManager:
         agents = {step.get("agent_name") for step in plan}
         mutating = {"coding", "executor", "testing"}
         return "review" in agents and not (agents & mutating)
+
+    @staticmethod
+    def _format_plan(plan: list[dict]) -> str:
+        """Number the plan steps for the user to review (spoken + shown)."""
+        lines = []
+        for i, step in enumerate(plan, 1):
+            desc = (step.get("description") or "").strip()
+            if desc:
+                lines.append(f"{i}. {desc}")
+        return "\n".join(lines)
 
     async def _run_implementation(self, analysis: str, session_id: str, project_path: str) -> str:
         """Run the full implementation pipeline to act on a prior analysis."""

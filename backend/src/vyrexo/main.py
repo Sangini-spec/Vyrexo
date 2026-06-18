@@ -70,6 +70,11 @@ _session_voice_configs: dict[str, VoiceConfig] = {}
 # server's CWD) until a project is connected.
 _session_projects: dict[str, str] = {}
 
+# Sessions that were just interrupted. While a session is here, ALL TTS is
+# dropped — so Rex goes (and stays) silent immediately instead of finishing
+# in-flight narration. Cleared the moment the user speaks again.
+_suppressed_sessions: set[str] = set()
+
 # Per-session TTS work queues. Producers (narration / turn-completed handlers)
 # push text onto the queue. A single worker per session drains it sequentially,
 # which means narrations are spoken in order without overlap — but synthesis
@@ -193,6 +198,9 @@ async def _handle_conversation_turn(event: Event) -> None:
     if not text.strip():
         return
 
+    # A fresh user turn lifts any post-interrupt silence so Rex can speak again.
+    _suppressed_sessions.discard(session_id)
+
     # Run all work inside the session's connected project (set via project.set).
     # Falls back to the server CWD if no project has been connected yet.
     project_path = _session_projects.get(session_id) or "."
@@ -216,6 +224,10 @@ async def _handle_conversation_turn(event: Event) -> None:
 async def _handle_interrupt(event: Event) -> None:
     """Handle interrupt requests — pause the orchestrator and kill TTS immediately."""
     session_id = event.session_id or ""
+
+    # 0. Suppress ALL further speech for this session until the user speaks
+    #    again — stops late narration from the in-flight step sneaking through.
+    _suppressed_sessions.add(session_id)
 
     # 1. Stop the agent pipeline
     if orchestrator is not None:
@@ -308,6 +320,10 @@ async def _speak(session_id: str, text: str) -> None:
     tool repeatedly).
     """
     if not text or voice_pipeline is None or not session_id:
+        return
+
+    # Dropped while the session is suppressed (just interrupted).
+    if session_id in _suppressed_sessions:
         return
 
     import time

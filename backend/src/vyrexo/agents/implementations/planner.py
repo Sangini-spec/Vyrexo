@@ -15,7 +15,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from vyrexo.agents.base import BaseAgent, ToolDefinition
-from vyrexo.agents.llm_factory import create_llm
+from vyrexo.agents.llm_factory import create_chat_llm, create_llm
 from vyrexo.agents.registry import AgentRegistry
 from vyrexo.config import get_settings
 
@@ -76,7 +76,9 @@ class PlannerAgent(BaseAgent):
 
     async def execute(self, state: dict[str, Any]) -> dict[str, Any]:
         settings = get_settings()
-        llm = create_llm(settings.llm, self.model_tier)
+        # Plan on the fast chat model so the approval preview comes back quickly;
+        # the actual code-writing agents still run on the local model.
+        llm = create_chat_llm(settings.llm)
 
         # Get the latest user message
         messages = state.get("messages", [])

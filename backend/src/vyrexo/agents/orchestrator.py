@@ -123,11 +123,36 @@ class AgentOrchestrator:
     def has_paused_state(self) -> bool:
         return self._paused_state is not None
 
-    async def run(self, user_message: str, project_path: str, session_id: str = "") -> dict[str, Any]:
+    async def preview_plan(self, user_message: str, project_path: str, session_id: str = "") -> list[dict[str, Any]]:
+        """Run ONLY the planner and return the steps — no code is written.
+
+        Used by the approval gate: the user sees and approves this plan before
+        anything executes.
+        """
+        state: dict[str, Any] = {
+            "messages": [{"role": "user", "content": user_message}],
+            "session_id": session_id,
+            "project_path": project_path,
+            "plan": [],
+            "current_step": 0,
+            "artifacts": {},
+            "event_bus": self._event_bus,
+        }
+        planner = AgentRegistry.create("planner")
+        state = await planner.execute(state)
+        return state.get("plan", []) or []
+
+    async def run(
+        self,
+        user_message: str,
+        project_path: str,
+        session_id: str = "",
+        approved_plan: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         Run the full agent pipeline for a user message.
 
-        1. PlannerAgent creates a plan
+        1. PlannerAgent creates a plan (skipped if an approved_plan is supplied)
         2. Router iterates through plan steps
         3. Each step is executed by the assigned agent
         4. Results accumulate in shared state
@@ -164,12 +189,14 @@ class AgentOrchestrator:
         }
 
         try:
-            # Step 1: Planning. We don't narrate here; the planner agent itself
-            # speaks a single short line so the user doesn't hear two "let me
-            # think" intros in a row.
-            await self._publish_step_event("planner", "Creating development plan...", session_id)
-            planner = AgentRegistry.create("planner")
-            state = await planner.execute(state)
+            # Step 1: Planning — unless the user already approved a plan, in
+            # which case we skip straight to execution.
+            if approved_plan:
+                state["plan"] = approved_plan
+            else:
+                await self._publish_step_event("planner", "Creating development plan...", session_id)
+                planner = AgentRegistry.create("planner")
+                state = await planner.execute(state)
 
             await self._event_bus.publish(Event(
                 type="agent.plan.created",
