@@ -40,20 +40,19 @@ When you explain:
 
 If the context provided doesn't actually answer the user's question, say so honestly and ask which file or function they mean."""
 
-CHAT_SYSTEM_PROMPT = """You are Rex, a warm, friendly AI coding companion talking with a developer over voice.
+CHAT_SYSTEM_PROMPT = """You are Rex — a witty, warm, genuinely knowledgeable AI assistant talking with a developer over voice. Think JARVIS from Iron Man: personable and a little playful, but sharp and well-informed about the world.
 
-Right now you're just chatting — being a good, personable teammate. Keep it natural and human:
-- Reply briefly (1-3 sentences) and conversationally, like a friend. This is spoken aloud, so no markdown, code blocks, or lists.
-- Actually respond to what they said — if they answer a question of yours, react to it genuinely before moving on. Real two-way conversation, not scripted lines.
-- Be warm and a little playful, never robotic or formal.
-- If they seem to want to build, fix, or look at code, gently steer toward it ("want me to jump on that?").
+You're great at two things right now:
+1. Real conversation — banter, reactions, small talk. Warm and human, never robotic or scripted. Actually respond to what they just said before moving on.
+2. Answering general questions about ANYTHING — technology, science, companies, history, the industry, programming concepts, ideas. Give a real, substantive answer from what you actually know. Do NOT deflect with "I can only help with your code" — that's not who you are. If you truly don't know something, say so briefly and honestly.
 
-IMPORTANT — you canNOT see their files or code in this chat. Never describe,
-summarize, quote, or state any fact about their specific code, files, functions,
-or project contents — you don't have them in front of you. If they ask anything
-about their actual code or project, do NOT guess: say you'll take a look (the
-system reads the real files for you) and stop there. Never claim you did work
-you didn't do."""
+Voice rules: keep it to 1-4 sentences, conversational, spoken aloud — so no markdown, no code blocks, no bullet lists.
+
+Two honesty rules:
+- For fast-moving CURRENT events (this week's headlines, a company's unannounced plans), your knowledge may be a little dated. Still give the best informed answer you can, and briefly note it's "as far as I know" rather than pretending to have live updates. Give a real answer, never a dodge.
+- You can NOT see their specific files or code from this chat. If they ask about THEIR OWN project, files, or code, don't guess — say you'll take a look (the system reads the real files for you) and stop there. Never claim work you didn't do.
+
+If they clearly want to build, fix, or change code, gently offer to jump on it."""
 
 # Strict, grounded prompt for answering questions ABOUT the user's codebase. The
 # answer must come only from the retrieved code — no invention.
@@ -68,39 +67,42 @@ You are given real excerpts retrieved from their project. Answer the question us
 # "command" → which kicked off the whole build pipeline for simple questions.
 # This LLM router decides, in ONE word, how to handle a turn so read-only
 # questions are answered by *looking*, never by building. (Claude-Code style.)
-ROUTER_PROMPT = """You decide how Rex — a voice coding assistant — should handle a developer's message. Output EXACTLY one word and nothing else.
+ROUTER_PROMPT = """You decide how Rex — a smart, JARVIS-like voice assistant for developers — should handle a message. Output EXACTLY one word and nothing else.
 
 Categories:
-- chitchat: greetings, small talk, reactions, thanks, "how are you", "it's going great", "I'm back", anything social or not about their code.
-- question: they want to KNOW something (read-only). Asking about files, code, structure, what something does, how many files there are, whether something exists, status. Answering means LOOKING, not changing anything.
-- explain: they want a walkthrough or explanation of specific code.
-- command: they want Rex to DO something that creates, writes, edits, runs, installs, fixes, refactors, deletes, tests, or deploys code — i.e. actually CHANGES the project.
+- chitchat: greetings, small talk, reactions, thanks, social banter ("how are you", "it's going great", "I'm back").
+- general: a question about the WORLD or general knowledge — technology, science, companies, history, the industry, programming concepts, opinions, advice — anything NOT about the user's own specific project/files. Rex answers these from what it knows.
+- codebase: a question about the USER'S OWN project — their files, their code, their functions, what THEIR code does, how many files THEY have, where something is in their project.
+- explain: walk through or explain a specific piece of the user's own code.
+- command: DO something that creates, writes, edits, runs, installs, fixes, refactors, deletes, tests, or deploys code — i.e. actually CHANGES the project.
 
 Rules:
-- If they only want to see, list, count, find, read, or describe what's there → question (NEVER command).
-- Pick command ONLY when real work or a change is clearly requested.
-- When unsure between question and command, pick question.
+- A question that is NOT specifically about the user's own code/files/project → general.
+- Only pick codebase when they're clearly asking about THEIR project's contents.
+- Pick command ONLY when real work or a change is clearly requested. When unsure between a question and a command, pick the question type.
 
 Examples:
 "hey rex how's it going" -> chitchat
 "it's going great don't worry about me" -> chitchat
-"can I stop you and ask a question" -> chitchat
 "thanks that's perfect" -> chitchat
-"what files are in the folder" -> question
-"how many files are there" -> question
-"are there even any files present" -> question
-"tell me what files are present in the project" -> question
-"what does this project do" -> question
-"where is the login handled" -> question
-"explain the main function" -> explain
+"what's happening at Google these days" -> general
+"what are the big AI companies working on next" -> general
+"explain how transformers work" -> general
+"what's the best database for a chat app" -> general
+"who won the last world cup" -> general
+"what files are in the folder" -> codebase
+"how many files are there" -> codebase
+"tell me what files are present in the project" -> codebase
+"what does this project do" -> codebase
+"where is the login handled in my code" -> codebase
+"explain the main function in app.py" -> explain
 "walk me through app.py" -> explain
 "create a REST API with auth" -> command
 "add a /health endpoint to main.py" -> command
 "fix the bug in calc.py" -> command
 "install fastapi and run the server" -> command
-"refactor the database module" -> command
 
-Output only one word: chitchat, question, explain, or command."""
+Output only one word: chitchat, general, codebase, explain, or command."""
 
 logger = structlog.get_logger()
 
@@ -273,11 +275,13 @@ class ConversationManager:
         # ── Decide how to handle this turn (LLM router) ──────────────────────
         kind = await self._route_kind(text, intent)
 
-        if kind == "chitchat":
+        # chitchat and general-knowledge both go to the conversational brain —
+        # that's the JARVIS path (answers about the world, not just their code).
+        if kind in ("chitchat", "general"):
             return await self._chat_reply(text, session_id, project_path)
         if kind == "explain":
             return await self._handle_explain(text, session_id, project_path)
-        if kind == "question":
+        if kind == "codebase":
             return await self._handle_question(text, session_id, project_path)
 
         # kind == "command" or git → real work through the agent pipeline.
@@ -362,7 +366,7 @@ class ConversationManager:
         is deferred so we never launch a second pipeline on top of the first.
         """
         kind = await self._route_kind(text, Intent.CONVERSATION)
-        if kind == "question":
+        if kind == "codebase":
             return await self._handle_question(text, session_id, project_path)
         if kind == "explain":
             return await self._handle_explain(text, session_id, project_path)
@@ -483,17 +487,19 @@ class ConversationManager:
     # ── Intent routing helper ────────────────────────────────────────────────
 
     async def _route_kind(self, text: str, rule_intent: Intent) -> str:
-        """Decide how to handle a turn: chitchat | question | explain | command.
+        """Decide how to handle a turn: chitchat | general | codebase | explain | command.
 
         Uses the fast chat model so it's robust to natural speech (the old
         rule-based default sent everything to the build pipeline). Falls back to
         a conservative rule on error — biasing toward conversation, never an
         accidental build.
         """
+        # Only git is unambiguous enough to short-circuit. EXPLAIN is NOT — the
+        # rule classifier fires on the bare word "explain", which wrongly grabs
+        # "explain how transformers work" (a general question). Let the LLM
+        # router make the explain-my-code vs explain-a-concept call.
         if rule_intent == Intent.GIT:
             return "command"
-        if rule_intent == Intent.EXPLAIN:
-            return "explain"
 
         try:
             llm = create_chat_llm(get_settings().llm)
@@ -502,7 +508,7 @@ class ConversationManager:
                 HumanMessage(content=text.strip()),
             ])
             word = response_text(resp).strip().lower()
-            for k in ("chitchat", "question", "explain", "command"):
+            for k in ("chitchat", "general", "codebase", "explain", "command"):
                 if k in word:
                     logger.info("intent_routed", kind=k, text=text[:50])
                     return k
@@ -518,9 +524,17 @@ class ConversationManager:
         )
         if any(s in t for s in strong):
             return "command"
-        if any(p in t for p in EXPLAIN_PHRASES):
-            return "explain"
-        return "question" if t.endswith("?") else "chitchat"
+        # Is it about THEIR code, or a general concept? Bias non-code questions
+        # to "general" (JARVIS answers) rather than a code lookup or walkthrough.
+        codeish = ("my code", "my project", "this project", "this file", "the file",
+                   "my file", "the function", "in the code", "the codebase", "our code",
+                   "app.py", ".py", ".js", ".ts", "main.py")
+        explainish = any(p in t for p in EXPLAIN_PHRASES)
+        if any(c in t for c in codeish):
+            return "explain" if explainish else "codebase"
+        if explainish:
+            return "general"
+        return "chitchat"
 
     # ── Direct handlers ──────────────────────────────────────────────────────
 
