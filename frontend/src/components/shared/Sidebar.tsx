@@ -14,6 +14,7 @@ interface SidebarProps {
   sessions: Record<string, Session[]>;
   activeSessionId?: string;
   collapsed: boolean;
+  width?: number;
   onToggle: () => void;
   onSessionClick: (id: string) => void;
   onNewSession: () => void;
@@ -25,6 +26,7 @@ export function Sidebar({
   sessions,
   activeSessionId,
   collapsed,
+  width = 260,
   onSessionClick,
   onNewSession,
   onRenameSession,
@@ -59,9 +61,13 @@ export function Sidebar({
 
   return (
     <div
-      className={`flex flex-col flex-shrink-0 bg-[var(--surface)] border-r border-[var(--border)] transition-all duration-300 overflow-hidden ${
-        collapsed ? "w-0 border-r-0 opacity-0 pointer-events-none" : "w-[260px]"
-      }`}
+      className="flex flex-col flex-shrink-0 bg-[var(--surface)] border-r border-[var(--border)] overflow-hidden"
+      style={{
+        width: collapsed ? 0 : width,
+        opacity: collapsed ? 0 : 1,
+        pointerEvents: collapsed ? "none" : "auto",
+        borderRightWidth: collapsed ? 0 : undefined,
+      }}
     >
       {/* Header */}
       <div className="flex items-center justify-between p-[14px_16px] border-b border-[var(--border)]">

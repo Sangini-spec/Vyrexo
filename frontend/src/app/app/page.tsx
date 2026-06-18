@@ -43,6 +43,48 @@ function dayGroup(ts: number): string {
   return "Earlier";
 }
 
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// Draggable divider for resizing a panel. onDelta gets the horizontal mouse
+// movement since the last event; the parent applies it to the right width.
+function ResizeHandle({ onDelta }: { onDelta: (dx: number) => void }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      onDelta(e.clientX - lastX.current);
+      lastX.current = e.clientX;
+    };
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [onDelta]);
+  return (
+    <div
+      onMouseDown={(e) => {
+        dragging.current = true;
+        lastX.current = e.clientX;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      title="Drag to resize"
+      className="w-[5px] flex-shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--steel)] active:bg-[var(--steel)] transition-colors z-40"
+    />
+  );
+}
+
 // Home-screen quick actions. Each carries a concrete prompt (not just its
 // label) so clicking it kicks off real agent work. All operate inside a
 // project folder, so the work is scoped (and "create" tasks don't dump files
@@ -91,6 +133,19 @@ export default function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  // Resizable panel widths (drag the divider). Persisted across reloads.
+  const [sidebarWidth, setSidebarWidth] = useState(260);
+  const [rightPanelWidth, setRightPanelWidth] = useState(420);
+  useEffect(() => {
+    try {
+      const s = localStorage.getItem("vyrexo_sidebar_w");
+      const r = localStorage.getItem("vyrexo_rightpanel_w");
+      if (s) setSidebarWidth(clamp(parseInt(s), 180, 520));
+      if (r) setRightPanelWidth(clamp(parseInt(r), 280, 760));
+    } catch {}
+  }, []);
+  useEffect(() => { try { localStorage.setItem("vyrexo_sidebar_w", String(sidebarWidth)); } catch {} }, [sidebarWidth]);
+  useEffect(() => { try { localStorage.setItem("vyrexo_rightpanel_w", String(rightPanelWidth)); } catch {} }, [rightPanelWidth]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [orbState, setOrbState] = useState<OrbState>("idle");
   const [transcript, setTranscript] = useState("");
@@ -296,6 +351,7 @@ export default function App() {
             path: msg.payload.path as string,
             command: msg.payload.command as string,
             message: msg.payload.message as string,
+            content: msg.payload.content as string,
           },
         ]);
         break;
@@ -696,12 +752,16 @@ export default function App() {
           sessions={groupedSessions}
           activeSessionId={activeSession ?? undefined}
           collapsed={sidebarCollapsed}
+          width={sidebarWidth}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
           onSessionClick={handleSessionClick}
           onNewSession={createSession}
           onRenameSession={handleRenameSession}
           onDeleteSession={handleDeleteSession}
         />
+        {!sidebarCollapsed && (
+          <ResizeHandle onDelta={(dx) => setSidebarWidth((w) => clamp(w + dx, 180, 520))} />
+        )}
         <div
           className="flex-1 flex flex-col items-center justify-center relative"
           style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)" }}
@@ -768,12 +828,16 @@ export default function App() {
         sessions={groupedSessions}
         activeSessionId={activeSession}
         collapsed={sidebarCollapsed}
+        width={sidebarWidth}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         onSessionClick={handleSessionClick}
         onNewSession={createSession}
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
       />
+      {!sidebarCollapsed && (
+        <ResizeHandle onDelta={(dx) => setSidebarWidth((w) => clamp(w + dx, 180, 520))} />
+      )}
 
       <div className="flex-1 flex flex-col relative">
         {/* Toggle left */}
@@ -869,8 +933,13 @@ export default function App() {
       </div>
 
       {/* Right panel — 4 tabs: Chat / Code / Task / Preview */}
+      {!rightPanelCollapsed && (
+        <ResizeHandle onDelta={(dx) => setRightPanelWidth((w) => clamp(w - dx, 280, 760))} />
+      )}
       <RightPanel
         collapsed={rightPanelCollapsed}
+        width={rightPanelWidth}
+        projectPath={activeProject?.path || ""}
         activeTab={activeRightTab}
         onTabChange={setActiveRightTab}
         narration={narration}

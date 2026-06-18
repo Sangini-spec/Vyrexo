@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from pathlib import Path
 
 import structlog
 from fastapi import APIRouter
@@ -11,6 +13,15 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 logger = structlog.get_logger()
+
+# Directories never shown in the file tree.
+_TREE_SKIP = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "env", ".next",
+    "dist", "build", ".mypy_cache", ".pytest_cache", ".idea", ".vscode",
+    ".ruff_cache", ".turbo", ".cache", "site-packages", ".pytest_cache",
+}
+_MAX_TREE_ENTRIES = 1200
+_MAX_FILE_BYTES = 500_000
 
 
 class ProjectLoadRequest(BaseModel):
@@ -90,3 +101,70 @@ async def vscode_status() -> dict:
 
     available = await is_vscode_available()
     return {"available": available}
+
+
+def _build_tree(root: Path, current: Path, depth: int, budget: list[int]) -> list[dict]:
+    """Recursively list a directory into a nested tree (dirs first, then files),
+    skipping build/VCS noise. ``budget`` caps the total number of entries."""
+    if depth > 7 or budget[0] <= 0:
+        return []
+    try:
+        items = sorted(os.scandir(current), key=lambda e: (e.is_file(), e.name.lower()))
+    except Exception:
+        return []
+    out: list[dict] = []
+    for entry in items:
+        if budget[0] <= 0:
+            break
+        name = entry.name
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        # Skip junk dirs and any hidden directory.
+        if is_dir and (name in _TREE_SKIP or name.startswith(".")):
+            continue
+        budget[0] -= 1
+        try:
+            rel = str(Path(entry.path).resolve().relative_to(root)).replace("\\", "/")
+        except Exception:
+            continue
+        if is_dir:
+            out.append({
+                "name": name, "type": "dir", "path": rel,
+                "children": _build_tree(root, Path(entry.path), depth + 1, budget),
+            })
+        else:
+            out.append({"name": name, "type": "file", "path": rel})
+    return out
+
+
+@router.get("/tree")
+async def project_tree(path: str) -> dict:
+    """Return the project's file structure as a nested tree (for the Code tab)."""
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        return {"ok": False, "error": "Not a directory"}
+    root = root.resolve()
+    budget = [_MAX_TREE_ENTRIES]
+    return {"ok": True, "tree": _build_tree(root, root, 0, budget)}
+
+
+@router.get("/file")
+async def read_project_file(path: str, file: str) -> dict:
+    """Return a file's text content (for the Code tab viewer). Scoped to the
+    project root, with a size cap and path-traversal protection."""
+    root = Path(path).expanduser().resolve()
+    target = (root / file).resolve()
+    # Path-traversal guard: target must live inside the project root.
+    if root != target and root not in target.parents:
+        return {"ok": False, "error": "Path outside the project"}
+    if not target.is_file():
+        return {"ok": False, "error": "File not found"}
+    try:
+        if target.stat().st_size > _MAX_FILE_BYTES:
+            return {"ok": False, "error": "File too large to preview"}
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+    return {"ok": True, "path": file, "content": content}

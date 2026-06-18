@@ -245,6 +245,13 @@ class BaseAgent(ABC):
             return
         session_id: str = state.get("session_id", "") or ""
         category = self._ACTION_CATEGORIES.get(tool_name, "tool")
+        # For writes, include the actual content so the Code tab can show the
+        # exact code being written live (Replit-style), capped to a sane size.
+        content = ""
+        if category == "file_write":
+            raw = args.get("content")
+            if isinstance(raw, str):
+                content = raw[:100_000]
         await event_bus.publish(Event(
             type=f"agent.action.{category}",
             payload={
@@ -254,6 +261,7 @@ class BaseAgent(ABC):
                 "path": args.get("path") or args.get("file_path") or "",
                 "command": args.get("command") or "",
                 "message": args.get("message") or "",
+                "content": content,
             },
             session_id=session_id,
         ))

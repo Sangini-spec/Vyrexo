@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AgentTimeline, type AgentStep } from "@/components/agents/AgentTimeline";
@@ -13,9 +13,9 @@ export interface ChatMessage {
 }
 
 /**
- * A single entry in the Code tab feed. `action` entries come from
- * `agent.action.*` events (a tool the agent ran); `output` entries come from
- * `execution.output` events (terminal output).
+ * A single entry in the Code feed. `action` entries come from `agent.action.*`
+ * events (a tool the agent ran); `output` entries come from `execution.output`.
+ * `content` carries the exact code for file_write actions.
  */
 export interface CodeEvent {
   kind: "action" | "output";
@@ -26,16 +26,26 @@ export interface CodeEvent {
   command?: string;
   message?: string;
   text?: string;
+  content?: string;
+}
+
+interface TreeNode {
+  name: string;
+  type: "file" | "dir";
+  path: string;
+  children?: TreeNode[];
 }
 
 interface RightPanelProps {
   collapsed: boolean;
+  width: number;
   activeTab: RightTab;
   onTabChange: (tab: RightTab) => void;
   narration: string;
   steps: AgentStep[];
   chatLog: ChatMessage[];
   codeEvents: CodeEvent[];
+  projectPath: string;
   previewUrl: string;
   onPreviewUrlChange: (url: string) => void;
   voiceMode: string;
@@ -51,12 +61,14 @@ const TABS: { key: RightTab; label: string }[] = [
 
 export function RightPanel({
   collapsed,
+  width,
   activeTab,
   onTabChange,
   narration,
   steps,
   chatLog,
   codeEvents,
+  projectPath,
   previewUrl,
   onPreviewUrlChange,
   voiceMode,
@@ -64,9 +76,8 @@ export function RightPanel({
 }: RightPanelProps) {
   return (
     <div
-      className={`flex flex-col flex-shrink-0 bg-[var(--panel)] border-l border-[var(--border)] transition-all duration-300 overflow-hidden ${
-        collapsed ? "w-0 border-l-0 opacity-0 pointer-events-none" : "w-[420px]"
-      }`}
+      className="flex flex-col flex-shrink-0 bg-[var(--panel)] border-l border-[var(--border)] overflow-hidden"
+      style={{ width: collapsed ? 0 : width, opacity: collapsed ? 0 : 1, pointerEvents: collapsed ? "none" : "auto" }}
     >
       {/* Tab bar */}
       <div className="flex border-b border-[var(--border)] px-[6px]">
@@ -91,7 +102,7 @@ export function RightPanel({
       {/* Tab content */}
       <div className="flex-1 min-h-0">
         {activeTab === "chat" && <ChatTab chatLog={chatLog} />}
-        {activeTab === "code" && <CodeTab codeEvents={codeEvents} />}
+        {activeTab === "code" && <CodeTab codeEvents={codeEvents} projectPath={projectPath} />}
         {activeTab === "task" && <TaskTab narration={narration} steps={steps} />}
         {activeTab === "preview" && (
           <PreviewTab previewUrl={previewUrl} onPreviewUrlChange={onPreviewUrlChange} />
@@ -162,70 +173,177 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
   );
 }
 
-// ── Code tab ────────────────────────────────────────────────────────────────
+// ── Code tab (Replit-style: file tree + live code viewer) ─────────────────────
 
-function CodeTab({ codeEvents }: { codeEvents: CodeEvent[] }) {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; projectPath: string }) {
+  const [tree, setTree] = useState<TreeNode[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [openPath, setOpenPath] = useState("");
+  const [openContent, setOpenContent] = useState("");
+  const [loading, setLoading] = useState(false);
+  const connected = projectPath !== "";
+
+  const refreshTree = useCallback(async () => {
+    if (!connected) return;
+    try {
+      const r = await fetch(`/api/projects/tree?path=${encodeURIComponent(projectPath)}`);
+      const d = await r.json();
+      if (d.ok) {
+        setTree(d.tree as TreeNode[]);
+        // Auto-expand top-level folders so the structure is visible at a glance.
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          (d.tree as TreeNode[]).forEach((n) => n.type === "dir" && next.add(n.path));
+          return next;
+        });
+      }
+    } catch {
+      /* backend not reachable yet */
+    }
+  }, [connected, projectPath]);
+
+  const openFile = useCallback(
+    async (file: string, inlineContent?: string) => {
+      setOpenPath(file);
+      if (inlineContent != null) {
+        setOpenContent(inlineContent);
+        return;
+      }
+      if (!connected) return;
+      setLoading(true);
+      try {
+        const r = await fetch(
+          `/api/projects/file?path=${encodeURIComponent(projectPath)}&file=${encodeURIComponent(file)}`
+        );
+        const d = await r.json();
+        setOpenContent(d.ok ? (d.content as string) : `// ${d.error || "couldn't open this file"}`);
+      } catch {
+        setOpenContent("// failed to load file");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [connected, projectPath]
+  );
+
+  // Initial + project-change tree load.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [codeEvents.length]);
+    setTree([]);
+    setOpenPath("");
+    setOpenContent("");
+    refreshTree();
+  }, [refreshTree]);
 
-  if (codeEvents.length === 0) {
+  // The most recent file Rex wrote — auto-open it with the exact content, and
+  // refresh the tree (a new file may have appeared).
+  const lastWrite = useMemo(() => {
+    for (let i = codeEvents.length - 1; i >= 0; i--) {
+      const e = codeEvents[i];
+      if (e.kind === "action" && e.category === "file_write" && e.path) return e;
+    }
+    return null;
+  }, [codeEvents]);
+
+  useEffect(() => {
+    if (lastWrite?.path) {
+      openFile(lastWrite.path, lastWrite.content || undefined);
+      refreshTree();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastWrite?.path, lastWrite?.content]);
+
+  if (!connected) {
     return (
       <div className="h-full flex items-center justify-center px-6 text-center">
         <p className="text-xs text-[var(--muted)]">
-          Files Rex reads or writes and commands it runs will stream here as it works.
+          Connect a project and the file tree will show here — Rex opens each file as it writes it.
         </p>
       </div>
     );
   }
 
+  const lines = openContent ? openContent.split("\n") : [];
+
   return (
-    <div className="h-full overflow-y-auto p-3 font-mono text-[11px] leading-relaxed bg-[var(--code-bg)]">
-      {codeEvents.map((ev, i) => (
-        <CodeLine key={i} ev={ev} />
-      ))}
-      <div ref={bottomRef} />
+    <div className="h-full flex min-h-0">
+      {/* File tree */}
+      <div className="w-[42%] max-w-[200px] min-w-[120px] border-r border-[var(--border)] overflow-y-auto py-1 bg-[var(--surface)]">
+        <div className="flex items-center justify-between px-2 py-1">
+          <span className="text-[9px] uppercase tracking-wide text-[var(--muted)]">Files</span>
+          <button onClick={refreshTree} title="Refresh" className="text-[var(--muted)] hover:text-[var(--steel)]">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+        </div>
+        {tree.length === 0 ? (
+          <p className="px-2 text-[10px] text-[var(--muted)]">Empty / indexing…</p>
+        ) : (
+          tree.map((n) => (
+            <TreeRow key={n.path} node={n} depth={0} expanded={expanded}
+              onToggle={(p) => setExpanded((prev) => { const s = new Set(prev); s.has(p) ? s.delete(p) : s.add(p); return s; })}
+              openPath={openPath} onOpen={(f) => openFile(f)} />
+          ))
+        )}
+      </div>
+
+      {/* Code viewer */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[var(--code-bg)]">
+        <div className="px-3 py-[6px] border-b border-[var(--border)] text-[11px] text-[var(--text3)] font-mono truncate">
+          {openPath || "No file open"}
+        </div>
+        <div className="flex-1 overflow-auto">
+          {openPath ? (
+            <div className="flex font-mono text-[11px] leading-[1.55]">
+              <div className="select-none text-right pr-2 pl-2 py-2 text-[var(--muted)] border-r border-[var(--border2)] bg-[var(--surface)]">
+                {lines.map((_, i) => <div key={i}>{i + 1}</div>)}
+              </div>
+              <pre className="flex-1 py-2 px-3 whitespace-pre overflow-x-auto text-[var(--text3)]">{loading ? "loading…" : openContent}</pre>
+            </div>
+          ) : (
+            <div className="h-full flex items-center justify-center px-6 text-center">
+              <p className="text-xs text-[var(--muted)]">Pick a file on the left, or Rex will open one as it writes.</p>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-function CodeLine({ ev }: { ev: CodeEvent }) {
-  if (ev.kind === "output") {
+function TreeRow({
+  node, depth, expanded, onToggle, openPath, onOpen,
+}: {
+  node: TreeNode; depth: number; expanded: Set<string>;
+  onToggle: (path: string) => void; openPath: string; onOpen: (file: string) => void;
+}) {
+  const isOpenDir = expanded.has(node.path);
+  const pad = 6 + depth * 11;
+  if (node.type === "dir") {
     return (
-      <pre className="whitespace-pre-wrap text-[var(--text4)] mb-1 pl-3 border-l border-[var(--border2)]">
-        {ev.text}
-      </pre>
+      <>
+        <div
+          onClick={() => onToggle(node.path)}
+          className="flex items-center gap-1 py-[2px] pr-2 text-[11px] text-[var(--text4)] cursor-pointer hover:bg-[#14141a]"
+          style={{ paddingLeft: pad }}
+        >
+          <span className="opacity-60 w-[10px]">{isOpenDir ? "▾" : "▸"}</span>
+          <span className="opacity-70">📁</span>
+          <span className="truncate">{node.name}</span>
+        </div>
+        {isOpenDir && node.children?.map((c) => (
+          <TreeRow key={c.path} node={c} depth={depth + 1} expanded={expanded} onToggle={onToggle} openPath={openPath} onOpen={onOpen} />
+        ))}
+      </>
     );
   }
-
-  // Action entry — render a short, colour-coded line per category.
-  let glyph = "•";
-  let color = "text-[var(--muted2)]";
-  let label = ev.tool || "action";
-
-  if (ev.category === "file_write") {
-    glyph = ev.tool === "delete_file" ? "✕" : "✎";
-    color = ev.tool === "delete_file" ? "text-[#f87171]" : "text-[#4ade80]";
-    label = ev.path || ev.tool || "file";
-  } else if (ev.category === "file_read") {
-    glyph = "○";
-    color = "text-[var(--muted2)]";
-    label = ev.path || ev.tool || "file";
-  } else if (ev.category === "terminal_exec") {
-    glyph = "$";
-    color = "text-[var(--steel)]";
-    label = ev.command || ev.tool || "command";
-  } else if (ev.category === "git_op") {
-    glyph = "⎇";
-    color = "text-[#C0C8D4]";
-    label = ev.message ? `${ev.tool} — ${ev.message}` : ev.tool || "git";
-  }
-
+  const active = openPath === node.path;
   return (
-    <div className={`mb-[2px] ${color} break-all`}>
-      <span className="inline-block w-4 opacity-70">{glyph}</span>
-      {label}
+    <div
+      onClick={() => onOpen(node.path)}
+      className={`flex items-center gap-1 py-[2px] pr-2 text-[11px] cursor-pointer truncate ${active ? "bg-[var(--midnight-dim)] text-[var(--ice)]" : "text-[var(--muted2)] hover:bg-[#14141a]"}`}
+      style={{ paddingLeft: pad + 11 }}
+    >
+      <span className="opacity-60">📄</span>
+      <span className="truncate">{node.name}</span>
     </div>
   );
 }
@@ -235,17 +353,8 @@ function CodeLine({ ev }: { ev: CodeEvent }) {
 function TaskTab({ narration, steps }: { narration: string; steps: AgentStep[] }) {
   return (
     <div className="h-full overflow-y-auto p-3">
-      {/* Narration box */}
       <div className="flex items-center gap-2 p-[9px_12px] mb-3 rounded-md border-l-[3px] border-l-[var(--steel)] bg-[#7B93B008] border border-[#7B93B015]">
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="var(--steel)"
-          strokeWidth="2"
-          className="flex-shrink-0 opacity-70"
-        >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--steel)" strokeWidth="2" className="flex-shrink-0 opacity-70">
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
           <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
         </svg>
@@ -273,6 +382,7 @@ function PreviewTab({
   onPreviewUrlChange: (url: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const load = () => {
     const val = inputRef.current?.value.trim();
@@ -297,20 +407,42 @@ function PreviewTab({
         >
           Load
         </button>
+        {/* Refresh */}
+        <button
+          onClick={() => setReloadKey((k) => k + 1)}
+          disabled={!previewUrl}
+          title="Reload preview"
+          className="w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all disabled:opacity-40"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+        {/* Open in new tab */}
+        <a
+          href={previewUrl || "#"}
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Open in a new tab"
+          aria-disabled={!previewUrl}
+          onClick={(e) => { if (!previewUrl) e.preventDefault(); }}
+          className={`w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center transition-all ${previewUrl ? "text-[var(--text4)] hover:border-[var(--steel)] hover:text-[var(--steel)]" : "text-[var(--muted)] opacity-40 pointer-events-none"}`}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </a>
       </div>
 
       {/* Frame / placeholder */}
       {previewUrl ? (
         <iframe
+          key={`${previewUrl}-${reloadKey}`}
           src={previewUrl}
           title="Preview"
           className="flex-1 w-full bg-white"
-          sandbox="allow-scripts allow-same-origin allow-forms"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         />
       ) : (
         <div className="flex-1 flex items-center justify-center px-6 text-center">
           <p className="text-xs text-[var(--muted)]">
-            No preview yet. Enter a URL above (e.g. a dev server Rex started) to load it here.
+            No preview yet. Say &ldquo;run the app&rdquo; and Rex will start it and load it here.
           </p>
         </div>
       )}
