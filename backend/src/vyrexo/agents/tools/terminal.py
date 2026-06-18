@@ -9,11 +9,47 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 
 import structlog
 
 logger = structlog.get_logger()
+
+
+async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
+    """Kill a process AND its children, then reap it without hanging.
+
+    The previous code did ``process.kill()`` + ``await process.communicate()``.
+    On Windows that kills only the shell, not its children (e.g. a Flask dev
+    server and its reloader subprocess), and the leftover children keep the
+    stdout/stderr pipes open — so ``communicate()`` blocks forever and wedges
+    the whole agent pipeline. We kill the full tree and reap with a timeout so
+    this can never hang again.
+    """
+    pid = process.pid
+    try:
+        if sys.platform == "win32":
+            # /T kills the entire tree, /F forces it.
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/F", "/T", "/PID", str(pid),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=10)
+        else:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+    except Exception:
+        logger.warning("terminal_kill_failed", pid=pid)
+    # Reap the process itself (wait(), NOT communicate() — the latter reads the
+    # pipes to EOF and can block on still-open child handles).
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except Exception:
+        pass
 
 # Commands that are never allowed
 BLOCKED_COMMANDS = {
@@ -61,14 +97,23 @@ async def run_command(
                 process.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.communicate()
+            await _terminate_tree(process)
+            logger.info("terminal_timeout", command=command[:60], timeout=timeout)
             return {
                 "command": command,
                 "exit_code": -1,
-                "error": f"Command timed out after {timeout}s",
+                # A timeout often means the command is a long-running process
+                # (e.g. a web server) that started fine and never exits on its
+                # own — say so, so the agent reads it as "started" not "broken".
+                "error": (
+                    f"Command did not finish within {timeout}s and was stopped. "
+                    "If this was a server or other long-running process, it "
+                    "started successfully (it just doesn't exit on its own)."
+                ),
                 "stdout": "",
                 "stderr": "",
+                "success": False,
+                "timed_out": True,
             }
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")[:MAX_OUTPUT_SIZE]
