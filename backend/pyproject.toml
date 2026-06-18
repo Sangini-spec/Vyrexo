@@ -44,6 +44,8 @@ dependencies = [
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
     "python-dotenv>=1.0.0",
+    # Web search so Rex can look things up live (keyless DuckDuckGo backend).
+    "ddgs>=6.0.0",
 ]
 
 [project.optional-dependencies]

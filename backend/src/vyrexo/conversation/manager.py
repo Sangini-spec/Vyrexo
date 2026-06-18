@@ -24,6 +24,7 @@ from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
 from vyrexo.utils.errors import friendly_error
 from vyrexo.utils.llm import response_text
+from vyrexo.utils.web_search import source_name, web_search
 from vyrexo.voice.stt.base import TranscriptionResult
 
 
@@ -62,6 +63,16 @@ You are given real excerpts retrieved from their project. Answer the question us
 - Be concise and conversational (spoken aloud — no markdown, code blocks, or lists).
 - Cite the file/function you're drawing from in plain words ("in auth.py, the login function...").
 - If the excerpts don't actually contain the answer, say so honestly and ask which file or area to look at. Do NOT make anything up or rely on outside assumptions about their code."""
+
+# Answering a general/world question grounded in LIVE web search results — so
+# Rex looks things up instead of reciting stale training data.
+WEB_QA_PROMPT = """You are Rex, a sharp, JARVIS-like assistant answering a question for a developer, out loud over voice. You just ran a LIVE web search — use the results below to answer.
+
+- Lead with the actual answer. Be conversational and concise (spoken aloud — so no markdown, code blocks, or lists).
+- Ground it in the search results. Use the specifics and dates they contain.
+- Briefly say where it's from in plain words ("according to Google's blog…", "TechCrunch reported…") — source names, not URLs.
+- If the results don't actually answer it, say what you DID find and that you couldn't confirm the rest. Never invent.
+- Keep it to a few sentences unless they clearly want more depth."""
 
 # Fast intent router. The old rule-based classifier defaulted unknown input to
 # "command" → which kicked off the whole build pipeline for simple questions.
@@ -275,10 +286,12 @@ class ConversationManager:
         # ── Decide how to handle this turn (LLM router) ──────────────────────
         kind = await self._route_kind(text, intent)
 
-        # chitchat and general-knowledge both go to the conversational brain —
-        # that's the JARVIS path (answers about the world, not just their code).
-        if kind in ("chitchat", "general"):
+        # Pure social banter → conversational brain. General/world questions →
+        # LIVE web search (the JARVIS path: look it up, don't recite from memory).
+        if kind == "chitchat":
             return await self._chat_reply(text, session_id, project_path)
+        if kind == "general":
+            return await self._handle_web_question(text, session_id, project_path)
         if kind == "explain":
             return await self._handle_explain(text, session_id, project_path)
         if kind == "codebase":
@@ -366,6 +379,8 @@ class ConversationManager:
         is deferred so we never launch a second pipeline on top of the first.
         """
         kind = await self._route_kind(text, Intent.CONVERSATION)
+        if kind == "general":
+            return await self._handle_web_question(text, session_id, project_path)
         if kind == "codebase":
             return await self._handle_question(text, session_id, project_path)
         if kind == "explain":
@@ -574,6 +589,54 @@ class ConversationManager:
             return explanation or "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
         except Exception as e:
             logger.exception("explain_failed")
+            return friendly_error(e)
+
+    async def _handle_web_question(self, text: str, session_id: str, project_path: str) -> str:
+        """Answer a general/world question by LIVE web search, then synthesize a
+        spoken answer grounded in the results. Falls back to the model's own
+        knowledge (honestly) if search returns nothing.
+        """
+        # Immediate feedback so the user hears something while we search.
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Let me look that up real quick.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        data = await web_search(text, max_results=5)
+        results = data.get("results", [])
+        if not results and not data.get("answer"):
+            # Search unavailable/empty — fall back to what the model knows, with
+            # the chat brain's built-in "as far as I know" honesty.
+            logger.info("web_search_empty_fallback", text=text[:60])
+            return await self._chat_reply(text, session_id, project_path)
+
+        lines: list[str] = []
+        if data.get("answer"):
+            lines.append(f"Search summary: {data['answer']}")
+        for r in results[:5]:
+            src = source_name(r.get("url", "")) or "web"
+            title = (r.get("title") or "").strip()
+            snippet = (r.get("snippet") or "").strip()
+            if len(snippet) > 500:
+                snippet = snippet[:500] + "…"
+            lines.append(f"- [{src}] {title}: {snippet}")
+        blob = "\n".join(lines)
+
+        try:
+            llm = create_chat_llm(get_settings().llm)
+            resp = await llm.ainvoke([
+                SystemMessage(content=WEB_QA_PROMPT),
+                HumanMessage(content=(
+                    f"Question: {text}\n\n"
+                    f"Live web search results (most recent first):\n{blob}\n\n"
+                    f"Answer the question using these results."
+                )),
+            ])
+            answer = response_text(resp).strip()
+            return answer or "I searched but couldn't pull together a clear answer — want me to try rephrasing it?"
+        except Exception as e:
+            logger.exception("web_qa_failed")
             return friendly_error(e)
 
     async def _handle_question(self, text: str, session_id: str, project_path: str) -> str:

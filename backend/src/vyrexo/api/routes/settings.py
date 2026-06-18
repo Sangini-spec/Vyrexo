@@ -32,6 +32,7 @@ _KEY_FIELDS = {
     "gemini_api_key": "GEMINI_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "openai_api_key": "LLM_API_KEY",
+    "tavily_api_key": "TAVILY_API_KEY",  # optional: upgrades web search quality
 }
 # Non-secret config — round-tripped as plain text.
 _PLAIN_FIELDS = {
@@ -49,6 +50,7 @@ class SettingsUpdate(BaseModel):
     gemini_api_key: str | None = None
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
+    tavily_api_key: str | None = None
     openai_base_url: str | None = None
     llm_provider: str | None = None
     chat_provider: str | None = None
@@ -105,6 +107,7 @@ def _current_status() -> dict:
             "gemini_api_key": _mask(s.llm.gemini_api_key or s.gemini_api_key),
             "openrouter_api_key": _mask(s.llm.openrouter_api_key or s.openrouter_api_key),
             "openai_api_key": _mask(s.llm.api_key),
+            "tavily_api_key": _mask(os.environ.get("TAVILY_API_KEY", "")),
         },
         "openai_base_url": s.llm.base_url,
         "llm_provider": s.llm.provider,

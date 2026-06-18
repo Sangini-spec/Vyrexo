@@ -28,6 +28,7 @@ const KEY_FIELDS: { field: string; label: string; help: string }[] = [
   { field: "gemini_api_key", label: "Gemini API key", help: "aistudio.google.com" },
   { field: "openrouter_api_key", label: "OpenRouter API key", help: "openrouter.ai" },
   { field: "openai_api_key", label: "OpenAI / compatible key", help: "for OpenAI or any OpenAI-compatible endpoint" },
+  { field: "tavily_api_key", label: "Tavily key (web search)", help: "optional — sharper live web results; Rex uses free DuckDuckGo without it" },
 ];
 
 export default function ApiKeysPage() {
