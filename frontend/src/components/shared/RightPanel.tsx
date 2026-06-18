@@ -285,6 +285,7 @@ function PreviewTab({
       <div className="flex items-center gap-2 p-2 border-b border-[var(--border)]">
         <input
           ref={inputRef}
+          key={previewUrl}
           defaultValue={previewUrl}
           onKeyDown={(e) => e.key === "Enter" && load()}
           placeholder="http://localhost:3000"

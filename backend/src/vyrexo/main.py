@@ -180,6 +180,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # Shutdown
+    from vyrexo.preview import stop_all as stop_all_previews
+    await stop_all_previews()
     if context_engine:
         await context_engine.shutdown()
     await close_database()

@@ -37,6 +37,8 @@ EVENT_TO_WS: dict[str, ServerMessageType] = {
     "mode.transition": ServerMessageType.MODE_CHANGED,
     "context.file.changed": ServerMessageType.CONTEXT_FILE_CHANGED,
     "project.loaded": ServerMessageType.PROJECT_LOADED,
+    "preview.ready": ServerMessageType.PREVIEW_READY,
+    "preview.stopped": ServerMessageType.PREVIEW_STOPPED,
 }
 
 # Patterns to subscribe to on the EventBus
@@ -53,6 +55,7 @@ FORWARD_PATTERNS = [
     "context.file.*",
     "session.*",
     "project.loaded",
+    "preview.*",
     "conversation.turn.completed",
 ]
 

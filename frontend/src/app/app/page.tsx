@@ -328,6 +328,20 @@ export default function App() {
         break;
       }
 
+      case "preview.ready": {
+        const url = (msg.payload.url as string) || "";
+        if (url) {
+          setPreviewUrl(url);
+          setActiveRightTab("preview");
+          setRightPanelCollapsed(false);
+        }
+        break;
+      }
+
+      case "preview.stopped":
+        setPreviewUrl("");
+        break;
+
       case "mode.changed":
         setMode(msg.payload.to as string);
         break;

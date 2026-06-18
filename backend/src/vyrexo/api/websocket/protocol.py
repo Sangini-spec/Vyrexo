@@ -63,6 +63,10 @@ class ServerMessageType(str, Enum):
     CONTEXT_FILE_CHANGED = "context.file.changed"
     PROJECT_LOADED = "project.loaded"
 
+    # Live preview (dev server Rex started)
+    PREVIEW_READY = "preview.ready"
+    PREVIEW_STOPPED = "preview.stopped"
+
     # Conversation
     CONVERSATION_TURN_COMPLETED = "conversation.turn.completed"
 

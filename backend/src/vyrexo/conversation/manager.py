@@ -22,6 +22,7 @@ from vyrexo.conversation.intent import EXPLAIN_PHRASES, Intent, IntentClassifier
 from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
+from vyrexo.preview import is_running as preview_running, start_preview, stop_preview
 from vyrexo.utils.errors import friendly_error
 from vyrexo.utils.llm import response_text
 from vyrexo.utils.web_search import source_name, web_search
@@ -85,12 +86,14 @@ Categories:
 - general: a question about the WORLD or general knowledge — technology, science, companies, history, the industry, programming concepts, opinions, advice — anything NOT about the user's own specific project/files. Rex answers these from what it knows.
 - codebase: a question about the USER'S OWN project — their files, their code, their functions, what THEIR code does, how many files THEY have, where something is in their project.
 - explain: walk through or explain a specific piece of the user's own code.
-- command: DO something that creates, writes, edits, runs, installs, fixes, refactors, deletes, tests, or deploys code — i.e. actually CHANGES the project.
+- runapp: the user wants to RUN / START / SERVE / LAUNCH the project so they can SEE it — i.e. start the dev server and show a live preview. NOT writing code, just running the existing app.
+- command: DO something that creates, writes, edits, fixes, refactors, deletes, or tests code — i.e. actually CHANGES the project.
 
 Rules:
 - A question that is NOT specifically about the user's own code/files/project → general.
 - Only pick codebase when they're clearly asking about THEIR project's contents.
-- Pick command ONLY when real work or a change is clearly requested. When unsure between a question and a command, pick the question type.
+- "run/start/serve/launch/preview the app/server/project locally" → runapp (start it so they can view it), NOT command.
+- Pick command ONLY when real work or a CHANGE is clearly requested. When unsure between a question and a command, pick the question type.
 
 Examples:
 "hey rex how's it going" -> chitchat
@@ -108,12 +111,17 @@ Examples:
 "where is the login handled in my code" -> codebase
 "explain the main function in app.py" -> explain
 "walk me through app.py" -> explain
+"run the app" -> runapp
+"start the server so I can see it" -> runapp
+"run it locally and let me preview it" -> runapp
+"spin up the dev server" -> runapp
+"launch the project" -> runapp
 "create a REST API with auth" -> command
 "add a /health endpoint to main.py" -> command
 "fix the bug in calc.py" -> command
-"install fastapi and run the server" -> command
+"build me a todo app" -> command
 
-Output only one word: chitchat, general, codebase, explain, or command."""
+Output only one word: chitchat, general, codebase, explain, runapp, or command."""
 
 logger = structlog.get_logger()
 
@@ -215,6 +223,15 @@ class ConversationManager:
         """Route to the appropriate handler based on intent."""
         text = transcript.text.strip()
 
+        # ── "stop the server/preview" → stop the live preview, not the pipeline
+        # (only when one is actually running, so bare "stop" still interrupts). ──
+        if preview_running(session_id) and _wants_stop_preview(text):
+            await stop_preview(session_id)
+            await self._event_bus.publish(Event(
+                type="preview.stopped", payload={}, session_id=session_id,
+            ))
+            return "Done — I stopped the preview server."
+
         # ── Interrupt always wins, even mid-build ────────────────────────────
         if intent == Intent.INTERRUPT or _is_stop(text):
             await self._cancel_build(session_id)
@@ -296,6 +313,8 @@ class ConversationManager:
             return await self._handle_explain(text, session_id, project_path)
         if kind == "codebase":
             return await self._handle_question(text, session_id, project_path)
+        if kind == "runapp":
+            return await self._handle_run_preview(session_id, project_path)
 
         # kind == "command" or git → real work through the agent pipeline.
         if not self._modes.current.should_process_input(transcript):
@@ -385,6 +404,9 @@ class ConversationManager:
             return await self._handle_question(text, session_id, project_path)
         if kind == "explain":
             return await self._handle_explain(text, session_id, project_path)
+        if kind == "runapp":
+            # Starting a preview is independent of a running build — fine to do now.
+            return await self._handle_run_preview(session_id, project_path)
         if kind == "command":
             return (
                 "I'm still working on the previous task. Say 'stop' if you'd like me to cancel it — "
@@ -523,15 +545,17 @@ class ConversationManager:
                 HumanMessage(content=text.strip()),
             ])
             word = response_text(resp).strip().lower()
-            for k in ("chitchat", "general", "codebase", "explain", "command"):
+            for k in ("chitchat", "general", "codebase", "explain", "runapp", "command"):
                 if k in word:
                     logger.info("intent_routed", kind=k, text=text[:50])
                     return k
         except Exception as e:
             logger.warning("intent_router_failed", error=str(e)[:120])
 
-        # Conservative fallback: only treat as a command on strong action verbs.
+        # Conservative fallback. "run/serve/preview the app" → runapp first.
         t = text.lower()
+        if _wants_preview(t):
+            return "runapp"
         strong = (
             "create ", "build ", "implement", "add ", "write ", "fix ", "fix the",
             "refactor", "install", "delete", "remove", "rename", "generate",
@@ -638,6 +662,46 @@ class ConversationManager:
         except Exception as e:
             logger.exception("web_qa_failed")
             return friendly_error(e)
+
+    async def _handle_run_preview(self, session_id: str, project_path: str) -> str:
+        """Start the project's dev server as a live preview and surface its URL to
+        the Preview tab (Claude-Code / Replit style)."""
+        connected = project_path not in ("", ".", None)
+        if not connected:
+            return ("Connect a project folder first, then I'll start it up and show you "
+                    "a live preview right here.")
+
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Starting it up — give me a few seconds.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        try:
+            res = await start_preview(session_id, project_path)
+        except Exception as e:
+            logger.exception("preview_start_failed")
+            return friendly_error(e)
+
+        if res.get("ok"):
+            url = res["url"]
+            # Tell the frontend to load it in the Preview tab.
+            await self._event_bus.publish(Event(
+                type="preview.ready",
+                payload={"url": url, "command": res.get("command", "")},
+                session_id=session_id,
+            ))
+            note = " (couldn't confirm the exact port, so this is the usual one — tell me if it's off)" if res.get("guessed") else ""
+            return (
+                f"It's running — I started it with `{res.get('command')}` and it's live at "
+                f"{url}{note}. I've opened it in the Preview tab on the right."
+            )
+
+        err = res.get("error", "I couldn't start it.")
+        extra = ""
+        if res.get("output"):
+            extra = f" Here's the tail of what it printed:\n\n{res['output'][:600]}"
+        return f"I tried to run it, but {err}{extra} Want me to dig in and fix what's stopping it?"
 
     async def _handle_question(self, text: str, session_id: str, project_path: str) -> str:
         """Answer a question about the codebase — GROUNDED in the actual indexed
@@ -910,3 +974,27 @@ def _is_stop(text: str) -> bool:
     """A spoken barge-in that means 'stop now' (not just a casual 'wait a sec')."""
     t = text.strip().lower().rstrip(".!? ")
     return t in _STOP
+
+
+_RUN_VERBS = ("run", "start", "serve", "launch", "spin up", "boot", "fire up", "open up", "bring up")
+_APP_NOUNS = ("app", "application", "server", "project", "site", "website", "frontend",
+              "dev server", "locally", "the thing", "preview")
+
+
+def _wants_preview(text: str) -> bool:
+    """Deterministic fallback: does this clearly mean 'run/serve the app so I can see it'?"""
+    t = text.lower()
+    if "preview" in t and not any(s in t for s in ("stop", "close", "hide")):
+        return True
+    # Don't mistake "run the tests" for running the app.
+    if "test" in t and not any(n in t for n in ("app", "server", "site", "project")):
+        return False
+    return any(v in t for v in _RUN_VERBS) and any(n in t for n in _APP_NOUNS)
+
+
+def _wants_stop_preview(text: str) -> bool:
+    """'stop/shut down/kill the server/preview/app'."""
+    t = text.lower()
+    stop_verbs = ("stop", "shut down", "shutdown", "kill", "close", "turn off", "take down")
+    nouns = ("server", "preview", "app", "application", "site", "dev server", "serving")
+    return any(s in t for s in stop_verbs) and any(n in t for n in nouns)
