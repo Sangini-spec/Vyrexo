@@ -195,3 +195,17 @@ FILE_TOOL_MAP = {
     "list_directory": list_directory,
     "delete_file": delete_file,
 }
+
+# ── Curated subsets ──────────────────────────────────────────────
+# Only the coder (gated behind plan-approval) gets the full set incl. delete.
+# Other agents get a restricted set so they can never delete/overwrite a file on
+# an ungated path. Enforced at BOTH layers: the schemas bound to the LLM AND the
+# executable map, so a hallucinated tool name can't run a tool the agent lacks.
+_READONLY_NAMES = {"read_file", "list_directory"}
+_NO_DELETE_NAMES = {"read_file", "write_file", "create_file", "list_directory"}
+
+READONLY_FILE_TOOLS = [t for t in FILE_TOOLS if t["name"] in _READONLY_NAMES]
+READONLY_FILE_TOOL_MAP = {k: v for k, v in FILE_TOOL_MAP.items() if k in _READONLY_NAMES}
+
+SAFE_FILE_TOOLS = [t for t in FILE_TOOLS if t["name"] in _NO_DELETE_NAMES]
+SAFE_FILE_TOOL_MAP = {k: v for k, v in FILE_TOOL_MAP.items() if k in _NO_DELETE_NAMES}

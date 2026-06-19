@@ -16,7 +16,10 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from vyrexo.agents.base import BaseAgent, ToolDefinition
 from vyrexo.agents.llm_factory import create_llm
 from vyrexo.agents.registry import AgentRegistry
-from vyrexo.agents.tools.file_ops import FILE_TOOL_MAP, FILE_TOOLS
+from vyrexo.agents.tools.file_ops import (
+    SAFE_FILE_TOOL_MAP as FILE_TOOL_MAP,
+    SAFE_FILE_TOOLS as FILE_TOOLS,
+)
 from vyrexo.agents.tools.terminal import TERMINAL_TOOL_MAP, TERMINAL_TOOLS
 from vyrexo.config import get_settings
 
