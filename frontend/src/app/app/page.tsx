@@ -43,6 +43,12 @@ function dayGroup(ts: number): string {
   return "Earlier";
 }
 
+// A spoken barge-in that means "stop now" (hard interrupt), vs just talking over Rex.
+const STOP_WORDS = ["stop", "stop it", "wait", "cancel", "hold on", "nevermind", "never mind", "pause", "quiet", "shut up", "be quiet", "enough"];
+function isStopPhrase(lower: string): boolean {
+  return STOP_WORDS.some((w) => lower === w || lower.startsWith(w + " "));
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
@@ -235,7 +241,11 @@ export default function App() {
   }, [user, loading, router]);
 
   // ── Backend-driven audio playback (Edge-TTS over WebSocket) ──
-  const { beginUtterance, pushChunk, endUtterance, stop: stopAudio } = useAudioPlayer();
+  const { beginUtterance, pushChunk, endUtterance, stop: stopAudio, isPlaying: audioIsPlaying } = useAudioPlayer();
+  // Synchronous mirror of "is Rex's audio playing right now" for use inside the
+  // voice callback (barge-in needs to know instantly, without a re-render).
+  const isPlayingRef = useRef(false);
+  useEffect(() => { isPlayingRef.current = audioIsPlaying; }, [audioIsPlaying]);
 
   // When the user interrupts, the backend may still have audio chunks in flight.
   // This flag makes us DISCARD any incoming audio until the next user turn, so
@@ -429,36 +439,56 @@ export default function App() {
   const handleVoiceTranscript = useCallback(
     (text: string, isFinal: boolean) => {
       setTranscript(text);
-      if (isFinal && text.trim()) {
-        const final = text.trim();
-        const lower = final.toLowerCase().replace(/[.!?,]/g, "").trim();
+      const raw = text.trim();
+      if (!raw) return;
+      const lower = raw.toLowerCase().replace(/[.!?,]/g, "").trim();
+      const isStop = isStopPhrase(lower);
+      const rexTalking = isPlayingRef.current || speakingRef.current;
 
-        // A spoken "stop" is a HARD interrupt: silence Rex and halt the work,
-        // and do NOT send it as a new turn (so it stays quiet).
-        const STOP_WORDS = ["stop", "stop it", "wait", "cancel", "hold on", "nevermind", "never mind", "pause", "quiet", "shut up", "be quiet", "enough"];
-        if (STOP_WORDS.some((w) => lower === w || lower.startsWith(w + " "))) {
-          muteAudio();
-          sendMessage({ type: "execution.interrupt", payload: {} });
-          setOrbState("idle");
-          setNarration("Stopped. What would you like instead?");
-          setTranscript("");
-          return;
+      // ── BARGE-IN ──────────────────────────────────────────────────────────
+      // The instant the user speaks over Rex, silence him — on the INTERIM
+      // transcript, without waiting for the recognizer to finalize (that ~1-2s
+      // wait was the lag). This is the human / ChatGPT behavior: start talking
+      // and it immediately stops to listen.
+      if (!isFinal) {
+        if (rexTalking && raw.length >= 2) {
+          muteAudio(); // pause current audio + discard any in-flight chunks
+          if (isStop) {
+            // "stop" also halts the running work right away.
+            sendMessage({ type: "execution.interrupt", payload: {} });
+            setOrbState("idle");
+            setNarration("Stopped. What would you like instead?");
+          }
         }
-
-        // Otherwise it's conversation (incl. answering small-talk). Stop the
-        // current line so we don't talk over the user, but DON'T interrupt the
-        // build — let the fast chat brain reply while any task keeps running.
-        if (speakingRef.current) stopAudio();
-        audioMutedRef.current = false; // a new turn → allow Rex's reply to play
-        setPendingProposal(null);
-        setChatLog((prev) => [...prev, { role: "user", text: final }]);
-        sendMessage({ type: "text.input", payload: { text: final } });
-        setOrbState("thinking");
-        setNarration("Thinking...");
-        setTranscript("");
+        return; // wait for the final transcript to act on the actual message
       }
+
+      // ── FINAL transcript ──────────────────────────────────────────────────
+      // A spoken "stop" is a HARD interrupt: silence Rex + halt the work, and do
+      // NOT send it as a turn (so it stays quiet).
+      if (isStop) {
+        muteAudio();
+        sendMessage({ type: "execution.interrupt", payload: {} });
+        setOrbState("idle");
+        setNarration("Stopped. What would you like instead?");
+        setTranscript("");
+        return;
+      }
+
+      // Otherwise it's conversation (incl. answering small-talk). Silence Rex's
+      // current line so we don't talk over each other, then allow his reply to
+      // play. We DON'T interrupt the build — the fast chat brain replies while
+      // any running task keeps going.
+      muteAudio();
+      audioMutedRef.current = false; // new turn → allow Rex's reply to play
+      setPendingProposal(null);
+      setChatLog((prev) => [...prev, { role: "user", text: raw }]);
+      sendMessage({ type: "text.input", payload: { text: raw } });
+      setOrbState("thinking");
+      setNarration("Thinking...");
+      setTranscript("");
     },
-    [sendMessage, muteAudio, stopAudio]
+    [sendMessage, muteAudio]
   );
 
   const handleActivated = useCallback(() => {
@@ -478,6 +508,19 @@ export default function App() {
       onActivated: handleActivated,
       onDeactivated: handleDeactivated,
     });
+
+  // Clicking the orb: while Rex is talking or working, it's a STOP button —
+  // silence + halt immediately. Otherwise it toggles push-to-talk.
+  const handleOrbClick = useCallback(() => {
+    if (isPlayingRef.current || orbState === "speaking" || orbState === "thinking") {
+      muteAudio();
+      sendMessage({ type: "execution.interrupt", payload: {} });
+      setOrbState("idle");
+      setNarration("Stopped. What would you like instead?");
+      return;
+    }
+    forceActivate();
+  }, [orbState, muteAudio, sendMessage, forceActivate]);
 
   // ── Session management ──────────────────────────────────────
   const handleSessionClick = useCallback(
@@ -889,7 +932,7 @@ export default function App() {
 
         {/* Orb center */}
         <div className="flex-1 flex flex-col items-center justify-center" style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 70%)" }}>
-          <Orb state={orbState} transcript={transcript || undefined} onClick={forceActivate} />
+          <Orb state={orbState} transcript={transcript || undefined} onClick={handleOrbClick} />
 
           {/* Proposal banner — Rex asking to proceed (e.g. implement fixes) */}
           {pendingProposal && (
