@@ -282,7 +282,7 @@ export default function App() {
   }, [user, loading, router]);
 
   // ── Backend-driven audio playback (Edge-TTS over WebSocket) ──
-  const { beginUtterance, pushChunk, endUtterance, stop: stopAudio, isPlaying: audioIsPlaying } = useAudioPlayer();
+  const { beginUtterance, pushChunk, endUtterance, stop: stopAudio, mute: mutePlayer, unmute: unmutePlayer, isPlaying: audioIsPlaying } = useAudioPlayer();
   // Synchronous mirror of "is Rex's audio playing right now" for use inside the
   // voice callback (barge-in needs to know instantly, without a re-render).
   const isPlayingRef = useRef(false);
@@ -294,11 +294,12 @@ export default function App() {
   const audioMutedRef = useRef(false);
   const muteAudio = useCallback(() => {
     audioMutedRef.current = true;
-    stopAudio();
-  }, [stopAudio]);
+    mutePlayer(); // hard stop + block all playback until a new turn
+  }, [mutePlayer]);
   const unmuteAudio = useCallback(() => {
     audioMutedRef.current = false;
-  }, []);
+    unmutePlayer();
+  }, [unmutePlayer]);
 
   // Sync Rex's chat bubble with his VOICE: hold the reply text and reveal it the
   // moment the audio actually starts, so it doesn't pop up a beat before he
@@ -542,7 +543,7 @@ export default function App() {
       // play. We DON'T interrupt the build — the fast chat brain replies while
       // any running task keeps going.
       muteAudio();
-      audioMutedRef.current = false; // new turn → allow Rex's reply to play
+      unmuteAudio(); // new turn → allow Rex's reply to play
       setPendingProposal(null);
       setChatLog((prev) => [...prev, { role: "user", text: raw }]);
       sendMessage({ type: "text.input", payload: { text: raw } });
@@ -708,7 +709,7 @@ export default function App() {
     if (pendingCmd.needsProject && !projectBound) return;
     const text = pendingCmd.text;
     setPendingCmd(null);
-    audioMutedRef.current = false;
+    unmuteAudio();
     setChatLog((prev) => [...prev, { role: "user", text }]);
     sendMessage({ type: "text.input", payload: { text } });
     setOrbState("thinking");
@@ -841,7 +842,7 @@ export default function App() {
     const docs = attachedDocs;
     const video = attachedVideo;
     if (!text && images.length === 0 && docs.length === 0 && !video) return;
-    audioMutedRef.current = false; // new turn → allow Rex's reply to play
+    unmuteAudio(); // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
     const chips = [...docs.map((d) => d.name), ...(video ? [`🎬 ${video.name}`] : [])];
     setChatLog((prev) => [
@@ -862,7 +863,7 @@ export default function App() {
   const respondToProposal = useCallback(
     (accept: boolean) => {
       const text = accept ? "yes" : "no";
-      audioMutedRef.current = false;
+      unmuteAudio();
       setPendingProposal(null);
       setChatLog((prev) => [...prev, { role: "user", text }]);
       sendMessage({ type: "text.input", payload: { text } });

@@ -21,8 +21,13 @@ export function useAudioPlayer() {
   const queueRef = useRef<Blob[]>([]);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const isPlayingRef = useRef(false);
+  // Hard mute: while true, NOTHING plays — incoming chunks are dropped, queued
+  // utterances are ignored, and the current audio is stopped. This is the
+  // bulletproof part of "stop": even late/in-flight audio can't sneak through.
+  const mutedRef = useRef(false);
 
   const playNextFromQueue = useCallback(() => {
+    if (mutedRef.current) { setIsPlaying(false); return; }
     if (isPlayingRef.current) return;
     const blob = queueRef.current.shift();
     if (!blob) {
@@ -71,6 +76,7 @@ export function useAudioPlayer() {
 
   /** Call for each binary audio frame received from the backend. */
   const pushChunk = useCallback((data: ArrayBuffer) => {
+    if (mutedRef.current) return; // dropped while muted (post-interrupt)
     if (!data || data.byteLength === 0) return;
     currentChunksRef.current.push(new Uint8Array(data));
   }, []);
@@ -79,7 +85,7 @@ export function useAudioPlayer() {
   const endUtterance = useCallback(() => {
     const chunks = currentChunksRef.current;
     currentChunksRef.current = [];
-    if (chunks.length === 0) return;
+    if (mutedRef.current || chunks.length === 0) return;
 
     const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
     const combined = new Uint8Array(totalLength);
@@ -93,7 +99,7 @@ export function useAudioPlayer() {
     playNextFromQueue();
   }, [playNextFromQueue]);
 
-  /** Stop playback immediately and clear the queue (used on interrupt). */
+  /** Stop playback immediately and clear the queue (used on barge-in). */
   const stop = useCallback(() => {
     queueRef.current = [];
     currentChunksRef.current = [];
@@ -106,6 +112,17 @@ export function useAudioPlayer() {
     setIsPlaying(false);
   }, []);
 
+  /** HARD stop for interrupts: stop now AND block all playback until unmute(). */
+  const mute = useCallback(() => {
+    mutedRef.current = true;
+    stop();
+  }, [stop]);
+
+  /** Re-enable playback (called when the user starts a new turn). */
+  const unmute = useCallback(() => {
+    mutedRef.current = false;
+  }, []);
+
   // Best-effort cleanup on unmount
   useEffect(() => {
     return () => {
@@ -115,5 +132,5 @@ export function useAudioPlayer() {
     };
   }, []);
 
-  return { isPlaying, beginUtterance, pushChunk, endUtterance, stop };
+  return { isPlaying, beginUtterance, pushChunk, endUtterance, stop, mute, unmute };
 }
