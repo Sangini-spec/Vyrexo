@@ -29,6 +29,7 @@ export interface CodeEvent {
   message?: string;
   text?: string;
   content?: string;
+  oldContent?: string;
 }
 
 interface TreeNode {
@@ -232,11 +233,38 @@ function CodeResize({ onDelta }: { onDelta: (dx: number) => void }) {
   );
 }
 
+type DiffLine = { type: "add" | "del" | "ctx"; text: string };
+
+/** Line-based diff (LCS) so the Code tab can show exact +/- changes. */
+function lineDiff(oldText: string, newText: string): DiffLine[] {
+  const a = oldText ? oldText.split("\n") : [];
+  const b = newText ? newText.split("\n") : [];
+  const m = a.length, n = b.length;
+  if (m === 0) return b.map((t) => ({ type: "add" as const, text: t }));
+  if (m * n > 4_000_000) return b.map((t) => ({ type: "add" as const, text: t })); // too big to diff
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out: DiffLine[] = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { out.push({ type: "ctx", text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: "del", text: a[i] }); i++; }
+    else { out.push({ type: "add", text: b[j] }); j++; }
+  }
+  while (i < m) out.push({ type: "del", text: a[i++] });
+  while (j < n) out.push({ type: "add", text: b[j++] });
+  return out;
+}
+
 function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; projectPath: string }) {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [openPath, setOpenPath] = useState("");
   const [openContent, setOpenContent] = useState("");
+  const [openDiff, setOpenDiff] = useState<DiffLine[] | null>(null);
+  const [diffView, setDiffView] = useState(true);
   const [loading, setLoading] = useState(false);
   const connected = projectPath !== "";
 
@@ -281,12 +309,9 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
   }, [connected, projectPath]);
 
   const openFile = useCallback(
-    async (file: string, inlineContent?: string) => {
+    async (file: string) => {
       setOpenPath(file);
-      if (inlineContent != null) {
-        setOpenContent(inlineContent);
-        return;
-      }
+      setOpenDiff(null); // clicking a file shows its full current content, not a diff
       if (!connected) return;
       setLoading(true);
       try {
@@ -309,6 +334,7 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
     setTree([]);
     setOpenPath("");
     setOpenContent("");
+    setOpenDiff(null);
     refreshTree();
   }, [refreshTree]);
 
@@ -324,7 +350,11 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
 
   useEffect(() => {
     if (lastWrite?.path) {
-      openFile(lastWrite.path, lastWrite.content || undefined);
+      const newC = lastWrite.content || "";
+      setOpenPath(lastWrite.path);
+      setOpenContent(newC);
+      setOpenDiff(lineDiff(lastWrite.oldContent || "", newC));
+      setDiffView(true);
       refreshTree();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -385,10 +415,47 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
             </button>
           )}
-          <span className="text-[11px] text-[var(--text3)] font-mono truncate">{openPath || "No file open"}</span>
+          <span className="text-[11px] text-[var(--text3)] font-mono truncate flex-1">{openPath || "No file open"}</span>
+          {openDiff && (
+            <div className="flex items-center rounded-[5px] border border-[var(--border2)] overflow-hidden flex-shrink-0">
+              {(["diff", "file"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setDiffView(m === "diff")}
+                  className={`px-2 py-[2px] text-[10px] ${(diffView ? "diff" : "file") === m ? "bg-[var(--midnight)] text-white" : "text-[var(--muted2)] hover:text-[var(--text3)]"}`}
+                >
+                  {m === "diff" ? "Diff" : "File"}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="flex-1 overflow-auto">
-          {openPath ? (
+          {openDiff && diffView ? (
+            <div className="font-mono text-[11px] leading-[1.55] py-2">
+              {openDiff.length === 0 ? (
+                <p className="px-3 text-[var(--muted)]">No changes.</p>
+              ) : (
+                openDiff.map((d, i) => (
+                  <div
+                    key={i}
+                    className={
+                      d.type === "add"
+                        ? "bg-[#13351c] text-[#86efac]"
+                        : d.type === "del"
+                        ? "bg-[#3a1717] text-[#fca5a5]"
+                        : "text-[var(--text4)]"
+                    }
+                  >
+                    <span className="select-none inline-block w-5 text-center opacity-70">
+                      {d.type === "add" ? "+" : d.type === "del" ? "-" : ""}
+                    </span>
+                    <span className="whitespace-pre">{d.text || " "}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : openPath ? (
             <div className="flex font-mono text-[11px] leading-[1.55]">
               <div className="select-none text-right pr-2 pl-2 py-2 text-[var(--muted)] border-r border-[var(--border2)] bg-[var(--surface)]">
                 {lines.map((_, i) => <div key={i}>{i + 1}</div>)}

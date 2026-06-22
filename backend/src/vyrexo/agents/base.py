@@ -254,13 +254,25 @@ class BaseAgent(ABC):
             return
         session_id: str = state.get("session_id", "") or ""
         category = self._ACTION_CATEGORIES.get(tool_name, "tool")
-        # For writes, include the actual content so the Code tab can show the
-        # exact code being written live (Replit-style), capped to a sane size.
+        # For writes, include the new content AND the current (old) content so
+        # the Code tab can show a real diff. We read the old content here, before
+        # the write runs (narrate_tool_call fires emit_action pre-execution).
         content = ""
+        old_content = ""
         if category == "file_write":
             raw = args.get("content")
             if isinstance(raw, str):
                 content = raw[:100_000]
+            try:
+                import os
+                rel = args.get("path") or args.get("file_path") or ""
+                proj = state.get("project_path") or "."
+                full = os.path.join(proj, rel)
+                if rel and os.path.isfile(full):
+                    with open(full, encoding="utf-8", errors="replace") as fh:
+                        old_content = fh.read()[:100_000]
+            except Exception:
+                old_content = ""
         await event_bus.publish(Event(
             type=f"agent.action.{category}",
             payload={
@@ -271,6 +283,7 @@ class BaseAgent(ABC):
                 "command": args.get("command") or "",
                 "message": args.get("message") or "",
                 "content": content,
+                "old_content": old_content,
             },
             session_id=session_id,
         ))

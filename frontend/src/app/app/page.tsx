@@ -425,6 +425,7 @@ export default function App() {
             command: msg.payload.command as string,
             message: msg.payload.message as string,
             content: msg.payload.content as string,
+            oldContent: msg.payload.old_content as string,
           },
         ]);
         break;
