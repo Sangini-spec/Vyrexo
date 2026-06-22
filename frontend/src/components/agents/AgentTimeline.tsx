@@ -60,6 +60,22 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
         </div>
       )}
 
+      {/* Progress summary — how many steps are ticked off */}
+      {steps.length > 0 && (() => {
+        const done = steps.filter((s) => s.status === "completed").length;
+        return (
+          <div className="mb-2">
+            <div className="flex items-center justify-between px-1 mb-1">
+              <span className="text-[10px] uppercase tracking-wide text-[var(--muted)]">Plan</span>
+              <span className="text-[10px] text-[var(--muted2)]">{done} / {steps.length} done</span>
+            </div>
+            <div className="h-[3px] rounded-full bg-[var(--border2)] overflow-hidden">
+              <div className="h-full bg-[#4ade80] transition-all duration-300" style={{ width: `${(done / steps.length) * 100}%` }} />
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Timeline */}
       <div className="flex flex-col gap-[3px]">
         {steps.map((step, i) => {
@@ -71,15 +87,22 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
             <div
               key={i}
               className={`flex items-start gap-[9px] p-[9px_10px] rounded-[7px] border transition-all
-                ${isActive ? "border-[#7B93B020] bg-[#7B93B006]" : "border-[#14141a] bg-[var(--surface2)]"}
-                ${isCompleted ? "opacity-50" : ""}
+                ${isActive ? "border-[#7B93B033] bg-[#7B93B00c]" : isCompleted ? "border-[#16a34a22] bg-[#16a34a08]" : "border-[#14141a] bg-[var(--surface2)]"}
               `}
             >
-              {/* Agent icon */}
+              {/* Status-aware icon: check when done, spinner when running, else agent letter */}
               <div
-                className={`w-6 h-6 rounded-[5px] flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${style.bg} ${style.color}`}
+                className={`w-6 h-6 rounded-[5px] flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                  isCompleted ? "bg-[#16a34a22] text-[#4ade80]" : `${style.bg} ${style.color}`
+                }`}
               >
-                {style.icon}
+                {isCompleted ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
+                ) : isActive ? (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.2-8.5" /></svg>
+                ) : (
+                  style.icon
+                )}
               </div>
 
               {/* Content */}
