@@ -147,6 +147,8 @@ VIDEO_BUILD_SPEC_PROMPT = """You are a senior engineer turning a screen recordin
 - Anything the narrator explicitly asks for or points out.
 Be specific enough to reproduce it. Only include what is actually shown or said."""
 
+SUMMARY_PERSONA_PROMPT = """You are Rex — warm, witty, human. You just finished a coding task for the user and you're telling them how it went, out loud (1-3 short sentences, no markdown, no lists). Speak in YOUR voice, like a friend who just wrapped up the work: natural, a little personable, occasionally a light quip — but never forced, mostly just warm and real. Say concretely what you built or changed. Do NOT read a checklist and never say "I completed N of M steps."""
+
 DOC_QA_PROMPT = """You are Rex, a friendly senior developer. The user attached a document; answer their request about it using ONLY its contents below. Spoken aloud — be conversational and concise, no markdown/code blocks/lists. If they didn't ask anything specific, give a short, useful summary. If the document doesn't contain the answer, say so honestly."""
 
 VISION_PROMPT = """You are Rex, a friendly AI coding assistant, looking at image(s) the developer just shared. You'll be heard over voice, so reply naturally and concisely (2-5 sentences, no markdown, code blocks, or lists).
@@ -577,6 +579,10 @@ class ConversationManager:
                         "**Want me to go ahead and implement these fixes?** "
                         "Say yes and I'll make the changes and run the tests."
                     )
+                elif not (state or {}).get("interrupted"):
+                    # A build finished — wrap up in Rex's own voice (warm, maybe a
+                    # quip) instead of a dry "I completed N of M steps."
+                    response = await self._personable_summary(state or {}, response)
 
                 await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
                 await self._event_bus.publish(Event(
@@ -596,6 +602,39 @@ class ConversationManager:
 
         self._build_tasks[session_id] = asyncio.create_task(_run())
         return ack
+
+    async def _personable_summary(self, state: dict, fallback: str) -> str:
+        """Wrap up a finished build in Rex's voice — warm, occasionally witty —
+        from the real facts of what was done (not a dry step count)."""
+        artifacts = state.get("artifacts", {}) or {}
+        files = artifacts.get("files_modified", []) or []
+        commands = artifacts.get("commands_run", []) or []
+        plan = state.get("plan", []) or []
+        done = [
+            (s.get("description") or "").strip()
+            for s in plan
+            if s.get("status") == "completed" and (s.get("description") or "").strip()
+        ]
+        # Nothing concrete to celebrate → keep the original response (don't invent).
+        if not done and not files:
+            return fallback
+        facts = (
+            f"What I set out to do: {'; '.join(done) if done else 'the requested work'}.\n"
+            f"Files I created or changed: {', '.join(files[:8]) if files else 'none'}.\n"
+            f"Shell commands run: {len(commands)}.\n"
+            f"Verified it builds/imports cleanly: {artifacts.get('verified')}."
+        )
+        try:
+            llm = create_chat_llm(get_settings().llm)
+            resp = await llm.ainvoke([
+                SystemMessage(content=SUMMARY_PERSONA_PROMPT),
+                HumanMessage(content=f"Here's what just happened:\n{facts}\n\nTell the user how it went, in your voice."),
+            ])
+            out = response_text(resp).strip()
+            return out or fallback
+        except Exception:
+            logger.warning("personable_summary_failed")
+            return fallback
 
     @staticmethod
     def _was_analysis_only(state: dict) -> bool:
