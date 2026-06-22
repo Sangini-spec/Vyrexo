@@ -113,7 +113,11 @@ class SessionWebSocketHandler:
         if msg.type == ClientMessageType.TEXT_INPUT:
             await self._event_bus.publish(Event(
                 type="conversation.turn.started",
-                payload={"text": msg.payload.get("text", ""), "source": "text"},
+                payload={
+                    "text": msg.payload.get("text", ""),
+                    "images": msg.payload.get("images") or [],
+                    "source": "text",
+                },
                 session_id=self._session_id,
             ))
 

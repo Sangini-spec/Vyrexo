@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from vyrexo.agents.llm_factory import create_chat_llm
+from vyrexo.agents.llm_factory import create_chat_llm, create_vision_llm
 from vyrexo.agents.orchestrator import AgentOrchestrator
 from vyrexo.config import get_settings
 from vyrexo.context.engine import ContextEngine
@@ -124,6 +124,17 @@ Examples:
 
 Output only one word: chitchat, general, codebase, explain, runapp, or command."""
 
+VISION_PROMPT = """You are Rex, a friendly AI coding assistant, looking at image(s) the developer just shared. You'll be heard over voice, so reply naturally and concisely (2-5 sentences, no markdown, code blocks, or lists).
+
+Read the image and respond usefully based on what it is:
+- A UI design, mockup, or app screenshot → describe the layout briefly and offer to build it ("want me to build this?").
+- An error, stack trace, or terminal screenshot → call out the key error and offer to fix it.
+- A diagram or architecture → explain what it shows.
+- Code → summarize what it does.
+- Anything else → describe it and ask how they'd like to use it.
+
+If they also typed a question, answer that about the image. Don't make things up — only describe what you can actually see."""
+
 logger = structlog.get_logger()
 
 # Directories we never list/count as part of "what files are here".
@@ -178,18 +189,28 @@ class ConversationManager:
         transcript: TranscriptionResult,
         session_id: str,
         project_path: str,
+        images: list[str] | None = None,
     ) -> str:
         """
         Process a user conversation turn. Returns the response text for TTS.
         """
         text = transcript.text.strip()
-        if not text:
+        if not text and not images:
             return ""
 
-        logger.info("conversation_turn", text=text[:80], session_id=session_id)
+        logger.info("conversation_turn", text=text[:80], session_id=session_id, images=len(images or []))
 
-        # Store user message in memory
-        await self._memory.store(session_id, MemoryEntry(role="user", content=text))
+        # Store user message in memory (note attached images in the history).
+        stored = text or "[shared an image]"
+        await self._memory.store(session_id, MemoryEntry(role="user", content=stored))
+
+        # If the user attached image(s), understand them first — that's the whole
+        # point of the attachment. Bypasses text intent routing.
+        if images:
+            response = await self._handle_vision(text, images, session_id, project_path)
+            if response:
+                await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
+            return response
 
         # Classify intent (rule-based) — only the unambiguous signals (interrupt,
         # mode switch, git) are taken from this. The command-vs-question-vs-chat
@@ -630,6 +651,35 @@ class ConversationManager:
             return explanation or "I looked at the code but couldn't put a good explanation together. Want to point me at a specific file?"
         except Exception as e:
             logger.exception("explain_failed")
+            return friendly_error(e)
+
+    async def _handle_vision(self, text: str, images: list[str], session_id: str, project_path: str) -> str:
+        """Understand image(s) the user shared, via a vision-capable model."""
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Let me take a look at that.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        # Standard multimodal message: a text part + each image as a data URL.
+        prompt = text.strip() or "Take a look at this and tell me what it is and how you can help with it."
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for img in images[:4]:  # cap so we don't overload the request
+            if isinstance(img, str) and img.startswith("data:image"):
+                content.append({"type": "image_url", "image_url": {"url": img}})
+        if len(content) == 1:
+            return "That didn't come through as an image I can read — could you try attaching it again?"
+
+        try:
+            llm = create_vision_llm(get_settings().llm)
+            resp = await llm.ainvoke([
+                SystemMessage(content=VISION_PROMPT),
+                HumanMessage(content=content),
+            ])
+            answer = response_text(resp).strip()
+            return answer or "I can see the image, but I'm not sure what you'd like me to do with it — tell me more?"
+        except Exception as e:
+            logger.exception("vision_failed")
             return friendly_error(e)
 
     async def _handle_web_question(self, text: str, session_id: str, project_path: str) -> str:

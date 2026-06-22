@@ -196,9 +196,10 @@ async def _handle_conversation_turn(event: Event) -> None:
         return
 
     text = event.payload.get("text", "")
+    images = event.payload.get("images") or []
     session_id = event.session_id or ""
 
-    if not text.strip():
+    if not text.strip() and not images:
         return
 
     # A fresh user turn lifts any post-interrupt silence so Rex can speak again.
@@ -214,6 +215,7 @@ async def _handle_conversation_turn(event: Event) -> None:
         transcript=TranscriptionResult(text=text),
         session_id=session_id,
         project_path=project_path,
+        images=images,
     )
 
     # Publish response for TTS narration + WebSocket forwarding

@@ -10,6 +10,7 @@ export type RightTab = "chat" | "code" | "task" | "preview";
 export interface ChatMessage {
   role: string;
   text: string;
+  images?: string[];
 }
 
 /**
@@ -157,6 +158,14 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
                   : "bg-[var(--surface2)] text-[var(--text3)] border border-[var(--border2)] rounded-tl-sm"
               }`}
             >
+              {msg.images && msg.images.length > 0 && (
+                <div className="flex gap-1.5 flex-wrap mb-1.5">
+                  {msg.images.map((src, j) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={j} src={src} alt="attachment" className="max-w-[140px] max-h-[140px] rounded-md border border-[var(--border2)]" />
+                  ))}
+                </div>
+              )}
               {isUser ? (
                 msg.text
               ) : (

@@ -53,6 +53,38 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+// Read an image File into a data URL, downscaled so big photos don't bloat the
+// WebSocket payload / model request.
+function downscaleImage(file: File, maxDim = 1280): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = reader.result as string;
+      const img = new window.Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(src);
+        ctx.drawImage(img, 0, 0, w, h);
+        try {
+          resolve(canvas.toDataURL("image/jpeg", 0.85));
+        } catch {
+          resolve(src);
+        }
+      };
+      img.onerror = () => resolve(src);
+      img.src = src;
+    };
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(file);
+  });
+}
+
 // Draggable divider for resizing a panel. onDelta gets the horizontal mouse
 // movement since the last event; the parent applies it to the right width.
 function ResizeHandle({ onDelta }: { onDelta: (dx: number) => void }) {
@@ -159,7 +191,10 @@ export default function App() {
   const [steps, setSteps] = useState<AgentStep[]>([]);
   const [narration, setNarration] = useState("Say 'Rex' to start, or click the orb");
   const [textInput, setTextInput] = useState("");
-  const [chatLog, setChatLog] = useState<Array<{ role: string; text: string }>>([]);
+  const [chatLog, setChatLog] = useState<Array<{ role: string; text: string; images?: string[] }>>([]);
+  // Images the user has attached to the next message (data URLs).
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   // ── Sessions (persisted + renamable) ────────────────────────
   const [sessions, setSessions] = useState<StoredSession[]>([]);
@@ -746,17 +781,28 @@ export default function App() {
   );
 
   // ── Text input ──────────────────────────────────────────────
+  // Attach image files (from the + button, drag, or paste), downscaled. Max 4.
+  const addImageFiles = useCallback(async (files: FileList | File[]) => {
+    const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (imgs.length === 0) return;
+    const urls = (await Promise.all(imgs.map((f) => downscaleImage(f)))).filter(Boolean) as string[];
+    setAttachedImages((prev) => [...prev, ...urls].slice(0, 4));
+  }, []);
+
   const handleTextSubmit = useCallback(() => {
-    if (!textInput.trim()) return;
     const text = textInput.trim();
+    const images = attachedImages;
+    if (!text && images.length === 0) return;
     audioMutedRef.current = false; // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
-    setChatLog((prev) => [...prev, { role: "user", text }]);
-    sendMessage({ type: "text.input", payload: { text } });
+    setChatLog((prev) => [...prev, { role: "user", text, images: images.length ? images : undefined }]);
+    sendMessage({ type: "text.input", payload: { text, images } });
     setTranscript(text);
     setTextInput("");
+    setAttachedImages([]);
     setOrbState("thinking");
-  }, [textInput, sendMessage]);
+    setActiveRightTab("chat");
+  }, [textInput, attachedImages, sendMessage]);
 
   // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
   const respondToProposal = useCallback(
@@ -974,19 +1020,54 @@ export default function App() {
             </div>
           )}
 
-          {/* Text input */}
-          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex items-center gap-2 w-full max-w-[400px] px-4">
-            <input
-              type="text"
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
-              placeholder="Type a command or say 'Rex'..."
-              className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
-            />
-            <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all">
-              Send
-            </button>
+          {/* Text input + image attach */}
+          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex flex-col gap-2 w-full max-w-[440px] px-4">
+            {attachedImages.length > 0 && (
+              <div className="flex gap-2 flex-wrap">
+                {attachedImages.map((src, i) => (
+                  <div key={i} className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={src} alt="attachment" className="w-12 h-12 object-cover rounded-md border border-[var(--border2)]" />
+                    <button
+                      onClick={() => setAttachedImages((p) => p.filter((_, j) => j !== i))}
+                      title="Remove"
+                      className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] rounded-full bg-[var(--midnight)] text-white text-[11px] leading-none flex items-center justify-center hover:bg-[var(--steel)]"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => { if (e.target.files) addImageFiles(e.target.files); e.target.value = ""; }}
+              />
+              <button
+                onClick={() => imageInputRef.current?.click()}
+                title="Attach an image"
+                className="w-9 h-9 flex-shrink-0 rounded-lg border border-[var(--border2)] bg-[var(--input)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+              >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
+              <input
+                type="text"
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
+                onPaste={(e) => { const f = Array.from(e.clipboardData?.files || []); if (f.length) addImageFiles(f); }}
+                placeholder="Type a command, attach an image, or say 'Rex'..."
+                className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
+              />
+              <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all">
+                Send
+              </button>
+            </div>
           </div>
 
           <div className="absolute bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-3 text-[11px] text-[var(--border2)]">

@@ -83,3 +83,19 @@ def create_chat_llm(settings: LLMSettings) -> BaseChatModel:
     provider = settings.chat_provider or settings.provider
     model_name = settings.chat_model or settings.model_light
     return _build_llm(provider, model_name, settings, temperature=0.6)
+
+
+def create_vision_llm(settings: LLMSettings) -> BaseChatModel:
+    """Create a VISION-capable model for understanding images.
+
+    Prefers Groq Llama-4 (same key as the rest of the stack, no separate quota);
+    falls back to Gemini if only a Gemini key is set. Both accept the standard
+    multimodal message format (text + image_url data URLs).
+    """
+    if settings.groq_api_key or (settings.provider == "groq" and settings.api_key):
+        return _build_llm("groq", "meta-llama/llama-4-scout-17b-16e-instruct", settings, temperature=0.4)
+    if settings.gemini_api_key:
+        return _build_llm("gemini", "gemini-2.5-flash", settings, temperature=0.4)
+    # No vision-capable key — fall back to the chat model (it can't see images,
+    # but this avoids a crash; the handler will note it can't view them).
+    return create_chat_llm(settings)
