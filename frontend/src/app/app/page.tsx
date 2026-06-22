@@ -53,45 +53,6 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-// Extract a handful of evenly-spaced frames from a video, in the browser, so
-// Rex can "watch" it via the image-vision pipeline (no server-side ffmpeg).
-function extractVideoFrames(file: File, count = 6, maxDim = 900): Promise<string[]> {
-  return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    video.muted = true;
-    video.preload = "auto";
-    video.src = url;
-    const frames: string[] = [];
-    const fail = () => { URL.revokeObjectURL(url); resolve(frames); };
-    video.onerror = fail;
-    video.onloadedmetadata = () => {
-      const dur = video.duration;
-      if (!dur || !isFinite(dur)) return fail();
-      const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      const ctx = canvas.getContext("2d");
-      const times = Array.from({ length: count }, (_, i) => (dur * (i + 0.5)) / count);
-      let idx = 0;
-      const seekNext = () => {
-        if (idx >= times.length) return fail();
-        video.currentTime = times[idx];
-      };
-      video.onseeked = () => {
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          try { frames.push(canvas.toDataURL("image/jpeg", 0.8)); } catch {}
-        }
-        idx += 1;
-        seekNext();
-      };
-      seekNext();
-    };
-  });
-}
-
 // Read an image File into a data URL, downscaled so big photos don't bloat the
 // WebSocket payload / model request.
 function downscaleImage(file: File, maxDim = 1280): Promise<string> {
@@ -232,8 +193,10 @@ export default function App() {
   const [textInput, setTextInput] = useState("");
   const [chatLog, setChatLog] = useState<Array<{ role: string; text: string; images?: string[]; docs?: string[] }>>([]);
   // Attachments for the next message.
-  const [attachedImages, setAttachedImages] = useState<string[]>([]); // data URLs (also video frames)
+  const [attachedImages, setAttachedImages] = useState<string[]>([]); // data URLs
   const [attachedDocs, setAttachedDocs] = useState<{ name: string; dataurl: string }[]>([]);
+  const [attachedVideo, setAttachedVideo] = useState<{ name: string; videoId: string } | null>(null);
+  const [videoUploading, setVideoUploading] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const docInputRef = useRef<HTMLInputElement | null>(null);
@@ -848,33 +811,52 @@ export default function App() {
     ).then((docs) => setAttachedDocs((prev) => [...prev, ...docs.filter((d) => d.dataurl)].slice(0, 5)));
   }, []);
 
-  // Attach a video → extract frames in the browser → treat as images for vision.
+  // Attach a video → upload to the backend, which hands it to Gemini for real
+  // video understanding (visuals + audio narration).
   const addVideoFile = useCallback(async (file: File) => {
-    setNarration("Pulling frames from the video so I can see it...");
-    const frames = await extractVideoFrames(file);
-    if (frames.length) setAttachedImages((prev) => [...prev, ...frames].slice(0, 6));
-    else setNarration("I couldn't read frames from that video — try a common format like MP4.");
+    setVideoUploading(true);
+    setAttachedVideo(null);
+    setNarration("Uploading your video so Rex can watch it — longer clips take a moment...");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/media/video", { method: "POST", body: form });
+      const d = await res.json();
+      if (d.ok && d.video_id) {
+        setAttachedVideo({ name: d.name || file.name, videoId: d.video_id });
+        setNarration("Video's ready — ask me about it, or say \"build what's in this\".");
+      } else {
+        setNarration(d.error || "I couldn't process that video.");
+      }
+    } catch {
+      setNarration("Couldn't upload the video — is the backend running?");
+    } finally {
+      setVideoUploading(false);
+    }
   }, []);
 
   const handleTextSubmit = useCallback(() => {
     const text = textInput.trim();
     const images = attachedImages;
     const docs = attachedDocs;
-    if (!text && images.length === 0 && docs.length === 0) return;
+    const video = attachedVideo;
+    if (!text && images.length === 0 && docs.length === 0 && !video) return;
     audioMutedRef.current = false; // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
+    const chips = [...docs.map((d) => d.name), ...(video ? [`🎬 ${video.name}`] : [])];
     setChatLog((prev) => [
       ...prev,
-      { role: "user", text, images: images.length ? images : undefined, docs: docs.length ? docs.map((d) => d.name) : undefined },
+      { role: "user", text, images: images.length ? images : undefined, docs: chips.length ? chips : undefined },
     ]);
-    sendMessage({ type: "text.input", payload: { text, images, documents: docs } });
+    sendMessage({ type: "text.input", payload: { text, images, documents: docs, video_id: video?.videoId || "" } });
     setTranscript(text);
     setTextInput("");
     setAttachedImages([]);
     setAttachedDocs([]);
+    setAttachedVideo(null);
     setOrbState("thinking");
     setActiveRightTab("chat");
-  }, [textInput, attachedImages, attachedDocs, sendMessage]);
+  }, [textInput, attachedImages, attachedDocs, attachedVideo, sendMessage]);
 
   // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
   const respondToProposal = useCallback(
@@ -1094,7 +1076,7 @@ export default function App() {
 
           {/* Text input + attachments (image / document / video) */}
           <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex flex-col gap-2 w-full max-w-[460px] px-4">
-            {(attachedImages.length > 0 || attachedDocs.length > 0) && (
+            {(attachedImages.length > 0 || attachedDocs.length > 0 || attachedVideo || videoUploading) && (
               <div className="flex gap-2 flex-wrap">
                 {attachedImages.map((src, i) => (
                   <div key={`img${i}`} className="relative">
@@ -1122,6 +1104,25 @@ export default function App() {
                     </button>
                   </div>
                 ))}
+                {videoUploading && (
+                  <div className="flex items-center gap-1.5 h-12 px-2.5 rounded-md border border-[var(--border2)] bg-[var(--input)]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--steel)" strokeWidth="2" className="flex-shrink-0 animate-spin"><path d="M21 12a9 9 0 1 1-6.2-8.5" /></svg>
+                    <span className="text-[10px] text-[var(--muted2)]">Processing video…</span>
+                  </div>
+                )}
+                {attachedVideo && (
+                  <div className="relative flex items-center gap-1.5 h-12 px-2.5 rounded-md border border-[var(--border2)] bg-[var(--input)] max-w-[150px]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--steel)" strokeWidth="2" className="flex-shrink-0"><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" /></svg>
+                    <span className="text-[10px] text-[var(--text3)] truncate">{attachedVideo.name}</span>
+                    <button
+                      onClick={() => setAttachedVideo(null)}
+                      title="Remove"
+                      className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] rounded-full bg-[var(--midnight)] text-white text-[11px] leading-none flex items-center justify-center hover:bg-[var(--steel)]"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

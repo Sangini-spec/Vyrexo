@@ -117,6 +117,7 @@ class SessionWebSocketHandler:
                     "text": msg.payload.get("text", ""),
                     "images": msg.payload.get("images") or [],
                     "documents": msg.payload.get("documents") or [],
+                    "video_id": msg.payload.get("video_id") or "",
                     "source": "text",
                 },
                 session_id=self._session_id,

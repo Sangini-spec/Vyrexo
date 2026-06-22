@@ -49,6 +49,8 @@ dependencies = [
     # Document understanding (PDF + Word) for attachments.
     "pypdf>=5.0.0",
     "python-docx>=1.1.0",
+    # Video understanding via Gemini (visuals + audio).
+    "google-genai>=1.0.0",
 ]
 
 [project.optional-dependencies]

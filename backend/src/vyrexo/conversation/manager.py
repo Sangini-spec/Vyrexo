@@ -24,6 +24,7 @@ from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
 from vyrexo.preview import is_running as preview_running, start_preview, stop_preview
+from vyrexo.media import understand_video
 from vyrexo.utils.documents import extract_documents
 from vyrexo.utils.errors import friendly_error
 from vyrexo.utils.llm import response_text
@@ -125,6 +126,15 @@ Examples:
 
 Output only one word: chitchat, general, codebase, explain, runapp, or command."""
 
+VIDEO_PROMPT = """You are Rex, watching a video / screen recording the developer shared — you can see the motion AND hear the audio. Reply naturally and concisely (spoken aloud — no markdown, code blocks, or lists). Describe what actually happens and what's said, then offer to act on it (build what's shown, fix what broke, etc.). If they asked a question, answer it about the video. Only state what's truly in the video."""
+
+VIDEO_BUILD_SPEC_PROMPT = """You are a senior engineer turning a screen recording into a PRECISE build spec another developer will implement. Watch the whole video — visuals AND audio narration — and produce a thorough, concrete spec:
+- What the app/feature is and the screens/flow shown, IN ORDER.
+- Every UI element and its visible text, plus layout and styling (colors, structure).
+- The behaviour/interactions demonstrated (what clicking does, what changes).
+- Anything the narrator explicitly asks for or points out.
+Be specific enough to reproduce it. Only include what is actually shown or said."""
+
 DOC_QA_PROMPT = """You are Rex, a friendly senior developer. The user attached a document; answer their request about it using ONLY its contents below. Spoken aloud — be conversational and concise, no markdown/code blocks/lists. If they didn't ask anything specific, give a short, useful summary. If the document doesn't contain the answer, say so honestly."""
 
 VISION_PROMPT = """You are Rex, a friendly AI coding assistant, looking at image(s) the developer just shared. You'll be heard over voice, so reply naturally and concisely (2-5 sentences, no markdown, code blocks, or lists).
@@ -211,20 +221,28 @@ class ConversationManager:
         project_path: str,
         images: list[str] | None = None,
         documents: list[dict] | None = None,
+        video_id: str | None = None,
     ) -> str:
         """
         Process a user conversation turn. Returns the response text for TTS.
         """
         text = transcript.text.strip()
-        if not text and not images and not documents:
+        if not text and not images and not documents and not video_id:
             return ""
 
         logger.info("conversation_turn", text=text[:80], session_id=session_id,
-                    images=len(images or []), docs=len(documents or []))
+                    images=len(images or []), docs=len(documents or []), video=bool(video_id))
 
         # Store user message in memory (note attachments in the history).
-        stored = text or ("[shared an image]" if images else "[shared a document]")
+        stored = text or ("[shared a video]" if video_id else "[shared an image]" if images else "[shared a document]")
         await self._memory.store(session_id, MemoryEntry(role="user", content=stored))
+
+        # A video attachment → Gemini video understanding (visuals + audio).
+        if video_id:
+            response = await self._handle_video(video_id, text, session_id, project_path)
+            if response:
+                await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
+            return response
 
         # If the user attached image(s), understand them first — that's the whole
         # point of the attachment. Bypasses text intent routing.
@@ -750,6 +768,43 @@ class ConversationManager:
 
         # Just describe it — and remember the gist so a follow-up "build it" works.
         self._pending_vision[session_id] = understanding
+        return understanding
+
+    async def _handle_video(self, video_id: str, text: str, session_id: str, project_path: str) -> str:
+        """Understand a video/screen recording (Gemini: visuals + audio), then
+        either describe it or build what it shows."""
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Watching your video — give me a moment.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        wants_build = _wants_build(text)
+        prompt = VIDEO_BUILD_SPEC_PROMPT if wants_build else VIDEO_PROMPT
+        if text.strip():
+            prompt += f"\n\nThe user said: {text.strip()}"
+
+        try:
+            understanding = await asyncio.to_thread(understand_video, video_id, prompt)
+        except Exception as e:
+            logger.exception("video_understand_failed")
+            msg = str(e)
+            if any(s in msg for s in ("503", "UNAVAILABLE", "overloaded")):
+                return "The video service is busy right now — give it a moment and try again."
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                return "I hit the video quota for now — a shorter clip uses less, or try again in a bit."
+            return friendly_error(e)
+        if not understanding:
+            return "I couldn't make sense of that video — a shorter or clearer clip might help."
+
+        if wants_build:
+            if project_path in ("", ".", None):
+                self._pending_vision[session_id] = understanding
+                return ("I watched it. Connect a project folder and say \"build it\", and I'll "
+                        "reproduce what the video shows.")
+            instruction = self._image_build_instruction(understanding, text)
+            return await self._plan_and_gate(instruction, session_id, project_path, "Got it — I watched the video. ")
+
         return understanding
 
     async def _handle_document(self, text: str, doc_context: str, session_id: str, project_path: str) -> str:

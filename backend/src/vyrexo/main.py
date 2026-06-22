@@ -25,7 +25,7 @@ import structlog
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from vyrexo.api.routes import health_router, sessions_router, projects_router, voice_router
+from vyrexo.api.routes import health_router, sessions_router, projects_router, voice_router, media_router
 from vyrexo.api.websocket.handler import SessionWebSocketHandler
 from vyrexo.api.websocket.manager import ConnectionManager
 from vyrexo.agents.orchestrator import AgentOrchestrator
@@ -198,9 +198,10 @@ async def _handle_conversation_turn(event: Event) -> None:
     text = event.payload.get("text", "")
     images = event.payload.get("images") or []
     documents = event.payload.get("documents") or []
+    video_id = event.payload.get("video_id") or None
     session_id = event.session_id or ""
 
-    if not text.strip() and not images and not documents:
+    if not text.strip() and not images and not documents and not video_id:
         return
 
     # A fresh user turn lifts any post-interrupt silence so Rex can speak again.
@@ -218,6 +219,7 @@ async def _handle_conversation_turn(event: Event) -> None:
         project_path=project_path,
         images=images,
         documents=documents,
+        video_id=video_id,
     )
 
     # Publish response for TTS narration + WebSocket forwarding
@@ -470,6 +472,7 @@ app.include_router(health_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
+app.include_router(media_router, prefix="/api")
 
 
 # ── WebSocket Endpoint ───────────────────────────────────────────
