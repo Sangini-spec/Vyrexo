@@ -135,6 +135,19 @@ Read the image and respond usefully based on what it is:
 
 If they also typed a question, answer that about the image. Don't make things up — only describe what you can actually see."""
 
+# When the user wants the image BUILT, we ask the vision model for a precise,
+# implementation-ready spec (this becomes the brief the coder builds from, since
+# the coding model itself is text-only — this spec is the bridge image→code).
+VISION_BUILD_SPEC_PROMPT = """You are a senior engineer turning a screenshot/design into a PRECISE build spec another developer will implement EXACTLY. Study the image and write a thorough, concrete spec so it can be reproduced faithfully:
+
+- Overall: what kind of screen/app it is and the layout structure (header, sidebar, grid, columns, sections, positioning).
+- Every visible element, in order: components, their exact visible text/labels, and how they're arranged.
+- Styling: colors (give hex estimates), typography (sizes/weights), spacing, borders, radius, shadows, backgrounds.
+- Implied states/interactions: buttons, inputs, hovers, active states, what seems clickable.
+- A suggested implementation structure (e.g., the HTML/CSS or component tree) if it's clear.
+
+Be exhaustive and specific — measurements and colors matter. Only describe what is actually visible; if something is ambiguous, note your best guess. Output the spec only."""
+
 logger = structlog.get_logger()
 
 # Directories we never list/count as part of "what files are here".
@@ -183,6 +196,10 @@ class ConversationManager:
         # the conversation loop stays live — the user can chat, ask questions, or
         # interrupt WHILE a build runs instead of being blocked behind it.
         self._build_tasks: dict[str, asyncio.Task] = {}
+        # Per-session stashed image build spec. After Rex describes a shared image
+        # and offers to build it, a follow-up "yes, build it" uses this (the
+        # image itself isn't re-sent on the next turn).
+        self._pending_vision: dict[str, str] = {}
 
     async def process_turn(
         self,
@@ -272,6 +289,21 @@ class ConversationManager:
                 self._pending_impl.pop(session_id, None)
                 return "No problem — I'll leave the code as it is. What would you like to do next?"
             self._pending_impl.pop(session_id, None)
+
+        # ── Pending IMAGE build (Rex described a shared image, user says build) ──
+        pending_vis = self._pending_vision.get(session_id)
+        if pending_vis is not None:
+            if (_is_affirmative(text) and _is_clean_confirmation(text)) or _wants_build(text):
+                self._pending_vision.pop(session_id, None)
+                if project_path in ("", ".", None):
+                    self._pending_vision[session_id] = pending_vis  # keep it for after they connect
+                    return "Connect a project folder first, then say \"build it\" and I'll reproduce the design there."
+                instruction = self._image_build_instruction(pending_vis, text)
+                return await self._plan_and_gate(instruction, session_id, project_path, "Great — let me plan out building this. ")
+            if _is_negative(text):
+                self._pending_vision.pop(session_id, None)
+            else:
+                self._pending_vision.pop(session_id, None)
 
         # ── Pending PLAN awaiting approval ───────────────────────────────────
         # Nothing has been written yet. A clean "yes" runs it; a "no" cancels;
@@ -391,11 +423,15 @@ class ConversationManager:
         # Enrich with codebase context
         context_str = await self._context.get_context_for_agent(text)
         enriched_message = f"{text}\n\n{context_str}" if context_str else text
+        return await self._plan_and_gate(enriched_message, session_id, project_path, emotion_prefix)
 
-        # ── Approval gate: plan FIRST, never execute changes without an OK ───
-        plan = await self._orchestrator.preview_plan(enriched_message, project_path, session_id)
+    async def _plan_and_gate(self, instruction: str, session_id: str, project_path: str, opener: str = "") -> str:
+        """Plan an instruction first; if it would change files, show the plan and
+        WAIT for approval. Read-only plans run in the background. Shared by typed
+        commands and image-driven builds."""
+        plan = await self._orchestrator.preview_plan(instruction, project_path, session_id)
         if not plan:
-            return f"{emotion_prefix}I couldn't put a plan together for that — could you rephrase what you'd like me to do?"
+            return f"{opener}I couldn't put a plan together for that — could you rephrase what you'd like me to do?"
 
         agents_in_plan = {s.get("agent_name") for s in plan}
         mutating = bool(agents_in_plan & {"coding", "executor", "testing"})
@@ -403,27 +439,26 @@ class ConversationManager:
         if mutating:
             # This plan would change files / run commands — show it and WAIT.
             self._pending_plan[session_id] = {
-                "instruction": enriched_message,
+                "instruction": instruction,
                 "plan": plan,
                 "project_path": project_path,
             }
             summary = self._format_plan(plan)
             return (
-                f"{emotion_prefix}Here's my plan:\n\n{summary}\n\n"
+                f"{opener}Here's my plan:\n\n{summary}\n\n"
                 "Should I go ahead and build this? Say **yes** to start, or tell me what to change."
             )
 
-        # Read-only plan (e.g. a review) — safe to run, but it's still slow on
-        # the local model, so run it in the background and stay conversational.
+        # Read-only plan (e.g. a review) — safe to run in the background.
         return self._launch(
             session_id,
             lambda: self._orchestrator.run(
-                user_message=enriched_message,
+                user_message=instruction,
                 project_path=project_path,
                 session_id=session_id,
                 approved_plan=plan,
             ),
-            f"{emotion_prefix}On it — I'll take a look and report back in a moment.",
+            f"{opener}On it — I'll take a look and report back in a moment.",
         )
 
     async def _handle_while_busy(self, text: str, session_id: str, project_path: str) -> str:
@@ -654,33 +689,64 @@ class ConversationManager:
             return friendly_error(e)
 
     async def _handle_vision(self, text: str, images: list[str], session_id: str, project_path: str) -> str:
-        """Understand image(s) the user shared, via a vision-capable model."""
+        """Understand image(s) the user shared. If they want it BUILT (a
+        screenshot/design to reproduce), turn the image into a detailed spec and
+        run it through the real build pipeline — like Claude Code does."""
         await self._event_bus.publish(Event(
             type="agent.narration",
             payload={"text": "Let me take a look at that.", "agent": "rex"},
             session_id=session_id,
         ))
 
-        # Standard multimodal message: a text part + each image as a data URL.
-        prompt = text.strip() or "Take a look at this and tell me what it is and how you can help with it."
-        content: list[dict] = [{"type": "text", "text": prompt}]
-        for img in images[:4]:  # cap so we don't overload the request
-            if isinstance(img, str) and img.startswith("data:image"):
-                content.append({"type": "image_url", "image_url": {"url": img}})
-        if len(content) == 1:
+        valid = [img for img in images[:4] if isinstance(img, str) and img.startswith("data:image")]
+        if not valid:
             return "That didn't come through as an image I can read — could you try attaching it again?"
+
+        wants_build = _wants_build(text)
+        sys_prompt = VISION_BUILD_SPEC_PROMPT if wants_build else VISION_PROMPT
+        prompt = text.strip() or (
+            "Produce a detailed, implementation-ready spec of this design."
+            if wants_build else
+            "Take a look at this and tell me what it is and how you can help with it."
+        )
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        content += [{"type": "image_url", "image_url": {"url": img}} for img in valid]
 
         try:
             llm = create_vision_llm(get_settings().llm)
             resp = await llm.ainvoke([
-                SystemMessage(content=VISION_PROMPT),
+                SystemMessage(content=sys_prompt),
                 HumanMessage(content=content),
             ])
-            answer = response_text(resp).strip()
-            return answer or "I can see the image, but I'm not sure what you'd like me to do with it — tell me more?"
+            understanding = response_text(resp).strip()
         except Exception as e:
             logger.exception("vision_failed")
             return friendly_error(e)
+        if not understanding:
+            return "I can see the image but couldn't read it clearly — could you send a sharper version?"
+
+        if wants_build:
+            connected = project_path not in ("", ".", None)
+            if not connected:
+                self._pending_vision[session_id] = understanding
+                return ("I can see exactly what you want me to build. Connect a project folder, "
+                        "then say \"build it\" and I'll reproduce it there.")
+            instruction = self._image_build_instruction(understanding, text)
+            return await self._plan_and_gate(instruction, session_id, project_path, "Got it — I can build this. ")
+
+        # Just describe it — and remember the gist so a follow-up "build it" works.
+        self._pending_vision[session_id] = understanding
+        return understanding
+
+    @staticmethod
+    def _image_build_instruction(spec: str, user_text: str) -> str:
+        extra = f"\n\nThe user also said: {user_text.strip()}" if user_text.strip() else ""
+        return (
+            "Build EXACTLY what is shown in the screenshot/design the user provided. Match the "
+            "layout, components, visible text, colors, and styling as closely as possible. Create "
+            "the real files and implement it fully — don't just describe it.\n\n"
+            f"DETAILED SPEC OF THE IMAGE (reproduce this faithfully):\n{spec}{extra}"
+        )
 
     async def _handle_web_question(self, text: str, session_id: str, project_path: str) -> str:
         """Answer a general/world question by LIVE web search, then synthesize a
@@ -1103,6 +1169,18 @@ def _wants_preview(text: str) -> bool:
     if "test" in t and not any(n in t for n in ("app", "server", "site", "project")):
         return False
     return any(v in t for v in _RUN_VERBS) and any(n in t for n in _APP_NOUNS)
+
+
+def _wants_build(text: str) -> bool:
+    """In an image context, does the user want it built/reproduced?"""
+    t = text.lower()
+    cues = (
+        "build", "make this", "make it", "create this", "create the", "recreate", "re-create",
+        "implement", "clone", "replicate", "reproduce", "rebuild", "code this", "code it",
+        "turn this into", "turn it into", "like this", "exactly like", "same as this",
+        "this exact", "develop this", "make me this", "build me",
+    )
+    return any(c in t for c in cues)
 
 
 def _wants_continue(text: str) -> bool:
