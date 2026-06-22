@@ -259,6 +259,30 @@ export default function App() {
     audioMutedRef.current = false;
   }, []);
 
+  // Sync Rex's chat bubble with his VOICE: hold the reply text and reveal it the
+  // moment the audio actually starts, so it doesn't pop up a beat before he
+  // speaks (which felt like text-to-speech). A fallback reveals it anyway if no
+  // audio arrives within a moment (e.g. muted, or TTS failed).
+  const pendingRexRef = useRef<string | null>(null);
+  const pendingRexTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushPendingRex = useCallback(() => {
+    if (pendingRexTimerRef.current) {
+      clearTimeout(pendingRexTimerRef.current);
+      pendingRexTimerRef.current = null;
+    }
+    const text = pendingRexRef.current;
+    if (!text) return;
+    pendingRexRef.current = null;
+    setChatLog((prev) => [...prev, { role: "assistant", text }]);
+    const isReport = text.length > 180 || text.includes("\n");
+    if (isReport) {
+      setNarration("Done — the details are in the Chat tab.");
+      setActiveRightTab("chat");
+    } else {
+      setNarration(text);
+    }
+  }, []);
+
   // ── WebSocket: handles all server events ────────────────────
   const onServerMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -276,6 +300,7 @@ export default function App() {
         // emit utterances; unmuting on them would let audio sneak back. Audio
         // is only re-enabled when the user sends a new turn.
         beginUtterance();
+        flushPendingRex(); // reveal Rex's text exactly as his voice begins
         setOrbState("speaking");
         break;
 
@@ -294,18 +319,14 @@ export default function App() {
       }
 
       case "conversation.turn.completed": {
-        // This is Rex's reply for the turn. The full (possibly long, markdown)
-        // text goes into the Chat tab; the narration box keeps a short line.
+        // Rex's reply. Hold it and reveal it when his voice starts (synced),
+        // rather than popping the text up a beat early. Fallback timer shows it
+        // anyway if no audio comes. Full text → Chat tab.
         const responseText = (msg.payload.text as string) || "";
         if (responseText.trim()) {
-          setChatLog((prev) => [...prev, { role: "assistant", text: responseText }]);
-          const isReport = responseText.length > 180 || responseText.includes("\n");
-          if (isReport) {
-            setNarration("Done — the details are in the Chat tab.");
-            setActiveRightTab("chat");
-          } else {
-            setNarration(responseText);
-          }
+          flushPendingRex(); // show any earlier pending reply first
+          pendingRexRef.current = responseText;
+          pendingRexTimerRef.current = setTimeout(flushPendingRex, 2500);
         }
         setOrbState("speaking");
         // Backend streams the synthesized audio over the WS; no browser TTS fallback.
@@ -417,7 +438,7 @@ export default function App() {
         setOrbState("idle");
         break;
     }
-  }, [beginUtterance, endUtterance, unmuteAudio]);
+  }, [beginUtterance, endUtterance, unmuteAudio, flushPendingRex]);
 
   const onAudioMessage = useCallback((data: ArrayBuffer) => {
     if (audioMutedRef.current) return; // discard audio that arrives after an interrupt

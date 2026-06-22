@@ -50,6 +50,7 @@ from vyrexo.voice.stt.base import TranscriptionResult
 from vyrexo.voice.stt.whisper_local import WhisperLocalSTT
 from vyrexo.voice.tts.base import VoiceConfig
 from vyrexo.voice.tts.edge_tts_provider import VOICE_PRESETS, EdgeTTSProvider
+from vyrexo.utils.speakable import speakable
 
 logger = structlog.get_logger()
 
@@ -329,7 +330,9 @@ async def _speak(session_id: str, text: str) -> None:
         return
 
     import time
-    clean = text.strip()
+    # Normalize to spoken-friendly text so Rex TALKS (e.g. "app dot pie") instead
+    # of reading markup ("a-p-p dot p-y"). The Chat panel still gets the full text.
+    clean = speakable(text).strip()
     if not clean:
         return
 
