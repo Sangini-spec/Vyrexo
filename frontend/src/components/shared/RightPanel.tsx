@@ -11,6 +11,7 @@ export interface ChatMessage {
   role: string;
   text: string;
   images?: string[];
+  docs?: string[];
 }
 
 /**
@@ -163,6 +164,16 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
                   {msg.images.map((src, j) => (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img key={j} src={src} alt="attachment" className="max-w-[140px] max-h-[140px] rounded-md border border-[var(--border2)]" />
+                  ))}
+                </div>
+              )}
+              {msg.docs && msg.docs.length > 0 && (
+                <div className="flex gap-1.5 flex-wrap mb-1.5">
+                  {msg.docs.map((name, j) => (
+                    <span key={j} className="inline-flex items-center gap-1 text-[10px] text-[var(--text3)] bg-[var(--surface)] border border-[var(--border2)] rounded px-1.5 py-0.5">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                      {name}
+                    </span>
                   ))}
                 </div>
               )}

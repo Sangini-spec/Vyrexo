@@ -53,6 +53,45 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+// Extract a handful of evenly-spaced frames from a video, in the browser, so
+// Rex can "watch" it via the image-vision pipeline (no server-side ffmpeg).
+function extractVideoFrames(file: File, count = 6, maxDim = 900): Promise<string[]> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.preload = "auto";
+    video.src = url;
+    const frames: string[] = [];
+    const fail = () => { URL.revokeObjectURL(url); resolve(frames); };
+    video.onerror = fail;
+    video.onloadedmetadata = () => {
+      const dur = video.duration;
+      if (!dur || !isFinite(dur)) return fail();
+      const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      const ctx = canvas.getContext("2d");
+      const times = Array.from({ length: count }, (_, i) => (dur * (i + 0.5)) / count);
+      let idx = 0;
+      const seekNext = () => {
+        if (idx >= times.length) return fail();
+        video.currentTime = times[idx];
+      };
+      video.onseeked = () => {
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          try { frames.push(canvas.toDataURL("image/jpeg", 0.8)); } catch {}
+        }
+        idx += 1;
+        seekNext();
+      };
+      seekNext();
+    };
+  });
+}
+
 // Read an image File into a data URL, downscaled so big photos don't bloat the
 // WebSocket payload / model request.
 function downscaleImage(file: File, maxDim = 1280): Promise<string> {
@@ -191,10 +230,14 @@ export default function App() {
   const [steps, setSteps] = useState<AgentStep[]>([]);
   const [narration, setNarration] = useState("Say 'Rex' to start, or click the orb");
   const [textInput, setTextInput] = useState("");
-  const [chatLog, setChatLog] = useState<Array<{ role: string; text: string; images?: string[] }>>([]);
-  // Images the user has attached to the next message (data URLs).
-  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const [chatLog, setChatLog] = useState<Array<{ role: string; text: string; images?: string[]; docs?: string[] }>>([]);
+  // Attachments for the next message.
+  const [attachedImages, setAttachedImages] = useState<string[]>([]); // data URLs (also video frames)
+  const [attachedDocs, setAttachedDocs] = useState<{ name: string; dataurl: string }[]>([]);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const docInputRef = useRef<HTMLInputElement | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
 
   // ── Sessions (persisted + renamable) ────────────────────────
   const [sessions, setSessions] = useState<StoredSession[]>([]);
@@ -789,20 +832,49 @@ export default function App() {
     setAttachedImages((prev) => [...prev, ...urls].slice(0, 4));
   }, []);
 
+  // Attach documents (read as data URLs; the backend extracts the text).
+  const addDocFiles = useCallback((files: FileList | File[]) => {
+    const arr = Array.from(files).slice(0, 5);
+    Promise.all(
+      arr.map(
+        (f) =>
+          new Promise<{ name: string; dataurl: string }>((res) => {
+            const r = new FileReader();
+            r.onload = () => res({ name: f.name, dataurl: r.result as string });
+            r.onerror = () => res({ name: f.name, dataurl: "" });
+            r.readAsDataURL(f);
+          })
+      )
+    ).then((docs) => setAttachedDocs((prev) => [...prev, ...docs.filter((d) => d.dataurl)].slice(0, 5)));
+  }, []);
+
+  // Attach a video → extract frames in the browser → treat as images for vision.
+  const addVideoFile = useCallback(async (file: File) => {
+    setNarration("Pulling frames from the video so I can see it...");
+    const frames = await extractVideoFrames(file);
+    if (frames.length) setAttachedImages((prev) => [...prev, ...frames].slice(0, 6));
+    else setNarration("I couldn't read frames from that video — try a common format like MP4.");
+  }, []);
+
   const handleTextSubmit = useCallback(() => {
     const text = textInput.trim();
     const images = attachedImages;
-    if (!text && images.length === 0) return;
+    const docs = attachedDocs;
+    if (!text && images.length === 0 && docs.length === 0) return;
     audioMutedRef.current = false; // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
-    setChatLog((prev) => [...prev, { role: "user", text, images: images.length ? images : undefined }]);
-    sendMessage({ type: "text.input", payload: { text, images } });
+    setChatLog((prev) => [
+      ...prev,
+      { role: "user", text, images: images.length ? images : undefined, docs: docs.length ? docs.map((d) => d.name) : undefined },
+    ]);
+    sendMessage({ type: "text.input", payload: { text, images, documents: docs } });
     setTranscript(text);
     setTextInput("");
     setAttachedImages([]);
+    setAttachedDocs([]);
     setOrbState("thinking");
     setActiveRightTab("chat");
-  }, [textInput, attachedImages, sendMessage]);
+  }, [textInput, attachedImages, attachedDocs, sendMessage]);
 
   // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
   const respondToProposal = useCallback(
@@ -1020,12 +1092,12 @@ export default function App() {
             </div>
           )}
 
-          {/* Text input + image attach */}
-          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex flex-col gap-2 w-full max-w-[440px] px-4">
-            {attachedImages.length > 0 && (
+          {/* Text input + attachments (image / document / video) */}
+          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex flex-col gap-2 w-full max-w-[460px] px-4">
+            {(attachedImages.length > 0 || attachedDocs.length > 0) && (
               <div className="flex gap-2 flex-wrap">
                 {attachedImages.map((src, i) => (
-                  <div key={i} className="relative">
+                  <div key={`img${i}`} className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={src} alt="attachment" className="w-12 h-12 object-cover rounded-md border border-[var(--border2)]" />
                     <button
@@ -1037,31 +1109,65 @@ export default function App() {
                     </button>
                   </div>
                 ))}
+                {attachedDocs.map((d, i) => (
+                  <div key={`doc${i}`} className="relative flex items-center gap-1.5 h-12 px-2.5 rounded-md border border-[var(--border2)] bg-[var(--input)] max-w-[150px]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--steel)" strokeWidth="2" className="flex-shrink-0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                    <span className="text-[10px] text-[var(--text3)] truncate">{d.name}</span>
+                    <button
+                      onClick={() => setAttachedDocs((p) => p.filter((_, j) => j !== i))}
+                      title="Remove"
+                      className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] rounded-full bg-[var(--midnight)] text-white text-[11px] leading-none flex items-center justify-center hover:bg-[var(--steel)]"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
+
+            {/* hidden pickers */}
+            <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden"
+              onChange={(e) => { if (e.target.files) addImageFiles(e.target.files); e.target.value = ""; }} />
+            <input ref={docInputRef} type="file" accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.rtf,.py,.js,.ts,.tsx,.html,.css,.java,.go,.rs,.rb,.c,.cpp,.sh,.sql,.yaml,.yml" multiple className="hidden"
+              onChange={(e) => { if (e.target.files) addDocFiles(e.target.files); e.target.value = ""; }} />
+            <input ref={videoInputRef} type="file" accept="video/*" className="hidden"
+              onChange={(e) => { if (e.target.files?.[0]) addVideoFile(e.target.files[0]); e.target.value = ""; }} />
+
             <div className="flex items-center gap-2">
-              <input
-                ref={imageInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => { if (e.target.files) addImageFiles(e.target.files); e.target.value = ""; }}
-              />
-              <button
-                onClick={() => imageInputRef.current?.click()}
-                title="Attach an image"
-                className="w-9 h-9 flex-shrink-0 rounded-lg border border-[var(--border2)] bg-[var(--input)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
-              >
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14" /></svg>
-              </button>
+              <div className="relative flex-shrink-0">
+                <button
+                  onClick={() => setAttachMenuOpen((o) => !o)}
+                  title="Attach"
+                  className="w-9 h-9 rounded-lg border border-[var(--border2)] bg-[var(--input)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: attachMenuOpen ? "rotate(45deg)" : "none", transition: "transform .15s" }}><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+                {attachMenuOpen && (
+                  <div className="absolute bottom-11 left-0 w-[150px] bg-[var(--surface)] border border-[var(--border2)] rounded-lg shadow-xl overflow-hidden z-50">
+                    {[
+                      { label: "Image", ref: imageInputRef, icon: <><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></> },
+                      { label: "Document", ref: docInputRef, icon: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></> },
+                      { label: "Video", ref: videoInputRef, icon: <><polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" /></> },
+                    ].map((item) => (
+                      <button
+                        key={item.label}
+                        onClick={() => { setAttachMenuOpen(false); item.ref.current?.click(); }}
+                        className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-[var(--text3)] hover:bg-[var(--midnight-dim)] hover:text-[var(--ice)] transition-all"
+                      >
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{item.icon}</svg>
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <input
                 type="text"
                 value={textInput}
                 onChange={(e) => setTextInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleTextSubmit()}
                 onPaste={(e) => { const f = Array.from(e.clipboardData?.files || []); if (f.length) addImageFiles(f); }}
-                placeholder="Type a command, attach an image, or say 'Rex'..."
+                placeholder="Type a command, attach a file, or say 'Rex'..."
                 className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
               />
               <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all">

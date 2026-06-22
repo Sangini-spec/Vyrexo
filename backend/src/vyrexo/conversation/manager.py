@@ -24,6 +24,7 @@ from vyrexo.conversation.memory.base import MemoryEntry, MemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
 from vyrexo.preview import is_running as preview_running, start_preview, stop_preview
+from vyrexo.utils.documents import extract_documents
 from vyrexo.utils.errors import friendly_error
 from vyrexo.utils.llm import response_text
 from vyrexo.utils.web_search import source_name, web_search
@@ -124,6 +125,8 @@ Examples:
 
 Output only one word: chitchat, general, codebase, explain, runapp, or command."""
 
+DOC_QA_PROMPT = """You are Rex, a friendly senior developer. The user attached a document; answer their request about it using ONLY its contents below. Spoken aloud — be conversational and concise, no markdown/code blocks/lists. If they didn't ask anything specific, give a short, useful summary. If the document doesn't contain the answer, say so honestly."""
+
 VISION_PROMPT = """You are Rex, a friendly AI coding assistant, looking at image(s) the developer just shared. You'll be heard over voice, so reply naturally and concisely (2-5 sentences, no markdown, code blocks, or lists).
 
 Read the image and respond usefully based on what it is:
@@ -207,24 +210,35 @@ class ConversationManager:
         session_id: str,
         project_path: str,
         images: list[str] | None = None,
+        documents: list[dict] | None = None,
     ) -> str:
         """
         Process a user conversation turn. Returns the response text for TTS.
         """
         text = transcript.text.strip()
-        if not text and not images:
+        if not text and not images and not documents:
             return ""
 
-        logger.info("conversation_turn", text=text[:80], session_id=session_id, images=len(images or []))
+        logger.info("conversation_turn", text=text[:80], session_id=session_id,
+                    images=len(images or []), docs=len(documents or []))
 
-        # Store user message in memory (note attached images in the history).
-        stored = text or "[shared an image]"
+        # Store user message in memory (note attachments in the history).
+        stored = text or ("[shared an image]" if images else "[shared a document]")
         await self._memory.store(session_id, MemoryEntry(role="user", content=stored))
 
         # If the user attached image(s), understand them first — that's the whole
         # point of the attachment. Bypasses text intent routing.
         if images:
             response = await self._handle_vision(text, images, session_id, project_path)
+            if response:
+                await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
+            return response
+
+        # A document attachment: read it and use it as context (summarize/answer,
+        # or build from it if they asked).
+        if documents:
+            doc_context = extract_documents(documents)
+            response = await self._handle_document(text, doc_context, session_id, project_path)
             if response:
                 await self._memory.store(session_id, MemoryEntry(role="assistant", content=response))
             return response
@@ -737,6 +751,40 @@ class ConversationManager:
         # Just describe it — and remember the gist so a follow-up "build it" works.
         self._pending_vision[session_id] = understanding
         return understanding
+
+    async def _handle_document(self, text: str, doc_context: str, session_id: str, project_path: str) -> str:
+        """Use an attached document as context: build from it if asked, else
+        answer/summarize it."""
+        if not doc_context:
+            return "I couldn't read anything from that document — is it a supported type (PDF, Word, text, code)?"
+
+        await self._event_bus.publish(Event(
+            type="agent.narration",
+            payload={"text": "Reading through that document.", "agent": "rex"},
+            session_id=session_id,
+        ))
+
+        # If they want to build/act on it, feed the doc to the build pipeline.
+        kind = await self._route_kind(text, Intent.CONVERSATION) if text.strip() else "general"
+        if kind == "command":
+            if project_path in ("", ".", None):
+                return "Connect a project folder and I'll build this from your document."
+            instruction = (
+                f"{text}\n\nUse the attached document below as the specification / source of truth:\n\n{doc_context}"
+            )
+            return await self._plan_and_gate(instruction, session_id, project_path, "Got it — working from your document. ")
+
+        # Otherwise answer about it (summary / Q&A).
+        try:
+            llm = create_chat_llm(get_settings().llm)
+            resp = await llm.ainvoke([
+                SystemMessage(content=DOC_QA_PROMPT),
+                HumanMessage(content=f"{text or 'Give me a short summary of this document.'}\n\nDocument:\n{doc_context}"),
+            ])
+            return response_text(resp).strip() or "I read the document but couldn't pull a clear answer — what would you like to know about it?"
+        except Exception as e:
+            logger.exception("doc_qa_failed")
+            return friendly_error(e)
 
     @staticmethod
     def _image_build_instruction(spec: str, user_text: str) -> str:
