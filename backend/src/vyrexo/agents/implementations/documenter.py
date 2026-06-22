@@ -85,6 +85,8 @@ class DocumentationAgent(BaseAgent):
         docs_created = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
+            if self.is_interrupted(state):
+                break
             response = await self.call_llm(llm, messages, FILE_TOOLS, state=state)
 
             if not response.tool_calls:

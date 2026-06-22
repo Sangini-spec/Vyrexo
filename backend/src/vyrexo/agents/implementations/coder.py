@@ -92,6 +92,8 @@ class CodingAgent(BaseAgent):
         commands_run = []
 
         for round_num in range(MAX_TOOL_ROUNDS):
+            if self.is_interrupted(state):
+                break
             response = await self.call_llm(llm, messages, tools_for_llm, state=state)
 
             # Check if Gemini wants to use tools

@@ -233,6 +233,15 @@ class BaseAgent(ABC):
         "git_log": "git_op",
     }
 
+    def is_interrupted(self, state: dict[str, Any]) -> bool:
+        """True once the user has interrupted. Agents check this between tool
+        calls so work halts mid-step instead of running every step to the end."""
+        chk = state.get("is_interrupted")
+        try:
+            return bool(chk and chk())
+        except Exception:
+            return False
+
     async def emit_action(self, state: dict[str, Any], tool_name: str, args: dict[str, Any]) -> None:
         """
         Publish a structured ``agent.action.<category>`` event describing a tool

@@ -184,6 +184,9 @@ class AgentOrchestrator:
             "final_response": "",
             # Injected so agents can call self.narrate(state, "...") for live commentary
             "event_bus": self._event_bus,
+            # Lets agents bail between tool calls the moment the user interrupts,
+            # so work halts mid-step (not just at step boundaries).
+            "is_interrupted": lambda: self._interrupted,
         }
 
         try:
@@ -409,6 +412,7 @@ class AgentOrchestrator:
         session_id = state.get("session_id", "")
         # Re-inject event bus reference (state was preserved across the boundary)
         state["event_bus"] = self._event_bus
+        state["is_interrupted"] = lambda: self._interrupted
         state["interrupted"] = False
 
         # Add the new instruction to the conversation history
