@@ -33,29 +33,92 @@ class VSCodeOpenRequest(BaseModel):
     line: int | None = None
 
 
+# Modern Windows folder picker (Vista+ IFileOpenDialog with FOS_PICKFOLDERS —
+# the same chooser modern apps use). Falls back to the classic dialog if the COM
+# path fails, so the picker can never end up broken.
+_PICK_PS = r'''
+$ErrorActionPreference = 'Stop'
+$result = ''
+try {
+  Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace RexPicker {
+  [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem ppsi);
+    void GetDisplayName(uint sigdnName, out IntPtr ppszName);
+    void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+    void Compare(IShellItem psi, uint hint, out int piOrder);
+  }
+  [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+  public class FileOpenDialog { }
+  [ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IFileDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+    void SetFileTypeIndex(uint iFileType);
+    void GetFileTypeIndex(out uint piFileType);
+    void Advise(IntPtr pfde, out uint pdwCookie);
+    void Unadvise(uint dwCookie);
+    void SetOptions(uint fos);
+    void GetOptions(out uint pfos);
+    void SetDefaultFolder(IShellItem psi);
+    void SetFolder(IShellItem psi);
+    void GetFolder(out IShellItem ppsi);
+    void GetCurrentSelection(out IShellItem ppsi);
+    void SetFileName(string pszName);
+    void GetFileName(out IntPtr pszName);
+    void SetTitle(string pszTitle);
+    void SetOkButtonLabel(string pszText);
+    void SetFileNameLabel(string pszLabel);
+    void GetResult(out IShellItem ppsi);
+  }
+}
+"@
+  $dlg = New-Object RexPicker.FileOpenDialog
+  $ifd = [RexPicker.IFileDialog]$dlg
+  $ifd.SetOptions(0x20)            # FOS_PICKFOLDERS
+  $ifd.SetTitle('Select your project folder for Rex')
+  if ($ifd.Show([IntPtr]::Zero) -eq 0) {
+    $item = $null
+    $ifd.GetResult([ref]$item)
+    $ptr = [IntPtr]::Zero
+    $item.GetDisplayName(0x80058000, [ref]$ptr)   # SIGDN_FILESYSPATH
+    $result = [Runtime.InteropServices.Marshal]::PtrToStringAuto($ptr)
+    [Runtime.InteropServices.Marshal]::FreeCoTaskMem($ptr)
+  }
+} catch {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $f = New-Object System.Windows.Forms.FolderBrowserDialog
+    $f.Description = 'Select your project folder for Rex'
+    $top = New-Object System.Windows.Forms.Form; $top.TopMost = $true
+    if ($f.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { $result = $f.SelectedPath }
+  } catch { $result = '' }
+}
+[Console]::Out.Write($result)
+'''
+
+
 @router.post("/pick")
 async def pick_folder() -> dict:
     """Open a native OS folder-picker dialog and return the selected path.
 
     The backend runs on the user's own machine, so we can pop a real folder
     chooser — far more reliable than asking them to type an absolute path
-    (browsers can't expose it). Windows uses the .NET FolderBrowserDialog.
+    (browsers can't expose it). Uses the modern Windows picker, falling back to
+    the classic dialog if needed.
     """
     if sys.platform != "win32":
         return {"ok": False, "error": "Folder picker is only wired for Windows right now."}
 
-    ps_script = (
-        "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
-        "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-        "$f.Description = 'Select your project folder for Rex'; "
-        "$f.ShowNewFolderButton = $true; "
-        "$top = New-Object System.Windows.Forms.Form; $top.TopMost = $true; "
-        "if ($f.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) "
-        "{ [Console]::Out.Write($f.SelectedPath) }"
-    )
+    import base64
+    encoded = base64.b64encode(_PICK_PS.encode("utf-16-le")).decode("ascii")
     try:
         proc = await asyncio.create_subprocess_exec(
-            "powershell", "-NoProfile", "-STA", "-Command", ps_script,
+            "powershell", "-NoProfile", "-STA", "-EncodedCommand", encoded,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=180)

@@ -17,6 +17,46 @@ import structlog
 logger = structlog.get_logger()
 
 
+def humanize_command(command: str) -> str:
+    """Plain-English description of what a shell command is DOING, for narration.
+
+    The Code tab still shows the exact command; this is what Rex SAYS out loud, so
+    he sounds like a teammate ("Installing the packages it needs") instead of
+    reading "pip install -r requirements.txt".
+    """
+    c = (command or "").strip().lower()
+    pairs = [
+        (("pip install", "pip3 install", "poetry add", "poetry install", "npm install", "npm i ", "yarn add", "yarn install", "pnpm install", "pip install -r"),
+         "Installing the packages it needs."),
+        (("python -m venv", "virtualenv", "py -m venv", "conda create"),
+         "Setting up a fresh environment for the project."),
+        (("pytest", "python -m pytest", "npm test", "npm run test", "jest", "vitest", "go test", "cargo test", "unittest"),
+         "Running the tests to make sure it works."),
+        (("uvicorn", "flask run", "npm run dev", "npm start", "yarn dev", "next dev", "manage.py runserver", "rails server"),
+         "Starting up the app."),
+        (("rm ", "rm -rf", "rmdir", "del ", "remove-item", "unlink"),
+         "Cleaning up some old files."),
+        (("mkdir", "new-item", "md "),
+         "Creating the project folders."),
+        (("git commit",), "Saving the changes."),
+        (("git push",), "Pushing the code up."),
+        (("git add", "git stage"), "Staging the changes."),
+        (("git clone",), "Grabbing the code."),
+        (("git init",), "Starting version control."),
+        (("git pull", "git fetch"), "Pulling the latest code."),
+        (("npm run build", "yarn build", "next build", "tsc", "webpack", "vite build", "make"),
+         "Building the project."),
+        (("python ", "python3 ", "py ", "node ", "ts-node", "bun "),
+         "Running the app."),
+        (("curl", "wget", "http"), "Checking it responds."),
+        (("ls", "dir", "tree", "cat", "type ", "find ", "grep"), "Taking a look at the files."),
+    ]
+    for needles, phrase in pairs:
+        if any(n in c for n in needles):
+            return phrase
+    return "Running a quick command to set things up."
+
+
 async def _terminate_tree(process: asyncio.subprocess.Process) -> None:
     """Kill a process AND its children, then reap it without hanging.
 

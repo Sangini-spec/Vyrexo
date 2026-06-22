@@ -289,8 +289,9 @@ class BaseAgent(ABC):
         elif tool_name == "delete_file" and path:
             line = f"Removing {path}."
         elif tool_name == "run_command" and command:
-            short = command if len(command) <= 50 else command[:50].rsplit(" ", 1)[0] + "..."
-            line = f"Running: {short}"
+            # Say what the command MEANS in plain language, not the raw command.
+            from vyrexo.agents.tools.terminal import humanize_command
+            line = humanize_command(command)
         elif tool_name == "git_add":
             line = "Staging changes."
         elif tool_name == "git_commit" and message:
