@@ -34,7 +34,7 @@ from vyrexo.agents.registry import AgentRegistry
 from vyrexo.config import get_settings
 from vyrexo.context.engine import ContextEngine
 from vyrexo.conversation.manager import ConversationManager
-from vyrexo.conversation.memory.in_memory import InMemoryStore
+from vyrexo.conversation.memory.persistent import PersistentMemoryStore
 from vyrexo.events.bus import Event, EventBus
 from vyrexo.modes.implementations import (
     DebugMode,
@@ -44,7 +44,8 @@ from vyrexo.modes.implementations import (
     WhiteboardMode,
 )
 from vyrexo.modes.machine import InteractionStateMachine, ModeState
-from vyrexo.storage.database import close_database, init_database
+from vyrexo.storage.database import close_database, get_db_session, init_database
+from vyrexo.storage.repositories.sessions import SessionRepository
 from vyrexo.voice.middleware.base import VoiceContext
 from vyrexo.voice.pipeline import VoicePipeline
 from vyrexo.voice.stt.base import TranscriptionResult
@@ -154,8 +155,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     }
     mode_machine = InteractionStateMachine(event_bus=event_bus, modes=modes)
 
-    # Initialize conversation manager (ties everything together)
-    memory_store = InMemoryStore()
+    # Initialize conversation manager (ties everything together).
+    # DB-backed memory so a session's conversation survives restarts and is
+    # restored when the session is re-opened (falls back to in-memory if the DB
+    # is down).
+    memory_store = PersistentMemoryStore()
     conversation_manager = ConversationManager(
         event_bus=event_bus,
         orchestrator=orchestrator,
@@ -504,6 +508,14 @@ async def _handle_project_set(event: Event) -> None:
     already_loaded = _session_projects.get(session_id) == resolved
     _session_projects[session_id] = resolved
     logger.info("project_set", session_id=session_id, path=resolved)
+
+    # Record/refresh the session row so its conversation history (FK) persists
+    # and the connected project is remembered. Best-effort — never block connect.
+    try:
+        async with get_db_session() as db:
+            await SessionRepository(db).ensure(session_id, resolved, p.name)
+    except Exception as e:
+        logger.warning("session_row_ensure_failed", session_id=session_id, error=str(e)[:120])
 
     # Greet like a person walking in — warm, in Rex's voice — instead of leading
     # with a dry "indexing your codebase". New/empty folder → ask what to build;

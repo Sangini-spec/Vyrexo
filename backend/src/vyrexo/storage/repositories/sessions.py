@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -25,6 +26,29 @@ class SessionRepository:
         )
         self._db.add(session)
         await self._db.flush()
+        return session
+
+    async def ensure(
+        self, session_id: str, project_path: str = "", project_name: str = ""
+    ) -> Session:
+        """Get the session by its (frontend-supplied) id, creating the row if it
+        doesn't exist yet. Used so conversation turns always have a parent row
+        for the FK, and to record/refresh the connected project on connect."""
+        session = await self.get(session_id)
+        if session is None:
+            session = Session(
+                id=session_id,
+                project_path=project_path,
+                project_name=project_name or (os.path.basename(project_path.rstrip("/\\")) if project_path else ""),
+                status="active",
+                mode="normal",
+            )
+            self._db.add(session)
+            await self._db.flush()
+        elif project_path and session.project_path != project_path:
+            session.project_path = project_path
+            session.project_name = project_name or os.path.basename(project_path.rstrip("/\\"))
+            session.updated_at = datetime.now(timezone.utc)
         return session
 
     async def get(self, session_id: str) -> Session | None:

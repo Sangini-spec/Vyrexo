@@ -611,6 +611,9 @@ export default function App() {
   }, [orbState, muteAudio, sendMessage, forceActivate]);
 
   // ── Session management ──────────────────────────────────────
+  // Tracks the most recently opened session so a slow history fetch from an
+  // earlier click can't populate the chat of the session we're now on.
+  const historyReqRef = useRef<string>("");
   const handleSessionClick = useCallback(
     (id: string) => {
       if (activeSession) disconnect();
@@ -620,6 +623,20 @@ export default function App() {
       setChatLog([]);
       setCodeEvents([]);
       setTranscript("");
+      // Restore this session's saved conversation so its context carries over
+      // (like re-opening a chat in ChatGPT/Claude). Best-effort.
+      historyReqRef.current = id;
+      fetch(`/api/sessions/${encodeURIComponent(id)}/history`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (historyReqRef.current !== id) return; // user switched again
+          if (d?.ok && Array.isArray(d.turns) && d.turns.length) {
+            setChatLog(
+              d.turns.map((t: { role: string; content: string }) => ({ role: t.role, text: t.content }))
+            );
+          }
+        })
+        .catch(() => {});
     },
     [activeSession, disconnect]
   );
