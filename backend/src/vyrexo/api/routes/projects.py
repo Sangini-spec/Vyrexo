@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 import structlog
 from fastapi import APIRouter
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 logger = structlog.get_logger()
@@ -231,3 +235,61 @@ async def read_project_file(path: str, file: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
     return {"ok": True, "path": file, "content": content}
+
+
+@router.get("/download")
+async def download_project(path: str):
+    """Stream the connected project folder as a .zip (like Replit's download).
+
+    Skips vendor/build dirs (``_TREE_SKIP``, incl. ``.git``) but keeps everything
+    else (e.g. ``.github``). Built off the event loop so a big project doesn't
+    freeze the server, into a temp file that's deleted once the response is sent.
+    """
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        return JSONResponse({"ok": False, "error": "That folder doesn't exist."}, status_code=400)
+    root = root.resolve()
+
+    _MAX_ZIP_BYTES = 1_000_000_000  # 1 GB safety cap on total uncompressed size
+
+    def _build_zip() -> tuple[str, int]:
+        fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="vyrexo_")
+        os.close(fd)
+        count = 0
+        total = 0
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for dirpath, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in _TREE_SKIP]
+                for name in files:
+                    fp = Path(dirpath) / name
+                    try:
+                        if fp.is_symlink() or not fp.is_file():
+                            continue
+                        total += fp.stat().st_size
+                        if total > _MAX_ZIP_BYTES:
+                            raise ValueError("This project is too large to download as a zip (over 1 GB).")
+                        # Nest everything under the folder name so it unzips into a folder.
+                        arc = Path(root.name) / fp.relative_to(root)
+                        zf.write(fp, arcname=str(arc))
+                        count += 1
+                    except ValueError:
+                        raise
+                    except OSError:
+                        continue  # skip unreadable/locked files
+        return tmp_path, count
+
+    try:
+        tmp_path, count = await asyncio.to_thread(_build_zip)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=413)
+    except Exception as e:
+        logger.exception("project_zip_failed", path=str(root))
+        return JSONResponse({"ok": False, "error": f"Could not create the zip: {str(e)[:120]}"}, status_code=500)
+
+    logger.info("project_zipped", path=str(root), files=count)
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"{root.name}.zip",
+        background=BackgroundTask(lambda: os.remove(tmp_path) if os.path.exists(tmp_path) else None),
+    )

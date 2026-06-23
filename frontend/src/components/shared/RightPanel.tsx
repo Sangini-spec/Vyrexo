@@ -429,6 +429,15 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
               ))}
             </div>
           )}
+          {connected && (
+            <a
+              href={`/api/projects/download?path=${encodeURIComponent(projectPath)}`}
+              title="Download project as ZIP"
+              className="w-[22px] h-[22px] rounded-[5px] border border-[var(--border2)] bg-[var(--surface)] text-[var(--icon)] flex items-center justify-center flex-shrink-0 hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </a>
+          )}
         </div>
         <div className="flex-1 overflow-auto">
           {openDiff && diffView ? (
