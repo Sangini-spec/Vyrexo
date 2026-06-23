@@ -144,6 +144,16 @@ class SessionWebSocketHandler:
                 session_id=self._session_id,
             ))
 
+        elif msg.type == ClientMessageType.VOICE_HUSH:
+            # "Stop talking, but keep working." Sent the instant the user speaks
+            # over Rex — silences his speech at the source (drains queued lines +
+            # kills in-flight synthesis) WITHOUT pausing a running build.
+            await self._event_bus.publish(Event(
+                type="speech.hush.requested",
+                payload=msg.payload,
+                session_id=self._session_id,
+            ))
+
         elif msg.type == ClientMessageType.MODE_SWITCH:
             await self._event_bus.publish(Event(
                 type="mode.switch.requested",

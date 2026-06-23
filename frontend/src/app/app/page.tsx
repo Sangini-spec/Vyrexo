@@ -516,12 +516,19 @@ export default function App() {
       // and it immediately stops to listen.
       if (!isFinal) {
         if (rexTalking && raw.length >= 2) {
-          muteAudio(); // pause current audio + discard any in-flight chunks
+          muteAudio(); // pause local audio + discard any in-flight chunks
           if (isStop) {
             // "stop" also halts the running work right away.
             sendMessage({ type: "execution.interrupt", payload: {} });
             setOrbState("idle");
             setNarration("Stopped. What would you like instead?");
+          } else {
+            // ANY other speech: muting the local player isn't enough — the
+            // backend keeps streaming the rest of the line, so it'd just resume.
+            // Tell the server to shut Rex up AT THE SOURCE (kill synthesis +
+            // drain queued speech). We DON'T halt the build; only the talking.
+            sendMessage({ type: "voice.hush", payload: {} });
+            setOrbState("listening");
           }
         }
         return; // wait for the final transcript to act on the actual message
@@ -539,11 +546,15 @@ export default function App() {
         return;
       }
 
-      // Otherwise it's conversation (incl. answering small-talk). Silence Rex's
-      // current line so we don't talk over each other, then allow his reply to
-      // play. We DON'T interrupt the build — the fast chat brain replies while
-      // any running task keeps going.
-      muteAudio();
+      // Otherwise it's conversation (incl. answering small-talk). If Rex was
+      // mid-sentence, silence him at the SOURCE first (covers the case where no
+      // interim barge-in fired) so he can't talk over the reply, then allow the
+      // reply to play. We DON'T interrupt the build — the fast chat brain
+      // replies while any running task keeps going.
+      if (rexTalking) {
+        muteAudio();
+        sendMessage({ type: "voice.hush", payload: {} });
+      }
       unmuteAudio(); // new turn → allow Rex's reply to play
       setPendingProposal(null);
       setChatLog((prev) => [...prev, { role: "user", text: raw }]);

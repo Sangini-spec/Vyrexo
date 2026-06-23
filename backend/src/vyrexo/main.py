@@ -162,6 +162,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Wire up event handlers
     event_bus.subscribe("conversation.turn.started", _handle_conversation_turn)
     event_bus.subscribe("execution.interrupt.requested", _handle_interrupt)
+    event_bus.subscribe("speech.hush.requested", _handle_hush)
     # Speak narrations and turn responses through Edge-TTS
     event_bus.subscribe("agent.narration", _handle_narration)
     event_bus.subscribe("conversation.turn.completed", _handle_turn_completed)
@@ -253,6 +254,23 @@ async def _handle_interrupt(event: Event) -> None:
         payload={"message": "Interrupted. What would you like instead?"},
         session_id=session_id,
     ))
+
+
+async def _handle_hush(event: Event) -> None:
+    """Stop Rex TALKING immediately, but keep any running work going.
+
+    Fired the moment the user speaks over Rex (barge-in). Unlike a full
+    interrupt this does NOT pause the orchestrator — it only silences speech:
+    kills the in-flight Edge-TTS synthesis, drains the queued lines, and
+    suppresses further speech until the next user turn re-enables it
+    (``_handle_conversation_turn`` clears the suppression). That lets the user
+    cut Rex off mid-sentence while a build keeps running in the background.
+    """
+    session_id = event.session_id or ""
+    _suppressed_sessions.add(session_id)
+    if voice_pipeline is not None:
+        await voice_pipeline.interrupt()  # kill current synthesis (resets itself next call)
+    _drain_tts_queue(session_id)
 
 
 def _voice_config_for(session_id: str) -> VoiceConfig:

@@ -22,6 +22,7 @@ class ClientMessageType(str, Enum):
     VOICE_CONFIG = "voice.config"
     TEXT_INPUT = "text.input"
     EXECUTION_INTERRUPT = "execution.interrupt"
+    VOICE_HUSH = "voice.hush"
     MODE_SWITCH = "mode.switch"
     PROJECT_SET = "project.set"
     SESSION_HEARTBEAT = "session.heartbeat"
