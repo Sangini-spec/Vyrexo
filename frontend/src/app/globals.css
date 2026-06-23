@@ -111,6 +111,14 @@ input:-webkit-autofill:focus {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
+/* Gentle drift for the auth page's flowing line art */
+@keyframes vyrexo-drift {
+  0%, 100% { transform: translateY(0) translateX(0); }
+  50% { transform: translateY(-14px) translateX(8px); }
+}
+.auth-lines { animation: vyrexo-drift 16s ease-in-out infinite; will-change: transform; }
+@media (prefers-reduced-motion: reduce) { .auth-lines { animation: none; } }
+
 /* Markdown rendering for Rex's responses (Chat tab) */
 .md-content { color: var(--text3); font-size: 12px; line-height: 1.65; }
 .md-content > :first-child { margin-top: 0; }
