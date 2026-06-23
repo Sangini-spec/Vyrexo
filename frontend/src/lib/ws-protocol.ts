@@ -8,6 +8,7 @@ export type ClientMessageType =
   | "voice.config"
   | "text.input"
   | "execution.interrupt"
+  | "voice.hush"
   | "mode.switch"
   | "project.set"
   | "session.heartbeat";

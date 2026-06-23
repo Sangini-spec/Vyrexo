@@ -34,6 +34,14 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
   // Track when we forwarded an interim transcript that already contained the wake word
   // so we don't re-activate on every interim refinement.
   const activatedThisUtteranceRef = useRef<boolean>(false);
+  // Activity heartbeat. Web Speech silently wedges over long sessions (tab blur,
+  // network blips, internal Chrome timeouts) and sometimes never fires onend —
+  // so the onend watchdog has nothing to react to and the mic just dies. We
+  // stamp the last sign of life; a periodic heartbeat force-rebuilds recognition
+  // if it's been quiet too long. restartRef lets onend (built inside
+  // buildRecognition) trigger a restart without a hook dependency cycle.
+  const lastActivityRef = useRef<number>(0);
+  const restartRef = useRef<(fresh?: boolean) => void>(() => {});
 
   // Keep ref in sync with state for use in callbacks
   useEffect(() => {
@@ -62,7 +70,12 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
     recognition.lang = "en-US";
     recognition.maxAlternatives = 1;
 
+    recognition.onstart = () => { lastActivityRef.current = Date.now(); };
+    recognition.onaudiostart = () => { lastActivityRef.current = Date.now(); };
+    recognition.onspeechstart = () => { lastActivityRef.current = Date.now(); };
+
     recognition.onresult = (event: any) => {
+      lastActivityRef.current = Date.now();
       let finalText = "";
       let interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -152,23 +165,69 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
       // Web Speech stops automatically after silence, and we want continuous mode.
       if (modeRef.current !== "idle") {
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = setTimeout(() => {
-          const r = recognitionRef.current;
-          if (!r || modeRef.current === "idle") return;
-          try {
-            r.start();
-          } catch (e: any) {
-            // "already started" can happen on Chrome — just ignore
-            if (!String(e?.message || e).toLowerCase().includes("already started")) {
-              console.debug("[voice] restart error:", e);
-            }
-          }
-        }, 250);
+        restartTimerRef.current = setTimeout(() => restartRef.current(false), 250);
       }
     };
 
     return recognition;
   }, [onTranscript, onActivated, onDeactivated]);
+
+  // Robustly (re)start recognition. Rebuilds a FRESH instance when asked, or
+  // when a plain start() fails — reusing a wedged instance is exactly how the
+  // mic silently dies mid-session.
+  const startRecognition = useCallback((fresh = false) => {
+    if (modeRef.current === "idle") return;
+    if (fresh || !recognitionRef.current) {
+      const old = recognitionRef.current;
+      if (old) {
+        try { old.onend = null; (old.abort || old.stop)?.call(old); } catch {}
+      }
+      recognitionRef.current = buildRecognition();
+    }
+    const r = recognitionRef.current;
+    if (!r) return;
+    try {
+      r.start();
+      lastActivityRef.current = Date.now();
+    } catch (e: any) {
+      if (String(e?.message || e).toLowerCase().includes("already started")) return;
+      // Instance is wedged — throw it away, build a fresh one, try once more.
+      try {
+        recognitionRef.current = buildRecognition();
+        recognitionRef.current?.start();
+        lastActivityRef.current = Date.now();
+      } catch {}
+    }
+  }, [buildRecognition]);
+
+  // Keep restartRef pointed at the latest startRecognition (used by onend).
+  useEffect(() => {
+    restartRef.current = startRecognition;
+  }, [startRecognition]);
+
+  // Heartbeat + refocus recovery: force a fresh rebuild if recognition has gone
+  // quiet for too long while we should be listening (the silent-wedge case where
+  // Chrome stops delivering results AND never fires onend), and whenever the tab
+  // regains focus (Chrome often suspends recognition in background tabs).
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (modeRef.current === "idle") return;
+      if (Date.now() - (lastActivityRef.current || 0) > 12000) {
+        lastActivityRef.current = Date.now(); // avoid rebuild storms
+        restartRef.current(true);
+      }
+    }, 6000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && modeRef.current !== "idle") {
+        restartRef.current(false);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
 
   const startListening = useCallback(async () => {
     if (recognitionRef.current && modeRef.current !== "idle") {
@@ -188,19 +247,11 @@ export function useVoice({ onTranscript, onActivated, onDeactivated }: UseVoiceO
       return;
     }
 
-    const recognition = buildRecognition();
-    if (!recognition) return;
-
-    recognitionRef.current = recognition;
     setMode("waiting_for_wake");
     modeRef.current = "waiting_for_wake";
-
-    try {
-      recognition.start();
-    } catch (e) {
-      console.debug("[voice] initial start error:", e);
-    }
-  }, [buildRecognition]);
+    lastActivityRef.current = Date.now();
+    startRecognition(true);
+  }, [startRecognition]);
 
   const stopListening = useCallback(() => {
     modeRef.current = "idle";

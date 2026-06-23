@@ -44,9 +44,18 @@ function dayGroup(ts: number): string {
 }
 
 // A spoken barge-in that means "stop now" (hard interrupt), vs just talking over Rex.
-const STOP_WORDS = ["stop", "stop it", "wait", "cancel", "hold on", "nevermind", "never mind", "pause", "quiet", "shut up", "be quiet", "enough"];
+// Single stop words count as a hard stop when they appear ANYWHERE in a short
+// utterance — so "stop", "rex stop", "rex can you stop", "ok stop please" all
+// halt Rex, not just phrases that literally start with "stop".
+const STOP_SINGLE = ["stop", "wait", "cancel", "pause", "quiet", "enough", "shush", "hush", "silence"];
+const STOP_PHRASES = ["stop it", "hold on", "shut up", "be quiet", "never mind", "nevermind", "knock it off", "that's enough", "thats enough", "stop talking", "stop listening"];
 function isStopPhrase(lower: string): boolean {
-  return STOP_WORDS.some((w) => lower === w || lower.startsWith(w + " "));
+  const words = lower.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return false;
+  // A short command (≤ 6 words) containing a stop word as a whole word.
+  if (words.length <= 6 && words.some((w) => STOP_SINGLE.includes(w))) return true;
+  // Multi-word stop phrases appearing anywhere.
+  return STOP_PHRASES.some((p) => lower.includes(p));
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -338,9 +347,13 @@ export default function App() {
 
       case "voice.output.start":
       case "voice.output.started":
-        // NOTE: do NOT unmute here. After an interrupt the backend may still
-        // emit utterances; unmuting on them would let audio sneak back. Audio
-        // is only re-enabled when the user sends a new turn.
+        // Rex is starting a NEW utterance — make sure the player is live so his
+        // voice can never get permanently stuck muted (the "responds in text but
+        // not by voice" bug). This is safe because interrupt/hush now DRAIN and
+        // SUPPRESS speech at the backend: after a stop, no voice.output.started
+        // fires until the user's next turn clears suppression, so there's no
+        // stale audio to sneak back in.
+        unmuteAudio();
         beginUtterance();
         flushPendingRex(); // reveal Rex's text exactly as his voice begins
         setOrbState("speaking");
