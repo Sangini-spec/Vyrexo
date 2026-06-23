@@ -268,6 +268,50 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
   const [loading, setLoading] = useState(false);
   const connected = projectPath !== "";
 
+  // ── Push-to-GitHub dialog ──
+  const [ghOpen, setGhOpen] = useState(false);
+  const [ghRepo, setGhRepo] = useState("");
+  const [ghToken, setGhToken] = useState("");
+  const [ghPrivate, setGhPrivate] = useState(true);
+  const [ghGenCI, setGhGenCI] = useState(true);
+  const [ghStatus, setGhStatus] = useState<{ configured: boolean; login?: string } | null>(null);
+  const [ghBusy, setGhBusy] = useState(false);
+  const [ghResult, setGhResult] = useState<{ ok: boolean; message?: string; error?: string; repo_url?: string } | null>(null);
+
+  const openGitHub = () => {
+    setGhResult(null);
+    setGhStatus(null);
+    setGhOpen(true);
+    fetch("/api/github/status")
+      .then((r) => r.json())
+      .then((d) => setGhStatus({ configured: !!d.configured, login: d.login }))
+      .catch(() => setGhStatus({ configured: false }));
+  };
+
+  const doPush = async () => {
+    if (!ghRepo.trim() || ghBusy) return;
+    setGhBusy(true);
+    setGhResult(null);
+    try {
+      const r = await fetch("/api/github/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: projectPath,
+          repo: ghRepo.trim(),
+          token: ghToken.trim() || undefined,
+          private: ghPrivate,
+          generate_ci: ghGenCI,
+        }),
+      });
+      setGhResult(await r.json());
+    } catch {
+      setGhResult({ ok: false, error: "Couldn't reach the server." });
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
   // The file tree is a panel-within-a-panel — collapsible + resizable like the
   // main sidebars, so the code viewer can take the full width when you want it.
   const [treeCollapsed, setTreeCollapsed] = useState(false);
@@ -438,6 +482,15 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             </a>
           )}
+          {connected && (
+            <button
+              onClick={openGitHub}
+              title="Push to GitHub"
+              className="w-[22px] h-[22px] rounded-[5px] border border-[var(--border2)] bg-[var(--surface)] text-[var(--icon)] flex items-center justify-center flex-shrink-0 hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+            </button>
+          )}
         </div>
         <div className="flex-1 overflow-auto">
           {openDiff && diffView ? (
@@ -478,6 +531,71 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
           )}
         </div>
       </div>
+
+      {ghOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+          onClick={() => !ghBusy && setGhOpen(false)}
+        >
+          <div
+            className="w-[420px] max-w-[90vw] rounded-xl border border-[var(--border2)] bg-[var(--surface)] p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--icon)"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+              <h3 className="text-sm font-semibold text-[var(--text)]">Push to GitHub</h3>
+            </div>
+
+            {ghResult?.ok ? (
+              <div className="text-xs text-[var(--text3)] space-y-3">
+                <p className="text-[#4ade80]">{ghResult.message || "Pushed."}</p>
+                {ghResult.repo_url && (
+                  <a href={ghResult.repo_url} target="_blank" rel="noopener noreferrer" className="text-[var(--steel)] underline break-all">{ghResult.repo_url}</a>
+                )}
+                <button onClick={() => setGhOpen(false)} className="block w-full mt-2 py-2 rounded-lg bg-[var(--midnight)] text-white text-xs font-medium hover:bg-[var(--steel)]">Done</button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[11px] text-[var(--muted2)]">Repository</label>
+                  <input
+                    value={ghRepo}
+                    onChange={(e) => setGhRepo(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && doPush()}
+                    placeholder="my-repo, owner/name, or a full URL"
+                    className="w-full mt-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--steel)]"
+                  />
+                </div>
+                {ghStatus && !ghStatus.configured && (
+                  <div>
+                    <label className="text-[11px] text-[var(--muted2)]">GitHub token</label>
+                    <input
+                      value={ghToken}
+                      onChange={(e) => setGhToken(e.target.value)}
+                      type="password"
+                      placeholder="ghp_…  (Personal Access Token)"
+                      className="w-full mt-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[var(--steel)]"
+                    />
+                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-[10px] text-[var(--steel)] underline">Create a token (needs the &ldquo;repo&rdquo; scope)</a>
+                  </div>
+                )}
+                {ghStatus?.configured && ghStatus.login && (
+                  <p className="text-[10px] text-[var(--muted2)]">Signed in as {ghStatus.login}.</p>
+                )}
+                <div className="flex items-center gap-4 text-[11px] text-[var(--text3)]">
+                  <label className="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={ghPrivate} onChange={(e) => setGhPrivate(e.target.checked)} /> Private repo</label>
+                  <label className="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={ghGenCI} onChange={(e) => setGhGenCI(e.target.checked)} /> Add CI/CD</label>
+                </div>
+                {ghResult?.error && <p className="text-[11px] text-[#f87171]">{ghResult.error}</p>}
+                <div className="flex gap-2 pt-1">
+                  <button onClick={() => setGhOpen(false)} disabled={ghBusy} className="flex-1 py-2 rounded-lg border border-[var(--border2)] text-xs text-[var(--text3)] hover:text-[var(--text)] disabled:opacity-50">Cancel</button>
+                  <button onClick={doPush} disabled={ghBusy || !ghRepo.trim()} className="flex-1 py-2 rounded-lg bg-[var(--midnight)] text-white text-xs font-medium hover:bg-[var(--steel)] disabled:opacity-50">{ghBusy ? "Pushing…" : "Push"}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

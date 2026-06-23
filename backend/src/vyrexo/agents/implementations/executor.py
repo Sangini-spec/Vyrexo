@@ -20,6 +20,7 @@ from vyrexo.agents.registry import AgentRegistry
 from vyrexo.agents.tools.terminal import TERMINAL_TOOL_MAP, TERMINAL_TOOLS
 from vyrexo.agents.tools.file_ops import FILE_TOOL_MAP, FILE_TOOLS
 from vyrexo.agents.tools.git_ops import GIT_TOOL_MAP, GIT_TOOLS
+from vyrexo.agents.tools.github_ops import GITHUB_TOOL_MAP, GITHUB_TOOLS
 from vyrexo.config import get_settings
 
 logger = structlog.get_logger()
@@ -70,8 +71,8 @@ class ExecutionAgent(BaseAgent):
         logger.info("executor_executing", task=task_desc[:80])
         # Step intro already spoken by orchestrator.
 
-        all_tools = TERMINAL_TOOLS + FILE_TOOLS + GIT_TOOLS
-        all_tool_map = {**TERMINAL_TOOL_MAP, **FILE_TOOL_MAP, **GIT_TOOL_MAP}
+        all_tools = TERMINAL_TOOLS + FILE_TOOLS + GIT_TOOLS + GITHUB_TOOLS
+        all_tool_map = {**TERMINAL_TOOL_MAP, **FILE_TOOL_MAP, **GIT_TOOL_MAP, **GITHUB_TOOL_MAP}
 
         messages = [
             SystemMessage(content=EXECUTOR_SYSTEM_PROMPT),
@@ -104,6 +105,8 @@ class ExecutionAgent(BaseAgent):
                 elif tool_name == "run_command":
                     tool_args["working_dir"] = project_path
                 elif tool_name in GIT_TOOL_MAP:
+                    tool_args["working_dir"] = project_path
+                elif tool_name in GITHUB_TOOL_MAP:
                     tool_args["working_dir"] = project_path
 
                 fn = all_tool_map.get(tool_name)

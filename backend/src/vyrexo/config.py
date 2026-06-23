@@ -63,6 +63,18 @@ class ServerSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
 
+class GitHubSettings(BaseSettings):
+    # Personal Access Token used to create repos + push. Classic: "repo" scope.
+    # Fine-grained: Contents RW + Administration RW (to create repos). Keep secret.
+    token: str = ""
+    default_private: bool = True
+    # Optional commit identity override (else uses the token's GitHub login).
+    commit_name: str = ""
+    commit_email: str = ""
+
+    model_config = SettingsConfigDict(env_prefix="GITHUB_", extra="ignore")
+
+
 class Settings(BaseSettings):
     """Root settings — loads from .env file at project root."""
 
@@ -72,6 +84,7 @@ class Settings(BaseSettings):
     tts: TTSSettings = Field(default_factory=TTSSettings)
     chroma: ChromaSettings = Field(default_factory=ChromaSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    github: GitHubSettings = Field(default_factory=GitHubSettings)
 
     # Provider keys at top level for convenience (no LLM_ prefix needed in .env)
     gemini_api_key: str = ""

@@ -323,6 +323,10 @@ class BaseAgent(ABC):
             line = "Committing."
         elif tool_name == "git_push":
             line = "Pushing to remote."
+        elif tool_name == "github_push":
+            line = "Pushing your project up to GitHub."
+        elif tool_name == "github_generate_ci":
+            line = "Setting up a CI pipeline."
         elif tool_name == "git_branch":
             name = args.get("name") or ""
             line = f"Creating branch {name}." if name else "Branching."
