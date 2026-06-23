@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { AtSign, ArrowLeft } from "lucide-react";
+import { AtSign, ArrowLeft, Lock, User } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 
@@ -15,10 +15,13 @@ function friendlyAuthError(message: string): string {
     return "Your email isn't confirmed yet. Check your inbox (and spam) for the link.";
   }
   if (lower.includes("user already registered")) {
-    return "This email is already registered. Try logging in instead.";
+    return "This email is already registered. Try signing in instead.";
   }
   if (lower.includes("provider is not enabled")) {
     return "That sign-in option isn't enabled in this Supabase project yet. Turn it on under Authentication → Providers.";
+  }
+  if (lower.includes("password should be at least")) {
+    return "Password must be at least 6 characters.";
   }
   if (lower.includes("rate limit") || lower.includes("too many")) {
     return "Too many attempts in a short time. Give it a minute, then try again.";
@@ -26,8 +29,13 @@ function friendlyAuthError(message: string): string {
   return message;
 }
 
+type Mode = "signin" | "signup";
+
 export default function AuthPage() {
+  const [mode, setMode] = useState<Mode>("signin");
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [loading, setLoading] = useState<null | "email" | "google" | "github">(null);
@@ -41,21 +49,41 @@ export default function AuthPage() {
     return true;
   };
 
-  // Email magic link — one flow for both sign-in AND sign-up (Supabase creates
-  // the account if the email is new).
-  const handleEmail = async (e: React.FormEvent) => {
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setError("");
+    setInfo("");
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setInfo("");
-    if (!requireSupabase() || !email.trim()) return;
+    if (!requireSupabase()) return;
     setLoading("email");
     try {
-      const { error } = await supabase.auth.signInWithOtp({
-        email: email.trim(),
-        options: { emailRedirectTo: `${window.location.origin}/app`, shouldCreateUser: true },
-      });
-      if (error) throw error;
-      setInfo(`Check ${email} for a magic link — click it to sign in. It works whether or not you already have an account.`);
+      if (mode === "signin") {
+        const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (error) throw error;
+        if (data.session) {
+          router.push("/app");
+        } else {
+          setError("Login didn't return a session. If you just signed up, confirm your email first.");
+        }
+      } else {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { data: { full_name: username.trim() }, emailRedirectTo: `${window.location.origin}/app` },
+        });
+        if (error) throw error;
+        if (data.session) {
+          router.push("/app");
+        } else {
+          setInfo(`Account created. We sent a confirmation link to ${email} — click it, then come back and sign in.`);
+          setMode("signin");
+        }
+      }
     } catch (err: any) {
       setError(friendlyAuthError(err?.message || "Something went wrong"));
     } finally {
@@ -76,15 +104,16 @@ export default function AuthPage() {
       setError(friendlyAuthError(error.message));
       setLoading(null);
     }
-    // On success the browser redirects to the provider, so no further work here.
+    // On success the browser redirects to the provider, so nothing more here.
   };
+
+  const isSignup = mode === "signup";
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[var(--bg)] text-[var(--text)]">
       {/* ── Left: branding panel (rich, always-dark for a premium split look) ── */}
       <div className="relative hidden lg:flex w-1/2 flex-col justify-between overflow-hidden p-12 text-white"
         style={{ background: "linear-gradient(155deg, #0b1224 0%, #1b2c52 48%, #090d18 100%)" }}>
-        {/* Flowing line art */}
         <svg className="auth-lines pointer-events-none absolute inset-0 h-full w-full" preserveAspectRatio="none" viewBox="0 0 600 800" fill="none" aria-hidden>
           {Array.from({ length: 9 }).map((_, i) => (
             <path
@@ -97,7 +126,6 @@ export default function AuthPage() {
           ))}
         </svg>
 
-        {/* Logo */}
         <a href="/" className="relative z-10 flex items-center gap-2.5">
           <span className="flex h-9 w-9 items-center justify-center rounded-lg" style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg>
@@ -105,7 +133,6 @@ export default function AuthPage() {
           <span className="text-xl font-semibold tracking-tight">Vyrexo</span>
         </a>
 
-        {/* Testimonial */}
         <blockquote className="relative z-10 max-w-md">
           <p className="text-2xl font-light leading-snug text-white/90">
             &ldquo;It feels less like running tools and more like having a teammate who just gets it done — by voice, while I think out loud.&rdquo;
@@ -116,7 +143,6 @@ export default function AuthPage() {
 
       {/* ── Right: auth form (theme-aware) ── */}
       <div className="relative flex w-full flex-col lg:w-1/2">
-        {/* Top bar: back home + theme toggle */}
         <div className="flex items-center justify-between px-6 py-5 sm:px-10">
           <a href="/" className="flex items-center gap-1.5 text-sm text-[var(--muted2)] transition-colors hover:text-[var(--text)]">
             <ArrowLeft size={16} /> Home
@@ -126,7 +152,6 @@ export default function AuthPage() {
 
         <div className="flex flex-1 items-center justify-center px-6 pb-10 sm:px-10">
           <div className="w-full max-w-[400px]">
-            {/* Mobile logo (left panel is hidden on small screens) */}
             <a href="/" className="mb-8 flex items-center gap-2.5 lg:hidden">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg" style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg>
@@ -134,10 +159,12 @@ export default function AuthPage() {
               <span className="text-lg font-semibold tracking-tight">Vyrexo</span>
             </a>
 
-            <h1 className="text-3xl font-bold tracking-tight">Sign In or Join Now!</h1>
-            <p className="mt-2 text-sm text-[var(--muted2)]">Log in or create your Vyrexo account.</p>
+            <h1 className="text-3xl font-bold tracking-tight">{isSignup ? "Create your account" : "Sign In or Join Now!"}</h1>
+            <p className="mt-2 text-sm text-[var(--muted2)]">
+              {isSignup ? "Join Vyrexo — it only takes a few seconds." : "Log in or create your Vyrexo account."}
+            </p>
 
-            {/* Social */}
+            {/* Social — direct sign in / sign up */}
             <div className="mt-7 space-y-3">
               <button
                 onClick={() => oauth("google")}
@@ -157,16 +184,27 @@ export default function AuthPage() {
               </button>
             </div>
 
-            {/* Divider */}
             <div className="my-6 flex items-center gap-3">
               <div className="h-px flex-1 bg-[var(--border2)]" />
               <span className="text-xs font-medium text-[var(--muted)]">OR</span>
               <div className="h-px flex-1 bg-[var(--border2)]" />
             </div>
 
-            {/* Email */}
-            <form onSubmit={handleEmail}>
-              <p className="mb-2 text-sm text-[var(--muted2)]">Enter your email to sign in or create an account</p>
+            {/* Email + password (and username when signing up) */}
+            <form onSubmit={handleSubmit} className="space-y-3">
+              {isSignup && (
+                <div className="relative">
+                  <User size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Username"
+                    required
+                    className="w-full rounded-lg border border-[var(--border2)] bg-[var(--input)] py-3 pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-[var(--muted)] outline-none transition-colors focus:border-[var(--steel)]"
+                  />
+                </div>
+              )}
               <div className="relative">
                 <AtSign size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
                 <input
@@ -178,22 +216,45 @@ export default function AuthPage() {
                   className="w-full rounded-lg border border-[var(--border2)] bg-[var(--input)] py-3 pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-[var(--muted)] outline-none transition-colors focus:border-[var(--steel)]"
                 />
               </div>
+              <div className="relative">
+                <Lock size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={isSignup ? "Create a password (min 6 characters)" : "Password"}
+                  required
+                  minLength={6}
+                  className="w-full rounded-lg border border-[var(--border2)] bg-[var(--input)] py-3 pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-[var(--muted)] outline-none transition-colors focus:border-[var(--steel)]"
+                />
+              </div>
 
               {error && (
-                <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-400">{error}</div>
+                <div className="rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-400">{error}</div>
               )}
               {info && (
-                <div className="mt-3 rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300">{info}</div>
+                <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-300">{info}</div>
               )}
 
               <button
                 type="submit"
                 disabled={loading !== null}
-                className="mt-3 w-full rounded-lg bg-[var(--midnight)] py-3 text-sm font-semibold text-white transition-all hover:bg-[var(--steel)] disabled:opacity-50"
+                className="w-full rounded-lg bg-[var(--midnight)] py-3 text-sm font-semibold text-white transition-all hover:bg-[var(--steel)] disabled:opacity-50"
               >
-                {loading === "email" ? "Sending link…" : "Continue With Email"}
+                {loading === "email" ? (isSignup ? "Creating account…" : "Signing in…") : isSignup ? "Create Account" : "Continue With Email"}
               </button>
             </form>
+
+            {/* Toggle between sign in / sign up (a word, not a button) */}
+            <p className="mt-5 text-center text-sm text-[var(--muted2)]">
+              {isSignup ? "Already have an account? " : "Don't have an account? "}
+              <button
+                onClick={() => switchMode(isSignup ? "signin" : "signup")}
+                className="font-medium text-[var(--steel)] transition-colors hover:text-[var(--ice)] hover:underline"
+              >
+                {isSignup ? "Sign in" : "Sign up"}
+              </button>
+            </p>
 
             <p className="mt-6 text-xs leading-relaxed text-[var(--muted)]">
               By clicking continue, you agree to our{" "}
