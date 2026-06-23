@@ -68,10 +68,27 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 
 
 async def init_database() -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, and add any newly-introduced
+    columns to existing tables (create_all only creates missing tables, it never
+    alters existing ones — so we ADD COLUMN IF NOT EXISTS for evolving columns)."""
+    from sqlalchemy import text
+
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Idempotent column additions for the sessions table (DB-backed sidebar).
+    # Each runs in its OWN transaction so one failure can't abort the rest.
+    for ddl in (
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name VARCHAR(255) DEFAULT 'New Session'",
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS icon VARCHAR(40)",
+        "CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions (user_id)",
+    ):
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(ddl))
+        except Exception as e:  # non-fatal (column may already exist)
+            logger.warning("session_migration_skip", ddl=ddl[:45], error=str(e)[:80])
     logger.info("database_initialized")
 
 

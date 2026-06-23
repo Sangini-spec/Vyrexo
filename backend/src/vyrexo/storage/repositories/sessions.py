@@ -51,9 +51,53 @@ class SessionRepository:
             session.updated_at = datetime.now(timezone.utc)
         return session
 
+    async def create_full(
+        self, session_id: str, user_id: str, name: str = "New Session", icon: str | None = None
+    ) -> Session:
+        """Create a sidebar session row with the frontend-supplied id + owner."""
+        session = Session(
+            id=session_id,
+            user_id=user_id or None,
+            name=name or "New Session",
+            icon=icon,
+            project_path="",
+            status="active",
+            mode="normal",
+        )
+        self._db.add(session)
+        await self._db.flush()
+        return session
+
+    async def rename(self, session_id: str, name: str) -> None:
+        session = await self.get(session_id)
+        if session:
+            session.name = name
+            session.updated_at = datetime.now(timezone.utc)
+
+    async def set_icon(self, session_id: str, icon: str) -> None:
+        session = await self.get(session_id)
+        if session:
+            session.icon = icon
+            session.updated_at = datetime.now(timezone.utc)
+
+    async def delete(self, session_id: str) -> None:
+        session = await self.get(session_id)
+        if session:
+            await self._db.delete(session)  # cascades to turns + actions
+
     async def get(self, session_id: str) -> Session | None:
         result = await self._db.execute(select(Session).where(Session.id == session_id))
         return result.scalar_one_or_none()
+
+    async def list_for_user(self, user_id: str, limit: int = 100) -> list[Session]:
+        """Sessions owned by this user, most-recently-updated first."""
+        result = await self._db.execute(
+            select(Session)
+            .where(Session.user_id == user_id)
+            .order_by(Session.updated_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def list_all(self, limit: int = 50) -> list[Session]:
         result = await self._db.execute(

@@ -21,7 +21,12 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # Owner (Supabase auth user id) so the sidebar list is scoped per account.
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True, default=None)
+    # Sidebar display fields.
+    name: Mapped[str] = mapped_column(String(255), default="New Session")
+    icon: Mapped[str | None] = mapped_column(String(40), default=None)
+    project_path: Mapped[str] = mapped_column(Text, default="", nullable=True)
     project_name: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")  # active | paused | ended
     mode: Mapped[str] = mapped_column(String(30), default="normal")

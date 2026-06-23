@@ -215,18 +215,71 @@ export default function App() {
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
 
+  // Load the sidebar list from the DB (scoped to the logged-in user) so it
+  // survives restarts and follows the account across browsers. Any sessions that
+  // only exist in this browser's localStorage are migrated into the DB so they
+  // aren't lost. Falls back to localStorage if the DB/backend is unavailable.
   useEffect(() => {
-    let loaded: StoredSession[] | null = null;
-    try {
-      const raw = localStorage.getItem("vyrexo_sessions");
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length) loaded = parsed;
+    if (!user?.id || sessionsLoaded) return;
+    let cancelled = false;
+    const readLocal = (): StoredSession[] => {
+      try {
+        const raw = localStorage.getItem("vyrexo_sessions");
+        const p = raw ? JSON.parse(raw) : null;
+        return Array.isArray(p) ? p : [];
+      } catch { return []; }
+    };
+    (async () => {
+      const local = readLocal();
+      let dbList: StoredSession[] | null = null;
+      try {
+        const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(user.id)}`);
+        const d = await r.json();
+        if (d?.ok && Array.isArray(d.sessions)) {
+          dbList = d.sessions.map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => ({
+            id: s.id, name: s.name || "New Session", icon: s.icon || SESSION_ICONS[0], createdAt: s.createdAt || Date.now(),
+          }));
+        }
+      } catch { /* DB down — fall back below */ }
+      if (cancelled) return;
+
+      if (dbList === null) {
+        // No DB — keep working off localStorage (or a fresh session).
+        setSessions(local.length ? local : [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }]);
+        setSessionsLoaded(true);
+        return;
       }
-    } catch {}
-    setSessions(loaded ?? [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }]);
-    setSessionsLoaded(true);
-  }, []);
+
+      // Migrate any localStorage-only sessions into the DB.
+      const dbIds = new Set(dbList.map((s) => s.id));
+      const toMigrate = local.filter((s) => s?.id && !dbIds.has(s.id));
+      for (const s of toMigrate) {
+        try {
+          await fetch("/api/sessions", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon }),
+          });
+        } catch {}
+      }
+      let merged = [...toMigrate, ...dbList].sort((a, b) => b.createdAt - a.createdAt);
+      if (!merged.length) {
+        // Brand-new account: seed a first session.
+        const id = `session-${Date.now()}`;
+        const first = { id, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() };
+        try {
+          await fetch("/api/sessions", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id, user_id: user.id, name: first.name, icon: first.icon }),
+          });
+        } catch {}
+        merged = [first];
+      }
+      if (cancelled) return;
+      setSessions(merged);
+      setSessionsLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [user?.id, sessionsLoaded]);
 
   useEffect(() => {
     if (sessionsLoaded) {
@@ -641,29 +694,33 @@ export default function App() {
     [activeSession, disconnect]
   );
 
-  // Create a brand-new session: add it to the (persisted) list and make it active.
+  // Create a brand-new session: persist it to the DB, add to the list, activate.
   const createSession = useCallback(() => {
     const id = `session-${Date.now()}`;
-    setSessions((prev) => [
-      { id, name: "New Session", icon: SESSION_ICONS[prev.length % SESSION_ICONS.length], createdAt: Date.now() },
-      ...prev,
-    ]);
+    const icon = SESSION_ICONS[sessions.length % SESSION_ICONS.length];
+    setSessions((prev) => [{ id, name: "New Session", icon, createdAt: Date.now() }, ...prev]);
+    if (user?.id) {
+      fetch("/api/sessions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, user_id: user.id, name: "New Session", icon }),
+      }).catch(() => {});
+    }
     handleSessionClick(id);
     return id;
-  }, [handleSessionClick]);
+  }, [handleSessionClick, user?.id, sessions.length]);
 
   const handleRenameSession = useCallback((id: string, name: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+    fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).catch(() => {});
   }, []);
 
   const handleDeleteSession = useCallback(
     (id: string) => {
-      setSessions((prev) => {
-        const next = prev.filter((s) => s.id !== id);
-        return next.length
-          ? next
-          : [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }];
-      });
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
       if (id === activeSession) {
         disconnect();
         setActiveSession(null);
