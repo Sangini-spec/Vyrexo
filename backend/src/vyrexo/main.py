@@ -7,6 +7,7 @@ ConversationManager, AgentOrchestrator, Mode StateMachine.
 
 import asyncio
 import io
+import random
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -70,6 +71,10 @@ _session_voice_configs: dict[str, VoiceConfig] = {}
 # inside this path. Set via project.set client messages; defaults to "." (the
 # server's CWD) until a project is connected.
 _session_projects: dict[str, str] = {}
+
+# Sessions we've already greeted, so a mid-session WS reconnect (which re-sends
+# project.set) doesn't make Rex say hello again.
+_greeted_sessions: set[str] = set()
 
 # Sessions that were just interrupted. While a session is here, ALL TTS is
 # dropped — so Rex goes (and stays) silent immediately instead of finishing
@@ -385,11 +390,47 @@ async def _handle_narration(event: Event) -> None:
     await _speak(session_id, text)
 
 
+def _split_for_speech(text: str) -> list[str]:
+    """Split a reply so the FIRST spoken chunk is short.
+
+    Edge-TTS's time-to-first-audio grows with text length (≈0.7s for one short
+    sentence vs 3-5s for a full paragraph), and the frontend reveals Rex's text
+    exactly when his voice starts — so leading with a single short sentence gets
+    him talking (and the text showing) in ~1s instead of 4-7s. The remainder is
+    spoken as a follow-on utterance while the first is already playing.
+    """
+    import re
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) <= 60:
+        return [t]  # already short — don't fragment
+    # Lead with a SHORT chunk: the first sentence if it's short, otherwise a
+    # clause cut at a comma/word boundary around ~60 chars. ~60 chars synthesizes
+    # in ~2s (vs 4-5s for a paragraph) and still lands on a natural pause.
+    m = re.search(r"[.!?](\s|$)", t)
+    if m and m.end() <= 70:
+        cut = m.end()
+    else:
+        window = t[:65]
+        c = window.rfind(", ")
+        if c >= 25:
+            cut = c + 2
+        else:
+            sp = window.rfind(" ")
+            cut = (sp + 1) if sp >= 25 else 65
+    first = t[:cut].strip()
+    rest = t[cut:].strip()
+    return [first, rest] if rest else [first]
+
+
 async def _handle_turn_completed(event: Event) -> None:
-    """Speak the final response of a conversation turn."""
+    """Speak the final response of a conversation turn — first sentence first so
+    Rex starts talking fast, then the rest while that plays."""
     text = event.payload.get("text", "")
     session_id = event.session_id or ""
-    await _speak(session_id, text)
+    for chunk in _split_for_speech(text):
+        await _speak(session_id, chunk)
 
 
 async def _handle_voice_config(event: Event) -> None:
@@ -409,6 +450,30 @@ async def _handle_voice_config(event: Event) -> None:
 
     _session_voice_configs[session_id] = VoiceConfig(voice=edge_voice, rate=rate)
     logger.info("voice_config_updated", session_id=session_id, voice=edge_voice, rate=rate)
+
+
+def _project_has_work(path: str) -> bool:
+    """True if the folder already holds real code/content (vs an empty/new
+    folder). Decides the greeting: a clean slate → 'what shall we build', an
+    existing project → 'pick up where we left off'. Stops early once it's sure."""
+    import os
+    IGNORE = {".git", "node_modules", ".venv", "venv", "env", "__pycache__",
+              ".next", "dist", "build", ".idea", ".vscode", ".pytest_cache"}
+    CODE_EXT = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".rb",
+                ".php", ".c", ".cpp", ".h", ".cs", ".html", ".css", ".vue",
+                ".svelte", ".json", ".md", ".sql", ".sh", ".kt", ".swift"}
+    count = 0
+    try:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in IGNORE and not d.startswith(".")]
+            for f in files:
+                if os.path.splitext(f)[1].lower() in CODE_EXT:
+                    count += 1
+                    if count >= 3:
+                        return True
+    except Exception:
+        return False
+    return count >= 3
 
 
 async def _handle_project_set(event: Event) -> None:
@@ -436,35 +501,54 @@ async def _handle_project_set(event: Event) -> None:
         return
 
     resolved = str(p.resolve())
+    already_loaded = _session_projects.get(session_id) == resolved
     _session_projects[session_id] = resolved
     logger.info("project_set", session_id=session_id, path=resolved)
 
-    # Let the user know we're indexing (can take a moment on large projects)
-    await event_bus.publish(Event(
-        type="agent.narration",
-        payload={"text": f"Connecting to {p.name}. Indexing it now so I know your codebase.", "agent": "rex"},
-        session_id=session_id,
-    ))
+    # Greet like a person walking in — warm, in Rex's voice — instead of leading
+    # with a dry "indexing your codebase". New/empty folder → ask what to build;
+    # an existing project → offer to pick up where things left off. Only on the
+    # FIRST connect of a session (a reconnect shouldn't re-greet). The indexing
+    # still happens, just silently in the background.
+    if session_id not in _greeted_sessions:
+        _greeted_sessions.add(session_id)
+        if _project_has_work(resolved):
+            greeting = random.choice([
+                f"Hey, Rex here. I'm in {p.name} and I can see what you've got going. Want to pick up where we left off, or start something new?",
+                f"Welcome back. I'm set up in {p.name}. Should we carry on with what's here, or is there something else on your mind?",
+                f"Good to see you. I'm in {p.name} and I've got the lay of the land. What are we working on today?",
+            ])
+        else:
+            greeting = random.choice([
+                f"Hey, I'm Rex. I'm set up in {p.name} and it's a clean slate. What are we building?",
+                f"Rex here, connected to {p.name}. Blank canvas, so what do you want to make?",
+                f"All set in {p.name}. It's empty for now, so tell me what you'd like to build and we'll get going.",
+            ])
+        await event_bus.publish(Event(
+            type="conversation.turn.completed",
+            payload={"text": greeting},
+            session_id=session_id,
+        ))
 
-    files_indexed = 0
-    if context_engine is not None:
-        try:
-            stats = await context_engine.load_project(resolved)
-            files_indexed = int(stats.get("files_indexed", 0) or 0)
-        except Exception:
-            logger.exception("project_index_failed", path=resolved)
+    # Index in the BACKGROUND so the greeting (and the rest of the app) isn't
+    # held up behind it, and so a reconnect on an already-loaded project doesn't
+    # re-index. project.loaded still fires so the frontend marks the project bound.
+    async def _index_and_notify() -> None:
+        files_indexed = 0
+        if context_engine is not None and not already_loaded:
+            try:
+                stats = await context_engine.load_project(resolved)
+                files_indexed = int(stats.get("files_indexed", 0) or 0)
+            except Exception:
+                logger.exception("project_index_failed", path=resolved)
+        await event_bus.publish(Event(
+            type="project.loaded",
+            payload={"ok": True, "path": resolved, "name": p.name, "files_indexed": files_indexed},
+            session_id=session_id,
+        ))
+        logger.info("project_loaded", session_id=session_id, name=p.name, files=files_indexed)
 
-    await event_bus.publish(Event(
-        type="project.loaded",
-        payload={
-            "ok": True,
-            "path": resolved,
-            "name": p.name,
-            "files_indexed": files_indexed,
-        },
-        session_id=session_id,
-    ))
-    logger.info("project_loaded", session_id=session_id, name=p.name, files=files_indexed)
+    asyncio.create_task(_index_and_notify())
 
 
 # ── App Creation ─────────────────────────────────────────────────
