@@ -1032,7 +1032,7 @@ export default function App() {
       <div className="flex-1 flex flex-col relative">
         {/* Toggle left */}
         <div className="absolute top-3 left-3 z-50">
-          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
+          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
           </button>
         </div>
@@ -1072,7 +1072,7 @@ export default function App() {
 
         {/* Toggle right */}
         <div className="absolute top-3 right-3 z-50">
-          <button onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
+          <button onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
           </button>
         </div>
@@ -1165,7 +1165,7 @@ export default function App() {
                 <button
                   onClick={() => setAttachMenuOpen((o) => !o)}
                   title="Attach"
-                  className="w-9 h-9 rounded-lg border border-[var(--border2)] bg-[var(--input)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+                  className="w-9 h-9 rounded-lg border border-[var(--border2)] bg-[var(--input)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--icon-hover)] transition-all"
                 >
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: attachMenuOpen ? "rotate(45deg)" : "none", transition: "transform .15s" }}><path d="M12 5v14M5 12h14" /></svg>
                 </button>

@@ -10,7 +10,7 @@
   --surface: #0a0a0f;
   --surface2: #0c0c11;
   --border: #141418;
-  --border2: #1c1c24;
+  --border2: #2a2a36;
 
   --midnight: #3B5998;
   --steel: #7B93B0;
@@ -20,12 +20,17 @@
   --steel-dim: #7B93B01A;
   --ice-dim: #C0C8D41A;
 
-  --muted: #3f3f46;
-  --muted2: #52525b;
+  --muted: #56565f;
+  --muted2: #6b6b75;
   --text: #ededed;
   --text2: #d4d4d8;
   --text3: #a1a1aa;
-  --text4: #71717a;
+  --text4: #8a8a95;
+
+  /* Interactive icon controls (+ attach, send, nav icons). Higher contrast than
+     --text4 so they're clearly visible against the near-black surfaces. */
+  --icon: #aeb4c0;
+  --icon-hover: #d8deea;
 
   /* Semantic surfaces (so hardcoded darks become theme-aware) */
   --app-grad-from: #0a0e1a;
@@ -49,7 +54,7 @@
   --surface: #ffffff;
   --surface2: #f1f4f8;
   --border: #e3e7ed;
-  --border2: #d3d9e2;
+  --border2: #c3cbd8;
 
   --midnight: #3B5998;
   --steel: #5a72a0;
@@ -59,12 +64,15 @@
   --steel-dim: #3B599810;
   --ice-dim: #3B599810;
 
-  --muted: #9aa1ad;
-  --muted2: #79818f;
+  --muted: #7c8492;
+  --muted2: #646c7a;
   --text: #14181f;
   --text2: #232a34;
   --text3: #444c58;
-  --text4: #69717e;
+  --text4: #545b68;
+
+  --icon: #4b5563;
+  --icon-hover: #1f2937;
 
   --app-grad-from: #eaf0f8;
   --app-grad-to: #f6f8fb;

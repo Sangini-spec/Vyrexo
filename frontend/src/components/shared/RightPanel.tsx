@@ -410,7 +410,7 @@ function CodeTab({ codeEvents, projectPath }: { codeEvents: CodeEvent[]; project
             <button
               onClick={toggleTree}
               title="Show file tree"
-              className="w-[22px] h-[22px] -ml-1 rounded-[5px] border border-[var(--border2)] bg-[var(--surface)] text-[var(--text4)] flex items-center justify-center flex-shrink-0 hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
+              className="w-[22px] h-[22px] -ml-1 rounded-[5px] border border-[var(--border2)] bg-[var(--surface)] text-[var(--icon)] flex items-center justify-center flex-shrink-0 hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
             </button>
@@ -576,7 +576,7 @@ function PreviewTab({
           onClick={() => setReloadKey((k) => k + 1)}
           disabled={!previewUrl}
           title="Reload preview"
-          className="w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] text-[var(--text4)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all disabled:opacity-40"
+          className="w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] transition-all disabled:opacity-40"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         </button>
@@ -588,7 +588,7 @@ function PreviewTab({
           title="Open in a new tab"
           aria-disabled={!previewUrl}
           onClick={(e) => { if (!previewUrl) e.preventDefault(); }}
-          className={`w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center transition-all ${previewUrl ? "text-[var(--text4)] hover:border-[var(--steel)] hover:text-[var(--steel)]" : "text-[var(--muted)] opacity-40 pointer-events-none"}`}
+          className={`w-[28px] h-[28px] rounded-md border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center transition-all ${previewUrl ? "text-[var(--icon)] hover:border-[var(--steel)] hover:text-[var(--steel)]" : "text-[var(--muted)] opacity-40 pointer-events-none"}`}
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         </a>
