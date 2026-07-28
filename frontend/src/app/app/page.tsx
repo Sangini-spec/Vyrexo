@@ -350,6 +350,29 @@ export default function App() {
   const isPlayingRef = useRef(false);
   useEffect(() => { isPlayingRef.current = audioIsPlaying; }, [audioIsPlaying]);
 
+  // The orb must reflect REALITY: it used to be set to "speaking" and never
+  // cleared, so it kept claiming Rex was talking after he'd gone quiet. Drive it
+  // off actual playback instead — when the audio stops, drop back to the resting
+  // state (listening if the mic is live, otherwise idle). Small delay so the gap
+  // BETWEEN two queued utterances doesn't flicker the orb.
+  const wasPlayingRef = useRef(false);
+  // Mirrors "is the mic live" (voiceMode is declared further down, so a ref keeps
+  // this effect independent of declaration order).
+  const voiceListeningRef = useRef(false);
+  useEffect(() => {
+    if (audioIsPlaying) {
+      wasPlayingRef.current = true;
+      return;
+    }
+    if (!wasPlayingRef.current) return; // never started; nothing to reset
+    const t = setTimeout(() => {
+      if (isPlayingRef.current) return; // next utterance already started
+      wasPlayingRef.current = false;
+      setOrbState((prev) => (prev === "speaking" ? (voiceListeningRef.current ? "listening" : "idle") : prev));
+    }, 450);
+    return () => clearTimeout(t);
+  }, [audioIsPlaying]);
+
   // When the user interrupts, the backend may still have audio chunks in flight.
   // This flag makes us DISCARD any incoming audio until the next user turn, so
   // Rex goes silent immediately instead of finishing buffered speech.
@@ -649,6 +672,11 @@ export default function App() {
       onActivated: handleActivated,
       onDeactivated: handleDeactivated,
     });
+
+  // Keep the mic-live mirror in sync for the orb-reset effect above.
+  useEffect(() => {
+    voiceListeningRef.current = voiceMode === "active_conversation";
+  }, [voiceMode]);
 
   // Clicking the orb: while Rex is talking or working, it's a STOP button —
   // silence + halt immediately. Otherwise it toggles push-to-talk.

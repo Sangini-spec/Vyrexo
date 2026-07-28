@@ -86,10 +86,32 @@ WEB_QA_PROMPT = """You are Rex, a sharp, JARVIS-like assistant answering a quest
 # "command" → which kicked off the whole build pipeline for simple questions.
 # This LLM router decides, in ONE word, how to handle a turn so read-only
 # questions are answered by *looking*, never by building. (Claude-Code style.)
+# How long we'll wait for the LLM router before falling back to rules. Routing is
+# the very first step of every turn, so a slow provider here is felt as "Rex is
+# laggy" on EVERY reply. Better a slightly rougher guess than a dead pause.
+ROUTER_TIMEOUT_S = 3.0
+
+# Utterances routed to conversation INSTANTLY, with no model call at all. These
+# are unambiguous social openers/acks where a model round-trip only adds delay.
+_INSTANT_CHITCHAT = {
+    "rex", "hey rex", "hi rex", "hello rex", "ok rex", "okay rex", "yo rex", "hey there",
+    "hi", "hey", "hello", "yo", "hiya", "sup", "what's up", "whats up",
+    "how are you", "how are you doing", "how's it going", "hows it going",
+    "good morning", "good afternoon", "good evening", "good night",
+    "thanks", "thank you", "thanks a lot", "thank you so much", "cheers",
+    "cool", "nice", "great", "awesome", "perfect", "lovely", "amazing", "wow",
+    "okay", "ok", "sure", "alright", "right", "got it", "understood", "i see",
+    "sorry", "my bad", "no worries", "never mind", "nothing",
+    "bye", "goodbye", "see you", "good bye", "later",
+    "yes", "yeah", "yep", "yup", "no", "nope", "nah", "hmm", "haha", "lol",
+}
+
 ROUTER_PROMPT = """You decide how Rex — a smart, JARVIS-like voice assistant for developers — should handle a message. Output EXACTLY one word and nothing else.
 
+You may be given RECENT CONVERSATION for context. Use it: the new message is often a follow-up that only makes sense in context ("please look into this", "what do you think", "yeah do that"). Judge the message AS PART OF the conversation, never as an isolated string.
+
 Categories:
-- chitchat: ANY conversation, banter, or personal/emotional talk — greetings, reactions, thanks, jokes, "how are you", the user's feelings ("I'm stressed", "I'm excited"), opinions, encouragement, and ANYTHING personal or about Rex himself ("do you have a wife", "do you get lonely", "what's your favorite language", "are you happy", "do you like me"). Rex answers these himself with personality — NO lookup.
+- chitchat: ANY conversation, banter, or personal/emotional talk — greetings, reactions, thanks, jokes, "how are you", the user's feelings ("I'm stressed", "I'm excited"), opinions, encouragement, and ANYTHING personal or about Rex himself ("do you have a wife", "do you get lonely", "what's your favorite language", "are you happy", "do you like me"). ALSO: questions about what Rex CAN DO (his abilities/limits), and vague conversational follow-ups or feedback about how he's behaving. Rex answers these himself with personality — NO lookup, NO building.
 - general: a FACTUAL question about the EXTERNAL world that benefits from looking it up — current events, news, facts about companies/people/products/places, "what is X", "who won Y", "what's the latest Z". This triggers a live web search, so only route here when an external fact is genuinely wanted.
 - codebase: a question about the USER'S OWN project — their files, their code, their functions, what THEIR code does, how many files THEY have, where something is in their project.
 - explain: walk through or explain a specific piece of the user's own code.
@@ -98,10 +120,13 @@ Categories:
 
 Rules:
 - Personal, playful, emotional, opinion, or about-Rex questions → chitchat. NEVER general — never web-search someone's feelings or Rex's personal life.
+- CAPABILITY vs ACTION is critical. If they're asking WHETHER Rex can do something, what he's able to do, or talking hypothetically ("if I asked you to...", "will you be able to", "are you capable of") → chitchat. He should ANSWER the question, not start working. Only pick command when they actually want it done NOW.
+- Vague follow-ups, reactions, or feedback about Rex's behaviour ("please look into this", "that's wrong", "why did you do that", "fix your behaviour") → chitchat. NEVER web-search a conversational follow-up.
 - Only route to general when the user clearly wants an EXTERNAL fact or current info looked up.
 - Only pick codebase when they're clearly asking about THEIR project's contents.
 - "run/start/serve/launch/preview the app/server/project locally" → runapp, NOT command.
 - Pick command ONLY when real work or a CHANGE is clearly requested.
+- When genuinely unsure → chitchat. Talking back is always safe; starting an unwanted build is not.
 
 Examples:
 "hey rex how's it going" -> chitchat
@@ -114,6 +139,15 @@ Examples:
 "i'm feeling really stressed today" -> chitchat
 "what's your favorite programming language" -> chitchat
 "do you like me" -> chitchat
+"what can you do" -> chitchat
+"are you able to create presentations" -> chitchat
+"can you also manage spreadsheets or just code" -> chitchat
+"if I tell you to build an automation project will you be able to do that" -> chitchat
+"do you think you could handle a full stack app" -> chitchat
+"so you can run terminal commands too right" -> chitchat
+"please look into this" -> chitchat
+"that response was wrong" -> chitchat
+"why did you start building, I only asked a question" -> chitchat
 "what's happening at Google these days" -> general
 "what are the big AI companies working on next" -> general
 "explain how transformers work" -> general
@@ -135,6 +169,9 @@ Examples:
 "add a /health endpoint to main.py" -> command
 "fix the bug in calc.py" -> command
 "build me a todo app" -> command
+"can you build me a todo app" -> command
+"okay now actually build that automation project" -> command
+"yes go ahead and do it" -> command
 
 Output only one word: chitchat, general, codebase, explain, runapp, or command."""
 
@@ -415,7 +452,7 @@ class ConversationManager:
             return await self._handle_while_busy(text, session_id, project_path)
 
         # ── Decide how to handle this turn (LLM router) ──────────────────────
-        kind = await self._route_kind(text, intent)
+        kind = await self._route_kind(text, intent, session_id)
 
         # Pure social banter → conversational brain. General/world questions →
         # LIVE web search (the JARVIS path: look it up, don't recite from memory).
@@ -514,7 +551,7 @@ class ConversationManager:
         immediately (they don't touch the running pipeline); a new build request
         is deferred so we never launch a second pipeline on top of the first.
         """
-        kind = await self._route_kind(text, Intent.CONVERSATION)
+        kind = await self._route_kind(text, Intent.CONVERSATION, session_id)
         if kind == "general":
             return await self._handle_web_question(text, session_id, project_path)
         if kind == "codebase":
@@ -679,14 +716,48 @@ class ConversationManager:
 
     # ── Intent routing helper ────────────────────────────────────────────────
 
-    async def _route_kind(self, text: str, rule_intent: Intent) -> str:
+    async def _recent_dialogue(self, session_id: str, turns: int = 4) -> str:
+        """A compact transcript of the last few turns, for the router's context.
+
+        ``process_turn`` stores the incoming user message BEFORE routing, so the
+        final entry is the message being classified — we drop it here to avoid
+        showing the router the same text twice.
+        """
+        if not session_id:
+            return ""
+        try:
+            history = await self._memory.retrieve(session_id, limit=turns + 1)
+        except Exception:
+            return ""
+        if not history:
+            return ""
+        prior = list(history)[:-1][-turns:]  # drop the current message, keep the tail
+        lines = []
+        for e in prior:
+            who = "Rex" if e.role == "assistant" else "User"
+            body = " ".join((e.content or "").split())[:200]
+            if body:
+                lines.append(f"{who}: {body}")
+        return "\n".join(lines)
+
+    async def _route_kind(self, text: str, rule_intent: Intent, session_id: str = "") -> str:
         """Decide how to handle a turn: chitchat | general | codebase | explain | command.
 
-        Uses the fast chat model so it's robust to natural speech (the old
-        rule-based default sent everything to the build pipeline). Falls back to
-        a conservative rule on error — biasing toward conversation, never an
-        accidental build.
+        Three things matter for a conversation that feels smooth:
+
+        1. **Speed.** Trivial social utterances ("Rex", "hi", "thanks", "yes")
+           are routed instantly by rule, with NO model call. The router LLM has
+           been observed taking many seconds on a loaded free tier, and a
+           multi-second pause before a two-word reply destroys the illusion of
+           talking to someone.
+        2. **A hard timeout.** However slow the provider gets, routing can never
+           stall a turn: we give up and fall back to the conservative rule.
+        3. **Context.** The last few turns are sent with the message, because
+           natural speech is full of follow-ups ("please look into this") that
+           are meaningless in isolation and used to get web-searched.
         """
+        t_clean = text.strip().lower().strip(" .!?,")
+
         # Only git is unambiguous enough to short-circuit. EXPLAIN is NOT — the
         # rule classifier fires on the bare word "explain", which wrongly grabs
         # "explain how transformers work" (a general question). Let the LLM
@@ -694,17 +765,27 @@ class ConversationManager:
         if rule_intent == Intent.GIT:
             return "command"
 
+        # 1. Instant, model-free routing for unmistakable small talk.
+        if t_clean in _INSTANT_CHITCHAT:
+            logger.info("intent_routed", kind="chitchat", text=text[:50], fast=True)
+            return "chitchat"
+
         try:
             llm = create_chat_llm(get_settings().llm)
-            resp = await llm.ainvoke([
-                SystemMessage(content=ROUTER_PROMPT),
-                HumanMessage(content=text.strip()),
-            ])
+            messages = [SystemMessage(content=ROUTER_PROMPT)]
+            # 3. Recent conversation so follow-ups resolve correctly.
+            convo = await self._recent_dialogue(session_id)
+            user_block = f"RECENT CONVERSATION:\n{convo}\n\nNEW MESSAGE: {text.strip()}" if convo else text.strip()
+            messages.append(HumanMessage(content=user_block))
+            # 2. Never let routing stall the conversation.
+            resp = await asyncio.wait_for(llm.ainvoke(messages), timeout=ROUTER_TIMEOUT_S)
             word = response_text(resp).strip().lower()
             for k in ("chitchat", "general", "codebase", "explain", "runapp", "command"):
                 if k in word:
                     logger.info("intent_routed", kind=k, text=text[:50])
                     return k
+        except asyncio.TimeoutError:
+            logger.warning("intent_router_timeout", seconds=ROUTER_TIMEOUT_S, text=text[:50])
         except Exception as e:
             logger.warning("intent_router_failed", error=str(e)[:120])
 
@@ -723,11 +804,20 @@ class ConversationManager:
         # to "general" (JARVIS answers) rather than a code lookup or walkthrough.
         codeish = ("my code", "my project", "this project", "this file", "the file",
                    "my file", "the function", "in the code", "the codebase", "our code",
-                   "app.py", ".py", ".js", ".ts", "main.py")
+                   "app.py", ".py", ".js", ".ts", "main.py",
+                   # File/folder questions are about THEIR project, so a router
+                   # timeout on "what files are in the folder" still lands right.
+                   "files", "file are", "folder", "directory", "repo")
         explainish = any(p in t for p in EXPLAIN_PHRASES)
         if any(c in t for c in codeish):
             return "explain" if explainish else "codebase"
         if explainish:
+            return "general"
+        # Clear external-lookup signals — so a router timeout on "what's the
+        # latest news about X" still reaches the web instead of being chatted at.
+        lookupish = ("news", "latest", "current", "recent", "today", "happening",
+                     "who won", "stock", "weather", "price of", "release date")
+        if any(w in t for w in lookupish) and not _is_about_rex(t):
             return "general"
         return "chitchat"
 
@@ -871,7 +961,7 @@ class ConversationManager:
         ))
 
         # If they want to build/act on it, feed the doc to the build pipeline.
-        kind = await self._route_kind(text, Intent.CONVERSATION) if text.strip() else "general"
+        kind = await self._route_kind(text, Intent.CONVERSATION, session_id) if text.strip() else "general"
         if kind == "command":
             if project_path in ("", ".", None):
                 return "Connect a project folder and I'll build this from your document."
@@ -1307,6 +1397,15 @@ def _is_stop(text: str) -> bool:
     """A spoken barge-in that means 'stop now' (not just a casual 'wait a sec')."""
     t = text.strip().lower().rstrip(".!? ")
     return t in _STOP
+
+
+def _is_about_rex(text: str) -> bool:
+    """Is this about Rex/the user themselves rather than the outside world? Keeps
+    the timeout fallback from web-searching things like 'how are you today'."""
+    t = text.lower()
+    return any(p in t for p in (
+        "you ", "your ", "yourself", "rex", "i ", "i'm", "im ", "me ", "my ", "we ", "our ",
+    ))
 
 
 _RUN_VERBS = ("run", "start", "serve", "launch", "spin up", "boot", "fire up", "open up", "bring up")

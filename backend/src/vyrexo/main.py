@@ -77,6 +77,10 @@ _session_projects: dict[str, str] = {}
 # project.set) doesn't make Rex say hello again.
 _greeted_sessions: set[str] = set()
 
+# Monotonic turn counter per session. Used to drop a reply that finished AFTER the
+# user already said something else, so Rex never answers a stale question.
+_session_turn_seq: dict[str, int] = {}
+
 # Sessions that were just interrupted. While a session is here, ALL TTS is
 # dropped — so Rex goes (and stays) silent immediately instead of finishing
 # in-flight narration. Cleared the moment the user speaks again.
@@ -217,6 +221,13 @@ async def _handle_conversation_turn(event: Event) -> None:
     # A fresh user turn lifts any post-interrupt silence so Rex can speak again.
     _suppressed_sessions.discard(session_id)
 
+    # Stamp this turn. If the user speaks again while we're still working on this
+    # one, the newer turn bumps the counter and THIS reply is discarded instead of
+    # being spoken late — otherwise Rex answers a question the user has already
+    # moved past (which reads as him ignoring you and rambling).
+    my_turn = _session_turn_seq.get(session_id, 0) + 1
+    _session_turn_seq[session_id] = my_turn
+
     # Run all work inside the session's connected project (set via project.set).
     # Falls back to the server CWD if no project has been connected yet.
     project_path = _session_projects.get(session_id) or "."
@@ -231,6 +242,11 @@ async def _handle_conversation_turn(event: Event) -> None:
         documents=documents,
         video_id=video_id,
     )
+
+    # Superseded? The user has spoken since; drop this stale reply silently.
+    if _session_turn_seq.get(session_id, my_turn) != my_turn:
+        logger.info("turn_superseded", session_id=session_id, turn=my_turn, text=text[:40])
+        return
 
     # Publish response for TTS narration + WebSocket forwarding
     await event_bus.publish(Event(
