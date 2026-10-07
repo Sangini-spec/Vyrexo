@@ -27,10 +27,15 @@ export function useAudioPlayer() {
   const mutedRef = useRef(false);
 
   const playNextFromQueue = useCallback(() => {
-    if (mutedRef.current) { setIsPlaying(false); return; }
-    if (isPlayingRef.current) return;
+    if (mutedRef.current) {
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+      return;
+    }
+    if (audioElementRef.current && !audioElementRef.current.paused) return;
     const blob = queueRef.current.shift();
     if (!blob) {
+      isPlayingRef.current = false;
       setIsPlaying(false);
       return;
     }
@@ -45,8 +50,11 @@ export function useAudioPlayer() {
 
     const cleanup = () => {
       URL.revokeObjectURL(url);
-      isPlayingRef.current = false;
       audioElementRef.current = null;
+      if (queueRef.current.length === 0) {
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      }
       // Play the next queued utterance, if any
       playNextFromQueue();
     };
@@ -72,12 +80,18 @@ export function useAudioPlayer() {
   /** Call when the backend signals voice.output.started (new utterance begins). */
   const beginUtterance = useCallback(() => {
     currentChunksRef.current = [];
+    isPlayingRef.current = true;
+    setIsPlaying(true);
   }, []);
 
   /** Call for each binary audio frame received from the backend. */
   const pushChunk = useCallback((data: ArrayBuffer) => {
     if (mutedRef.current) return; // dropped while muted (post-interrupt)
     if (!data || data.byteLength === 0) return;
+    if (!isPlayingRef.current) {
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+    }
     currentChunksRef.current.push(new Uint8Array(data));
   }, []);
 
@@ -85,7 +99,13 @@ export function useAudioPlayer() {
   const endUtterance = useCallback(() => {
     const chunks = currentChunksRef.current;
     currentChunksRef.current = [];
-    if (mutedRef.current || chunks.length === 0) return;
+    if (mutedRef.current || chunks.length === 0) {
+      if (queueRef.current.length === 0 && !audioElementRef.current) {
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      }
+      return;
+    }
 
     const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
     const combined = new Uint8Array(totalLength);
@@ -94,7 +114,10 @@ export function useAudioPlayer() {
       combined.set(c, offset);
       offset += c.length;
     }
-    const blob = new Blob([combined], { type: "audio/mpeg" });
+    const isWav = combined.length >= 4 && combined[0] === 0x52 && combined[1] === 0x49 && combined[2] === 0x46 && combined[3] === 0x46;
+    const blob = new Blob([combined], { type: isWav ? "audio/wav" : "audio/mpeg" });
+    isPlayingRef.current = true;
+    setIsPlaying(true);
     queueRef.current.push(blob);
     playNextFromQueue();
   }, [playNextFromQueue]);

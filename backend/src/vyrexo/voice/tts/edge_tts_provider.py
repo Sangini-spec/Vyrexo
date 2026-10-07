@@ -11,16 +11,22 @@ from vyrexo.voice.tts.base import TTSAudioChunk, TTSProvider, VoiceConfig
 
 logger = structlog.get_logger()
 
-# Curated voice list. The five named voices below are the friendly, natural-
+# Curated voice list. The named voices below are the friendly, natural-
 # sounding picks surfaced in the Voice Settings page; the accent_gender keys are
 # kept for backward compatibility with older saved preferences.
 VOICE_PRESETS: dict[str, str] = {
-    # ── The 5 curated, friendly voices (shown in the UI) ──
-    "andrew": "en-US-AndrewNeural",   # American male — warm & conversational
-    "ava": "en-US-AvaNeural",         # American female — friendly & natural
-    "brian": "en-US-BrianNeural",     # American male — casual & upbeat
-    "sonia": "en-GB-SoniaNeural",     # British female — crisp & clear
-    "ryan": "en-GB-RyanNeural",       # British male — calm & steady
+    # ── ElevenLabs-style & Neural male voices ──
+    "adam": "en-US-ChristopherNeural",  # American male — deep & resonant
+    "brian": "en-US-BrianNeural",       # American male — casual & upbeat
+    "antoni": "en-US-GuyNeural",        # American male — warm & articulate
+    "josh": "en-US-EricNeural",         # American male — conversational & dynamic
+    "andrew": "en-US-AndrewNeural",     # American male — warm & natural
+    "ryan": "en-GB-RyanNeural",         # British male — calm & steady
+    # ── ElevenLabs-style & Neural female voices ──
+    "rachel": "en-US-JennyNeural",      # American female — calm & clear
+    "nicole": "en-US-AriaNeural",       # American female — expressive & bright
+    "ava": "en-US-AvaNeural",           # American female — friendly & natural
+    "sonia": "en-GB-SoniaNeural",       # British female — crisp & clear
     # ── Legacy accent/gender keys (backward compatibility) ──
     "american_male": "en-US-GuyNeural",
     "american_female": "en-US-JennyNeural",

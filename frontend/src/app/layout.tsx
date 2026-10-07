@@ -4,7 +4,13 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Vyrexo",
-  description: "Voice-first conversational AI coding assistant",
+  description:
+    "Voice-first conversational AI coding assistant with real-time agent workflow, speech synthesis, and live preview",
+  openGraph: {
+    title: "Vyrexo",
+    description:
+      "Voice-first conversational AI coding assistant with real-time agent workflow, speech synthesis, and live preview",
+  },
 };
 
 export default function RootLayout({

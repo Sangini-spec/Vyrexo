@@ -95,7 +95,7 @@ def create_vision_llm(settings: LLMSettings) -> BaseChatModel:
     if settings.groq_api_key or (settings.provider == "groq" and settings.api_key):
         return _build_llm("groq", "meta-llama/llama-4-scout-17b-16e-instruct", settings, temperature=0.4)
     if settings.gemini_api_key:
-        return _build_llm("gemini", "gemini-2.5-flash", settings, temperature=0.4)
+        return _build_llm("gemini", "gemini-3.8-flash", settings, temperature=0.4)
     # No vision-capable key — fall back to the chat model (it can't see images,
     # but this avoids a crash; the handler will note it can't view them).
     return create_chat_llm(settings)

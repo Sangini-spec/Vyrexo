@@ -43,7 +43,14 @@ async def web_search(query: str, max_results: int = 5) -> dict:
 
 def _duckduckgo(query: str, max_results: int) -> dict:
     """Keyless DuckDuckGo search (runs in a worker thread — ddgs is sync)."""
-    from ddgs import DDGS
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            logger.warning("no_duckduckgo_package_installed")
+            return {"answer": "", "results": []}
 
     results: list[dict] = []
     with DDGS() as ddgs:

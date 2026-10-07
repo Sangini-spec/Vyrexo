@@ -1,0 +1,10 @@
+{
+  "name": "Vyrexo",
+  "description": "Voice-first conversational AI coding assistant with real-time agent workflow, speech synthesis, and live preview",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

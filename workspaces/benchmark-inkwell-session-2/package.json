@@ -1,0 +1,8 @@
+{
+  "name": "inkwell-substack-publication-platform",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "bun build src/components/App.tsx",
+    "test": "bun test tests/app.test.ts"
+  }
+}

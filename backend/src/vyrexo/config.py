@@ -11,8 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMSettings(BaseSettings):
     # provider: "gemini" | "groq" | "openrouter" | "openai" | "anthropic"
     provider: str = "gemini"
-    model_heavy: str = "gemini-2.5-pro"
-    model_light: str = "gemini-2.5-flash"
+    model_heavy: str = "gemini-3.1-pro-preview"
+    model_light: str = "gemini-3.8-flash"
     gemini_api_key: str = ""
     groq_api_key: str = ""
     openrouter_api_key: str = ""

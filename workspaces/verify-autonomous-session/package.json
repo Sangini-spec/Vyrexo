@@ -1,0 +1,13 @@
+{
+  "name": "build-an-autonomous-quantum-circuit-simulator",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/components/App.tsx --outdir dist",
+    "test": "bun test tests/app.test.ts"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

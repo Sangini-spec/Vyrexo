@@ -16,11 +16,21 @@ const DEV_USER = {
   created_at: new Date().toISOString(),
 } as unknown as User;
 
+const GUEST_USER = {
+  id: "guest-user",
+  email: "guest@vyrexo.local",
+  app_metadata: {},
+  user_metadata: { name: "Guest User", full_name: "Guest Explorer" },
+  aud: "authenticated",
+  created_at: new Date().toISOString(),
+} as unknown as User;
+
 interface AuthContextType {
   user: User | null;
   session: Session | null;
   loading: boolean;
   signOut: () => Promise<void>;
+  continueAsGuest: () => void;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -28,6 +38,7 @@ const AuthContext = createContext<AuthContextType>({
   session: null,
   loading: true,
   signOut: async () => {},
+  continueAsGuest: () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -35,9 +46,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const continueAsGuest = () => {
+    try {
+      localStorage.setItem("vyrexo_guest", "true");
+    } catch {}
+    setUser(GUEST_USER);
+    setLoading(false);
+  };
+
   useEffect(() => {
+    // Check if user previously chose guest mode
+    try {
+      if (localStorage.getItem("vyrexo_guest") === "true") {
+        setUser(GUEST_USER);
+        setLoading(false);
+        return;
+      }
+    } catch {}
+
     // Dev fallback: no Supabase configured → log in as a local dev user so the
-    // app is usable locally. Remove env vars are added → this branch is skipped.
+    // app is usable locally.
     if (!isSupabaseConfigured) {
       setUser(DEV_USER);
       setLoading(false);
@@ -64,13 +92,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    try {
+      localStorage.removeItem("vyrexo_guest");
+    } catch {}
+    try {
+      if (isSupabaseConfigured) {
+        await supabase.auth.signOut();
+      }
+    } catch {}
     setUser(null);
     setSession(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signOut }}>
+    <AuthContext.Provider value={{ user, session, loading, signOut, continueAsGuest }}>
       {children}
     </AuthContext.Provider>
   );

@@ -8,11 +8,13 @@ import { type AgentStep } from "@/components/agents/AgentTimeline";
 import { ModeIndicator } from "@/components/shared/ModeIndicator";
 import { RightPanel, type RightTab, type CodeEvent } from "@/components/shared/RightPanel";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
+import { ConnectProjectModal } from "@/components/shared/ConnectProjectModal";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useVoice } from "@/hooks/useVoice";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
+import { primeSpeechSynthesis, speakHumanizedText } from "@/lib/voice-synthesizer";
 
 // A persisted, renamable chat session. Stored in localStorage so they survive
 // reloads; grouped/labelled for the Sidebar at render time.
@@ -25,21 +27,47 @@ interface StoredSession {
 
 const SESSION_ICONS = ["\u{1F680}", "\u{1F6E0}", "\u{1F4A1}", "\u{26A1}", "\u{1F9E9}", "\u{1F4E6}", "\u{1F52D}", "\u{1F3AF}"];
 
+function getSessionTimestamp(s: { id?: string; createdAt?: number }): number {
+  const idMatch = s.id?.match(/^session-(\d{10,14})$/);
+  const idTs = idMatch ? parseInt(idMatch[1], 10) : null;
+
+  if (s.createdAt && typeof s.createdAt === "number" && s.createdAt > 1000000000000) {
+    // If the ID timestamp is older by > 1 hour, use the true original ID timestamp
+    if (idTs && idTs < s.createdAt - 3600000) {
+      return idTs;
+    }
+    return s.createdAt;
+  }
+  if (idTs && idTs > 1000000000000) return idTs;
+  return s.createdAt || Date.now();
+}
+
 function relTime(ts: number): string {
-  const m = Math.floor((Date.now() - ts) / 60000);
-  if (m < 1) return "now";
+  if (!ts) return "";
+  const diffMs = Math.max(0, Date.now() - ts);
+  const m = Math.floor(diffMs / 60000);
+  if (m < 1) return "just now";
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return d === 1 ? "yesterday" : `${d}d ago`;
+  const d = Math.floor(diffMs / 86400000);
+  if (d <= 1) return "1d ago";
+  if (d < 7) return `${d}d ago`;
+  if (d < 30) return `${Math.floor(d / 7)}w ago`;
+  const mo = Math.floor(d / 30);
+  return `${mo}mo ago`;
 }
 
 function dayGroup(ts: number): string {
-  const d = Math.floor((Date.now() - ts) / 86400000);
-  if (d < 1) return "Today";
-  if (d < 2) return "Yesterday";
-  if (d < 7) return "This Week";
+  if (!ts) return "Today";
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 86400000;
+  const startOfThisWeek = startOfToday - (now.getDay() || 7) * 86400000;
+
+  if (ts >= startOfToday) return "Today";
+  if (ts >= startOfYesterday) return "Yesterday";
+  if (ts >= startOfThisWeek) return "This Week";
   return "Earlier";
 }
 
@@ -56,6 +84,151 @@ function isStopPhrase(lower: string): boolean {
   if (words.length <= 6 && words.some((w) => STOP_SINGLE.includes(w))) return true;
   // Multi-word stop phrases appearing anywhere.
   return STOP_PHRASES.some((p) => lower.includes(p));
+}
+
+interface FastPathResponse {
+  reply: string;
+  spoken: string;
+  action?: "preview" | "code" | "chat" | "clear" | "stop";
+  emotion?: "warm" | "upbeat" | "calm" | "empathetic";
+}
+
+function checkClientFastPath(rawText: string): FastPathResponse | null {
+  const t = rawText.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) return null;
+
+  // Simple greetings & pleasantries
+  if (
+    /^(he|hey|hi|hello|yo|sup|wassup|whats up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
+    /^(he|hey|hi|hello)\s+(rex|there|team|friend|mate)$/i.test(t) ||
+    /^(what('s|s)?\s*up|sup|wassup|whats\s+good|how('s|s)\s+it\s+going)$/i.test(t)
+  ) {
+    return {
+      reply: "Hey! Good to see you. I'm right here with you and ready to build. What are we working on today?",
+      spoken: "Hey, ... Good to see you! I'm right here with you and ready to build. What are we working on today?",
+      emotion: "warm",
+    };
+  }
+
+  // How are you / state check
+  if (/^how\s*(are\s*you|are\s*things|is\s*your\s*day|are\s*you\s*doing)$/i.test(t)) {
+    return {
+      reply: "I'm doing great and fully operational! Ready to design architectures, write code, or iterate on workspaces with you. How about you?",
+      spoken: "I'm doing great! Feeling energized and fully focused. Ready to dive into code and iterate with you. How about you?",
+      emotion: "upbeat",
+    };
+  }
+
+  // Status / Health check
+  if (/^(status|system status|health|are you ready|ping)$/i.test(t)) {
+    return {
+      reply: "All systems 100% active. Neural voice pipeline, real-time code compiler, and sandbox preview are ready.",
+      spoken: "All systems active. Voice pipeline, code compiler, and preview sandboxes are ready.",
+      emotion: "calm",
+    };
+  }
+
+  // Help / Capabilities / Identity
+  if (/^(help|what can you do|who are you)$/i.test(t)) {
+    return {
+      reply: "I'm Rex, your autonomous software engineering teammate. I design architectures, author full-stack React applications, execute automated test suites, and launch live previews.",
+      spoken: "I'm Rex, your software teammate. I can design architectures, write full-stack code, run tests, and launch live previews.",
+      emotion: "warm",
+    };
+  }
+
+  // Tab & UI navigation commands
+  if (/^(show preview|open preview|view preview|preview tab|switch to preview|preview)$/i.test(t)) {
+    return {
+      reply: "Switched to the Preview tab.",
+      spoken: "Switched to Preview.",
+      action: "preview",
+      emotion: "calm",
+    };
+  }
+
+  if (/^(show code|open code|view code|code tab|switch to code|code|files|show files)$/i.test(t)) {
+    return {
+      reply: "Switched to the Code tab.",
+      spoken: "Switched to Code.",
+      action: "code",
+      emotion: "calm",
+    };
+  }
+
+  if (/^(show chat|open chat|view chat|chat tab|switch to chat|chat)$/i.test(t)) {
+    return {
+      reply: "Switched to the Chat tab.",
+      spoken: "Switched to Chat.",
+      action: "chat",
+      emotion: "calm",
+    };
+  }
+
+  if (/^(clear chat|clear|reset chat|wipe chat)$/i.test(t)) {
+    return {
+      reply: "Cleared chat history.",
+      spoken: "Chat cleared. What would you like to build?",
+      action: "clear",
+      emotion: "calm",
+    };
+  }
+
+  if (/^(stop|pause|wait|be quiet|shut up|hush)$/i.test(t)) {
+    return {
+      reply: "Stopped active execution.",
+      spoken: "Stopped. What would you like to do instead?",
+      action: "stop",
+      emotion: "calm",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Detects if a captured microphone transcript is an acoustic echo of Rex's
+ * own voice output that was picked up by the user's microphone.
+ */
+function checkIsSelfEcho(
+  userText: string,
+  recentAiUtterances: Array<{ text: string; time: number }>
+): boolean {
+  if (!userText.trim()) return false;
+  const cleanInput = userText.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+  const inputWords = cleanInput.split(/\s+/).filter((w) => w.length > 1);
+  if (inputWords.length === 0) return false;
+
+  const now = Date.now();
+
+  for (const { text: aiText, time } of recentAiUtterances) {
+    // Only check speech outputted within the last 25 seconds
+    if (now - time > 25000) continue;
+    const cleanAi = aiText.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+    if (!cleanAi) continue;
+
+    // Direct substring check
+    if (cleanAi.includes(cleanInput)) {
+      return true;
+    }
+
+    // Tokenized word-overlap check
+    const aiWords = new Set(cleanAi.split(/\s+/).filter((w) => w.length > 1));
+    let matchingWordCount = 0;
+    for (const w of inputWords) {
+      if (aiWords.has(w)) {
+        matchingWordCount++;
+      }
+    }
+
+    const overlapRatio = matchingWordCount / inputWords.length;
+    // If >= 60% of words in the transcript appear in Rex's recent speech, it is an echo
+    if (inputWords.length >= 2 && overlapRatio >= 0.6) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -127,7 +300,7 @@ function ResizeHandle({ onDelta }: { onDelta: (dx: number) => void }) {
         document.body.style.userSelect = "none";
       }}
       title="Drag to resize"
-      className="w-[5px] flex-shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--steel)] active:bg-[var(--steel)] transition-colors z-40"
+      className="w-[5px] flex-shrink-0 cursor-col-resize bg-[var(--border)] hover:bg-[var(--steel)] active:bg-[var(--steel)] transition-colors relative z-20"
     />
   );
 }
@@ -194,6 +367,10 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem("vyrexo_sidebar_w", String(sidebarWidth)); } catch {} }, [sidebarWidth]);
   useEffect(() => { try { localStorage.setItem("vyrexo_rightpanel_w", String(rightPanelWidth)); } catch {} }, [rightPanelWidth]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
+  const activeSessionRef = useRef<string | null>(activeSession);
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
   const [orbState, setOrbState] = useState<OrbState>("idle");
   const [transcript, setTranscript] = useState("");
   const [mode, setMode] = useState("normal");
@@ -201,12 +378,25 @@ export default function App() {
   const [narration, setNarration] = useState("Say 'Rex' to start, or click the orb");
   const [textInput, setTextInput] = useState("");
   const [chatLog, setChatLog] = useState<Array<{ role: string; text: string; images?: string[]; docs?: string[] }>>([]);
+  const chatLogRef = useRef(chatLog);
+  useEffect(() => {
+    chatLogRef.current = chatLog;
+  }, [chatLog]);
   // Attachments for the next message.
   const [attachedImages, setAttachedImages] = useState<string[]>([]); // data URLs
   const [attachedDocs, setAttachedDocs] = useState<{ name: string; dataurl: string }[]>([]);
   const [attachedVideo, setAttachedVideo] = useState<{ name: string; videoId: string } | null>(null);
   const [videoUploading, setVideoUploading] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [connectProjectModalOpen, setConnectProjectModalOpen] = useState(false);
+  const [vsCodeModalOpen, setVsCodeModalOpen] = useState(false);
+  const [vsCodeDetails, setVsCodeDetails] = useState<{
+    targetPath?: string;
+    vscodeUri?: string;
+    cursorUri?: string;
+    windsurfUri?: string;
+    copied?: boolean;
+  }>({});
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const docInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
@@ -230,14 +420,20 @@ export default function App() {
       } catch { return []; }
     };
     (async () => {
-      const local = readLocal();
+      const local = readLocal().map((s) => ({
+        ...s,
+        createdAt: getSessionTimestamp(s),
+      }));
       let dbList: StoredSession[] | null = null;
       try {
         const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(user.id)}`);
         const d = await r.json();
         if (d?.ok && Array.isArray(d.sessions)) {
           dbList = d.sessions.map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => ({
-            id: s.id, name: s.name || "New Session", icon: s.icon || SESSION_ICONS[0], createdAt: s.createdAt || Date.now(),
+            id: s.id,
+            name: s.name || "New Session",
+            icon: s.icon || SESSION_ICONS[0],
+            createdAt: getSessionTimestamp(s),
           }));
         }
       } catch { /* DB down — fall back below */ }
@@ -245,7 +441,8 @@ export default function App() {
 
       if (dbList === null) {
         // No DB — keep working off localStorage (or a fresh session).
-        setSessions(local.length ? local : [{ id: `session-${Date.now()}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() }]);
+        const now = Date.now();
+        setSessions(local.length ? local : [{ id: `session-${now}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: now }]);
         setSessionsLoaded(true);
         return;
       }
@@ -257,19 +454,20 @@ export default function App() {
         try {
           await fetch("/api/sessions", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon }),
+            body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt }),
           });
         } catch {}
       }
-      let merged = [...toMigrate, ...dbList].sort((a, b) => b.createdAt - a.createdAt);
+      let merged = [...toMigrate, ...dbList].sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
       if (!merged.length) {
         // Brand-new account: seed a first session.
-        const id = `session-${Date.now()}`;
-        const first = { id, name: "New Session", icon: SESSION_ICONS[0], createdAt: Date.now() };
+        const now = Date.now();
+        const id = `session-${now}`;
+        const first = { id, name: "New Session", icon: SESSION_ICONS[0], createdAt: now };
         try {
           await fetch("/api/sessions", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, user_id: user.id, name: first.name, icon: first.icon }),
+            body: JSON.stringify({ id, user_id: user.id, name: first.name, icon: first.icon, createdAt: now }),
           });
         } catch {}
         merged = [first];
@@ -289,14 +487,16 @@ export default function App() {
 
   const groupedSessions = useMemo(() => {
     const groups: Record<string, Session[]> = {};
-    for (const s of [...sessions].sort((a, b) => b.createdAt - a.createdAt)) {
-      const g = dayGroup(s.createdAt);
+    const sorted = [...sessions].sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
+    for (const s of sorted) {
+      const ts = getSessionTimestamp(s);
+      const g = dayGroup(ts);
       (groups[g] ||= []).push({
         id: s.id,
         name: s.name,
         icon: s.icon,
         status: s.id === activeSession ? "active" : "ended",
-        time: relTime(s.createdAt),
+        time: s.id === activeSession ? "" : relTime(ts),
       });
     }
     return groups;
@@ -306,9 +506,32 @@ export default function App() {
   const [activeRightTab, setActiveRightTab] = useState<RightTab>("task");
   const [codeEvents, setCodeEvents] = useState<CodeEvent[]>([]);
   const [previewUrl, setPreviewUrl] = useState("");
+  // Track each session's preview URL to guarantee strict isolation between sessions
+  const sessionPreviewsRef = useRef<Record<string, string>>({});
+  // Track each session's connected project to guarantee strict session-to-session isolation
+  const sessionProjectsRef = useRef<
+    Record<
+      string,
+      {
+        path: string;
+        name: string;
+        summary?: string;
+        filesCount?: number;
+        techStack?: string[];
+        source?: string;
+      } | null
+    >
+  >({});
 
   // Connected project — all agent tasks for the session run inside this folder.
-  const [activeProject, setActiveProject] = useState<{ path: string; name: string } | null>(null);
+  const [activeProject, setActiveProject] = useState<{
+    path: string;
+    name: string;
+    summary?: string;
+    filesCount?: number;
+    techStack?: string[];
+    source?: string;
+  } | null>(null);
   // Mirror in a ref so the WS-connected effect can read it without re-subscribing,
   // and track the last path we told the backend about to avoid duplicate sends.
   const activeProjectRef = useRef<{ path: string; name: string } | null>(null);
@@ -350,11 +573,19 @@ export default function App() {
   const isPlayingRef = useRef(false);
   useEffect(() => { isPlayingRef.current = audioIsPlaying; }, [audioIsPlaying]);
 
-  // The orb must reflect REALITY: it used to be set to "speaking" and never
-  // cleared, so it kept claiming Rex was talking after he'd gone quiet. Drive it
-  // off actual playback instead — when the audio stops, drop back to the resting
-  // state (listening if the mic is live, otherwise idle). Small delay so the gap
-  // BETWEEN two queued utterances doesn't flicker the orb.
+  const lastRexSpeechEndTimeRef = useRef(0);
+  const recentAiSpeechRef = useRef<Array<{ text: string; time: number }>>([]);
+  const isBuildingRef = useRef(false);
+  const recordAiSpeech = useCallback((text: string) => {
+    if (!text || !text.trim()) return;
+    recentAiSpeechRef.current = [
+      { text: text.trim(), time: Date.now() },
+      ...recentAiSpeechRef.current.filter((item) => Date.now() - item.time < 25000),
+    ].slice(0, 15);
+  }, []);
+
+  // The orb must reflect REALITY: drive it off actual playback.
+  // When audio stops, drop back to the resting state (thinking if active build, listening if mic live, otherwise idle).
   const wasPlayingRef = useRef(false);
   // Mirrors "is the mic live" (voiceMode is declared further down, so a ref keeps
   // this effect independent of declaration order).
@@ -362,14 +593,19 @@ export default function App() {
   useEffect(() => {
     if (audioIsPlaying) {
       wasPlayingRef.current = true;
+      setOrbState("speaking");
       return;
     }
     if (!wasPlayingRef.current) return; // never started; nothing to reset
     const t = setTimeout(() => {
       if (isPlayingRef.current) return; // next utterance already started
       wasPlayingRef.current = false;
-      setOrbState((prev) => (prev === "speaking" ? (voiceListeningRef.current ? "listening" : "idle") : prev));
-    }, 450);
+      lastRexSpeechEndTimeRef.current = Date.now();
+      setOrbState((prev) => {
+        if (isBuildingRef.current) return "thinking";
+        return prev === "speaking" ? (voiceListeningRef.current ? "listening" : "idle") : prev;
+      });
+    }, 600);
     return () => clearTimeout(t);
   }, [audioIsPlaying]);
 
@@ -401,25 +637,82 @@ export default function App() {
     if (!text) return;
     pendingRexRef.current = null;
     setChatLog((prev) => [...prev, { role: "assistant", text }]);
-    const isReport = text.length > 180 || text.includes("\n");
-    if (isReport) {
-      setNarration("Done — the details are in the Chat tab.");
-      setActiveRightTab("chat");
+    if (isBuildingRef.current) {
+      setOrbState("thinking");
     } else {
-      setNarration(text);
+      setOrbState((prev) => (prev === "thinking" ? (voiceListeningRef.current ? "listening" : "idle") : prev));
+      const isReport = text.length > 180 || text.includes("\n");
+      if (isReport) {
+        setNarration("Done — the details are in the Chat tab.");
+        setActiveRightTab("chat");
+      } else {
+        setNarration(text);
+      }
     }
   }, []);
+
+  // ── High-Performance RAF Stream Batching (prevents main thread bottleneck) ──
+  const codeEventsBufferRef = useRef<CodeEvent[]>([]);
+  const codeEventsRafRef = useRef<number | null>(null);
+
+  const flushCodeEvents = useCallback(() => {
+    if (codeEventsBufferRef.current.length === 0) return;
+    const chunk = codeEventsBufferRef.current;
+    codeEventsBufferRef.current = [];
+    setCodeEvents((prev) => {
+      const combined = prev.concat(chunk);
+      return combined.length > 500 ? combined.slice(-500) : combined;
+    });
+  }, []);
+
+  const queueCodeEvent = useCallback(
+    (event: CodeEvent) => {
+      codeEventsBufferRef.current.push(event);
+      if (codeEventsRafRef.current === null) {
+        codeEventsRafRef.current = requestAnimationFrame(() => {
+          codeEventsRafRef.current = null;
+          flushCodeEvents();
+        });
+      }
+    },
+    [flushCodeEvents]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (codeEventsRafRef.current !== null) {
+        cancelAnimationFrame(codeEventsRafRef.current);
+      }
+    };
+  }, []);
+
+  // Throttled partial transcript updater
+  const partialTranscriptRef = useRef<string>("");
+  const partialTranscriptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── WebSocket: handles all server events ────────────────────
   const onServerMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
-      case "voice.transcription.partial":
-        setTranscript(msg.payload.text as string);
+      case "voice.transcription.partial": {
+        const text = msg.payload.text as string;
+        partialTranscriptRef.current = text;
+        if (!partialTranscriptTimerRef.current) {
+          partialTranscriptTimerRef.current = setTimeout(() => {
+            partialTranscriptTimerRef.current = null;
+            setTranscript(partialTranscriptRef.current);
+          }, 35);
+        }
         break;
+      }
 
-      case "voice.transcription.final":
+      case "voice.transcription.final": {
+        if (partialTranscriptTimerRef.current) {
+          clearTimeout(partialTranscriptTimerRef.current);
+          partialTranscriptTimerRef.current = null;
+        }
         setTranscript(msg.payload.text as string);
         break;
+      }
 
       case "voice.output.start":
       case "voice.output.started":
@@ -438,29 +731,43 @@ export default function App() {
       case "voice.output.end":
       case "voice.output.completed":
         endUtterance();
+        // Do not force orbState to listening/idle here; audioIsPlaying lifecycle
+        // governs the orb state until all audio finishes physically playing.
         break;
 
       case "agent.narration": {
         // Live "what Rex is doing right now" — shows in the narration box only,
         // NOT in the chat log (chat is reserved for actual conversation turns).
         const narrText = (msg.payload.text as string) || "";
-        if (narrText) setNarration(narrText);
-        setOrbState("speaking");
+        if (narrText) {
+          recordAiSpeech(narrText);
+          setNarration(narrText);
+        }
         break;
       }
 
       case "conversation.turn.completed": {
         // Rex's reply. Hold it and reveal it when his voice starts (synced),
         // rather than popping the text up a beat early. Fallback timer shows it
-        // anyway if no audio comes. Full text → Chat tab.
+        // promptly within 500ms if no audio stream arrives. Full text → Chat tab.
         const responseText = (msg.payload.text as string) || "";
         if (responseText.trim()) {
+          recordAiSpeech(responseText);
           flushPendingRex(); // show any earlier pending reply first
           pendingRexRef.current = responseText;
-          pendingRexTimerRef.current = setTimeout(flushPendingRex, 2500);
+          pendingRexTimerRef.current = setTimeout(flushPendingRex, 500);
         }
-        setOrbState("speaking");
-        // Backend streams the synthesized audio over the WS; no browser TTS fallback.
+        break;
+      }
+
+      case "session.renamed": {
+        const newName = msg.payload.name as string;
+        const targetId = (msg.payload.id as string) || activeSession;
+        if (newName && targetId) {
+          setSessions((prev) =>
+            prev.map((s) => (s.id === targetId ? { ...s, name: newName } : s))
+          );
+        }
         break;
       }
 
@@ -502,27 +809,24 @@ export default function App() {
         break;
 
       case "agent.action": {
-        // A tool the agent ran (file read/write, command, git op) — feeds Code tab.
-        setCodeEvents((prev) => [
-          ...prev,
-          {
-            kind: "action",
-            agent: msg.payload.agent as string,
-            tool: msg.payload.tool as string,
-            category: msg.payload.category as string,
-            path: msg.payload.path as string,
-            command: msg.payload.command as string,
-            message: msg.payload.message as string,
-            content: msg.payload.content as string,
-            oldContent: msg.payload.old_content as string,
-          },
-        ]);
+        // A tool the agent ran (file read/write, command, git op) — feeds Code tab via RAF queue.
+        queueCodeEvent({
+          kind: "action",
+          agent: msg.payload.agent as string,
+          tool: msg.payload.tool as string,
+          category: msg.payload.category as string,
+          path: msg.payload.path as string,
+          command: msg.payload.command as string,
+          message: msg.payload.message as string,
+          content: msg.payload.content as string,
+          oldContent: msg.payload.old_content as string,
+        });
         break;
       }
 
       case "execution.output": {
         const out = (msg.payload.output as string) || (msg.payload.text as string) || "";
-        if (out) setCodeEvents((prev) => [...prev, { kind: "output", text: out }]);
+        if (out) queueCodeEvent({ kind: "output", text: out });
         break;
       }
 
@@ -531,25 +835,53 @@ export default function App() {
           const name = (msg.payload.name as string) || "project";
           const path = (msg.payload.path as string) || "";
           const files = (msg.payload.files_indexed as number) ?? 0;
-          setActiveProject({ path, name });
+          const proj = { path, name, filesCount: files };
+          setActiveProject(proj);
           setProjectBound(true);
-          try {
-            localStorage.setItem("vyrexo_project", JSON.stringify({ path, name }));
-          } catch {}
+          if (activeSession) {
+            sessionProjectsRef.current[activeSession] = proj;
+            try {
+              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+              map[activeSession] = proj;
+              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+            } catch {}
+          }
           setNarration(`Connected to ${name}${files ? ` — indexed ${files} file${files === 1 ? "" : "s"}` : ""}. Everything I build now happens in this project.`);
         } else {
           setActiveProject(null);
           setProjectBound(false);
           sentProjectPathRef.current = "";
-          try { localStorage.removeItem("vyrexo_project"); } catch {}
+          if (activeSession) {
+            sessionProjectsRef.current[activeSession] = null;
+            try {
+              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+              delete map[activeSession];
+              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+            } catch {}
+          }
           setNarration((msg.payload.error as string) || "Couldn't connect that project.");
         }
         break;
       }
 
+      case "agent.building.started": {
+        isBuildingRef.current = true;
+        setOrbState("thinking");
+        break;
+      }
+
+      case "agent.building.completed": {
+        isBuildingRef.current = false;
+        break;
+      }
+
       case "preview.ready": {
+        isBuildingRef.current = false;
         const url = (msg.payload.url as string) || "";
         if (url) {
+          if (activeSession) {
+            sessionPreviewsRef.current[activeSession] = url;
+          }
           setPreviewUrl(url);
           setActiveRightTab("preview");
           setRightPanelCollapsed(false);
@@ -570,7 +902,7 @@ export default function App() {
         setOrbState("idle");
         break;
     }
-  }, [beginUtterance, endUtterance, unmuteAudio, flushPendingRex]);
+  }, [beginUtterance, endUtterance, unmuteAudio, flushPendingRex, activeSession, recordAiSpeech, queueCodeEvent]);
 
   const onAudioMessage = useCallback((data: ArrayBuffer) => {
     if (audioMutedRef.current) return; // discard audio that arrives after an interrupt
@@ -584,6 +916,45 @@ export default function App() {
     onAudio: onAudioMessage,
   });
 
+  const handleInterruptVoice = useCallback(() => {
+    muteAudio();
+    try { window.speechSynthesis.cancel(); } catch {}
+    sendMessage({ type: "execution.interrupt", payload: {} });
+    setOrbState("idle");
+    setNarration("Stopped. What would you like instead?");
+    setTranscript("");
+  }, [muteAudio, sendMessage]);
+
+  // Unified voice synthesis: keeps Rex's voice 100% consistent across all turns
+  const playUnifiedVoice = useCallback(
+    async (spokenText: string, emotion: string = "warm") => {
+      try {
+        const res = await fetch("/api/voice/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: spokenText, emotion }),
+        });
+        if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
+          const buffer = await res.arrayBuffer();
+          if (buffer.byteLength > 100) {
+            unmuteAudio();
+            beginUtterance();
+            pushChunk(buffer);
+            endUtterance();
+            return;
+          }
+        }
+      } catch {}
+      // Fallback only if server audio endpoint fails
+      speakHumanizedText(
+        spokenText,
+        { voice: "adam", speed: "normal", emotion: emotion as any },
+        { onEnd: () => setOrbState(voiceListeningRef.current ? "listening" : "idle") }
+      );
+    },
+    [unmuteAudio, beginUtterance, pushChunk, endUtterance]
+  );
+
   // Voice synthesis is now driven by the backend (Edge-TTS streamed over WebSocket).
   // The browser SpeechSynthesisUtterance fallback is no longer used; the chosen voice
   // and speed flow from the Settings page through a voice.config WebSocket message.
@@ -596,38 +967,29 @@ export default function App() {
       if (!raw) return;
       const lower = raw.toLowerCase().replace(/[.!?,]/g, "").trim();
       const isStop = isStopPhrase(lower);
-      const rexTalking = isPlayingRef.current || speakingRef.current;
+      const rexTalking = isPlayingRef.current || speakingRef.current || wasPlayingRef.current;
 
       // ── BARGE-IN ──────────────────────────────────────────────────────────
-      // The instant the user speaks over Rex, silence him — on the INTERIM
-      // transcript, without waiting for the recognizer to finalize (that ~1-2s
-      // wait was the lag). This is the human / ChatGPT behavior: start talking
-      // and it immediately stops to listen.
+      // Only explicit stop words ("stop", "wait", "pause", "quiet", "cancel")
+      // are permitted to interrupt Rex mid-speech.
+      // Arbitrary speech or acoustic spill from the speakers MUST NEVER interrupt Rex!
       if (!isFinal) {
-        if (rexTalking && raw.length >= 2) {
+        if (rexTalking && isStop) {
           muteAudio(); // pause local audio + discard any in-flight chunks
-          if (isStop) {
-            // "stop" also halts the running work right away.
-            sendMessage({ type: "execution.interrupt", payload: {} });
-            setOrbState("idle");
-            setNarration("Stopped. What would you like instead?");
-          } else {
-            // ANY other speech: muting the local player isn't enough — the
-            // backend keeps streaming the rest of the line, so it'd just resume.
-            // Tell the server to shut Rex up AT THE SOURCE (kill synthesis +
-            // drain queued speech). We DON'T halt the build; only the talking.
-            sendMessage({ type: "voice.hush", payload: {} });
-            setOrbState("listening");
-          }
+          try { window.speechSynthesis.cancel(); } catch {}
+          sendMessage({ type: "execution.interrupt", payload: {} });
+          setOrbState("idle");
+          setNarration("Stopped. What would you like instead?");
+          setTranscript("");
         }
         return; // wait for the final transcript to act on the actual message
       }
 
       // ── FINAL transcript ──────────────────────────────────────────────────
-      // A spoken "stop" is a HARD interrupt: silence Rex + halt the work, and do
-      // NOT send it as a turn (so it stays quiet).
+      // 1. Explicit user stop
       if (isStop) {
         muteAudio();
+        try { window.speechSynthesis.cancel(); } catch {}
         sendMessage({ type: "execution.interrupt", payload: {} });
         setOrbState("idle");
         setNarration("Stopped. What would you like instead?");
@@ -635,27 +997,103 @@ export default function App() {
         return;
       }
 
-      // Otherwise it's conversation (incl. answering small-talk). If Rex was
-      // mid-sentence, silence him at the SOURCE first (covers the case where no
-      // interim barge-in fired) so he can't talk over the reply, then allow the
-      // reply to play. We DON'T interrupt the build — the fast chat brain
-      // replies while any running task keeps going.
+      // 2. Suppress acoustic spill while Rex is talking
       if (rexTalking) {
-        muteAudio();
-        sendMessage({ type: "voice.hush", payload: {} });
+        console.debug("[voice] Suppressing transcript received while Rex was speaking (acoustic spill):", raw);
+        setTranscript("");
+        return;
       }
+
+      // 3. Suppress acoustic spill in the post-speech cooldown (reverberation & speech-recognition delay)
+      const now = Date.now();
+      const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
+      const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(raw);
+      if (timeSinceRexSpoke < 2500 && !hasExplicitWake) {
+        console.debug("[voice] Suppressing transcript received in echo cooldown:", raw);
+        setTranscript("");
+        return;
+      }
+
+      // 4. Semantic self-echo check: Did the mic pick up Rex's own speech?
+      if (checkIsSelfEcho(raw, recentAiSpeechRef.current)) {
+        console.debug("[voice] Suppressing self-echo transcript matching Rex's recent speech:", raw);
+        setTranscript("");
+        return;
+      }
+
+      // 5. Genuine user request -> send to Rex with instant zero-lag responsiveness!
+      primeSpeechSynthesis();
       unmuteAudio(); // new turn → allow Rex's reply to play
       setPendingProposal(null);
-      setChatLog((prev) => [...prev, { role: "user", text: raw }]);
-      sendMessage({ type: "text.input", payload: { text: raw } });
       setOrbState("thinking");
       setNarration("Thinking...");
+
+      // Heuristic fast-correction for zero perceived lag
+      let cleanText = raw.trim()
+        .replace(/^he\s+(whatever|rex|can\s+you|could\s+you|what|how|show|run|build|tell|i\s+want)/i, "Hey, $1")
+        .replace(/^he\s+how\s+are\s+you/i, "Hey, how are you?")
+        .replace(/^he$/i, "Hey")
+        .replace(/^he\s+/i, "Hey ")
+        .replace(/\bbed\s+for\b/gi, "built for")
+        .replace(/\bbill\s+for\b/gi, "built for")
+        .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|me|new)\b/gi, "build $2")
+        .replace(/\b(bill|bil)\s+(finance|financial|calc|calculator|caculator|project|app|software)\b/gi, "build $2")
+        .replace(/\b(cacu|cacula|caculator|calcualtor|calculater|calcultor|calcutor)\b/gi, "calculator")
+        .replace(/\bor\s+a\s+mart\b/gi, "AuraMart")
+        .replace(/\baura\s*mart\b/gi, "AuraMart")
+        .replace(/\baura\s*beauty\b/gi, "AuraBeauty")
+        .replace(/\bapex\s*wealth\b/gi, "ApexWealth")
+        .replace(/\broom\s*canvas\b/gi, "RoomCanvas")
+        .replace(/\bto\s*do\s*list\b/gi, "todo list");
+
+      if (cleanText.length > 0) {
+        cleanText = cleanText.charAt(0).toUpperCase() + cleanText.slice(1);
+      }
+
+      // Check lightweight client fast-path for simple greetings or common commands (<10ms instant response)
+      const fastResult = checkClientFastPath(cleanText);
+      if (fastResult) {
+        if (fastResult.action === "preview") {
+          setActiveRightTab("preview");
+          setRightPanelCollapsed(false);
+        } else if (fastResult.action === "code") {
+          setActiveRightTab("code");
+          setRightPanelCollapsed(false);
+        } else if (fastResult.action === "chat") {
+          setActiveRightTab("chat");
+        } else if (fastResult.action === "clear") {
+          setChatLog([]);
+          setNarration("Chat cleared. Ready for your next idea.");
+          setTranscript("");
+          return;
+        } else if (fastResult.action === "stop") {
+          handleInterruptVoice();
+          return;
+        }
+
+        setChatLog((prev) => [
+          ...prev,
+          { role: "user", text: cleanText },
+          { role: "assistant", text: fastResult.reply },
+        ]);
+        setNarration(fastResult.spoken);
+        recordAiSpeech(fastResult.spoken);
+        setOrbState("speaking");
+        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm");
+        sendMessage({ type: "text.input", payload: { text: cleanText, fastPath: true } });
+        setTranscript("");
+        return;
+      }
+
+      setChatLog((prev) => [...prev, { role: "user", text: cleanText }]);
+      sendMessage({ type: "text.input", payload: { text: cleanText } });
       setTranscript("");
     },
-    [sendMessage, muteAudio]
+    [sendMessage, muteAudio, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice]
   );
 
   const handleActivated = useCallback(() => {
+    primeSpeechSynthesis();
     setOrbState("listening");
     setNarration("I'm listening...");
     setTranscript("");
@@ -666,12 +1104,19 @@ export default function App() {
     setNarration("Say 'Rex' to start, or click the orb");
   }, []);
 
-  const { mode: voiceMode, hasPermission, startListening, stopListening, forceActivate } =
-    useVoice({
-      onTranscript: handleVoiceTranscript,
-      onActivated: handleActivated,
-      onDeactivated: handleDeactivated,
-    });
+  const {
+    mode: voiceMode,
+    audioLevel,
+    startListening,
+    stopListening,
+    forceActivate,
+  } = useVoice({
+    onTranscript: handleVoiceTranscript,
+    onActivated: handleActivated,
+    onDeactivated: handleDeactivated,
+    onInterrupt: handleInterruptVoice,
+    isAiSpeaking: isPlayingRef.current || orbState === "speaking" || wasPlayingRef.current,
+  });
 
   // Keep the mic-live mirror in sync for the orb-reset effect above.
   useEffect(() => {
@@ -679,8 +1124,9 @@ export default function App() {
   }, [voiceMode]);
 
   // Clicking the orb: while Rex is talking or working, it's a STOP button —
-  // silence + halt immediately. Otherwise it toggles push-to-talk.
+  // silence + halt immediately. Otherwise it triggers push-to-talk.
   const handleOrbClick = useCallback(() => {
+    primeSpeechSynthesis();
     if (isPlayingRef.current || orbState === "speaking" || orbState === "thinking") {
       muteAudio();
       sendMessage({ type: "execution.interrupt", payload: {} });
@@ -695,26 +1141,115 @@ export default function App() {
   // Tracks the most recently opened session so a slow history fetch from an
   // earlier click can't populate the chat of the session we're now on.
   const historyReqRef = useRef<string>("");
+
+  // ── Auto-persist active session chat log to localStorage & backend ────────
+  useEffect(() => {
+    if (!activeSession || chatLog.length === 0) return;
+    try {
+      localStorage.setItem(`vyrexo_chat_history_${activeSession}`, JSON.stringify(chatLog));
+    } catch {}
+
+    const timer = setTimeout(() => {
+      fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          turns: chatLog.map((c) => ({
+            role: c.role,
+            text: c.text,
+            images: c.images,
+            docs: c.docs,
+            timestamp: Date.now(),
+          })),
+        }),
+      }).catch(() => {});
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [activeSession, chatLog]);
+
   const handleSessionClick = useCallback(
     (id: string) => {
       if (activeSession) disconnect();
       setActiveSession(id);
       setSteps([]);
-      setNarration("Connecting...");
-      setChatLog([]);
+      setNarration("Say 'Rex' to start, or click the orb");
+
+      // Instantly restore this session's saved conversation from localStorage (zero flicker)
+      let initialTurns: Array<{ role: string; text: string; images?: string[]; docs?: string[] }> = [];
+      try {
+        const raw = localStorage.getItem(`vyrexo_chat_history_${id}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) initialTurns = parsed;
+        }
+      } catch {}
+      setChatLog(initialTurns);
+
       setCodeEvents([]);
       setTranscript("");
-      // Restore this session's saved conversation so its context carries over
-      // (like re-opening a chat in ChatGPT/Claude). Best-effort.
+      // Strict session isolation: restore this session's dedicated preview or start fresh
+      const sessionUrl = sessionPreviewsRef.current[id] || "";
+      setPreviewUrl(sessionUrl);
+
+      // Strict session isolation: restore THIS session's connected project (or null if none)
+      let sessProj = sessionProjectsRef.current[id] || null;
+      if (!sessProj) {
+        try {
+          const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+          if (map[id]) sessProj = map[id];
+        } catch {}
+      }
+      setActiveProject(sessProj);
+      activeProjectRef.current = sessProj;
+      sentProjectPathRef.current = sessProj ? sessProj.path : "";
+      setProjectBound(!!sessProj);
+
+      // Also verify with backend for this specific session
+      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d?.ok && d.connected && d.project) {
+            const p = {
+              path: d.project.path,
+              name: d.project.name,
+              summary: d.project.summary,
+              techStack: d.project.techStack,
+              filesCount: d.project.filesCount,
+              source: d.project.source,
+            };
+            setActiveProject(p);
+            activeProjectRef.current = p;
+            sessionProjectsRef.current[id] = p;
+            try {
+              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+              map[id] = p;
+              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+            } catch {}
+          }
+        })
+        .catch(() => {});
+
+      // Restore and synchronize this session's saved conversation with the backend
       historyReqRef.current = id;
       fetch(`/api/sessions/${encodeURIComponent(id)}/history`)
         .then((r) => r.json())
         .then((d) => {
           if (historyReqRef.current !== id) return; // user switched again
           if (d?.ok && Array.isArray(d.turns) && d.turns.length) {
-            setChatLog(
-              d.turns.map((t: { role: string; content: string }) => ({ role: t.role, text: t.content }))
-            );
+            const mapped = d.turns.map((t: { role: string; content?: string; text?: string; images?: string[]; docs?: string[] }) => ({
+              role: t.role,
+              text: t.text || t.content || "",
+              images: t.images,
+              docs: t.docs,
+            }));
+            setChatLog((prev) => {
+              if (prev.length >= mapped.length) return prev;
+              return mapped;
+            });
+            try {
+              localStorage.setItem(`vyrexo_chat_history_${id}`, JSON.stringify(mapped));
+            } catch {}
           }
         })
         .catch(() => {});
@@ -725,12 +1260,31 @@ export default function App() {
   // Create a brand-new session: persist it to the DB, add to the list, activate.
   const createSession = useCallback(() => {
     const id = `session-${Date.now()}`;
+    sessionPreviewsRef.current[id] = "";
+    sessionProjectsRef.current[id] = null;
+    setActiveProject(null);
+    activeProjectRef.current = null;
+    setProjectBound(false);
+    sentProjectPathRef.current = "";
+    setPreviewUrl("");
     const icon = SESSION_ICONS[sessions.length % SESSION_ICONS.length];
-    setSessions((prev) => [{ id, name: "New Session", icon, createdAt: Date.now() }, ...prev]);
+    const initialGreeting = [
+      {
+        role: "assistant",
+        text: "Hey! Rex here. What would you like to explore, discuss, or build together?",
+      },
+    ];
+    setChatLog(initialGreeting);
+    try {
+      localStorage.setItem(`vyrexo_chat_history_${id}`, JSON.stringify(initialGreeting));
+    } catch {}
+
+    const now = Date.now();
+    setSessions((prev) => [{ id, name: "New Session", icon, createdAt: now }, ...prev]);
     if (user?.id) {
       fetch("/api/sessions", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, user_id: user.id, name: "New Session", icon }),
+        body: JSON.stringify({ id, user_id: user.id, name: "New Session", icon, createdAt: now }),
       }).catch(() => {});
     }
     handleSessionClick(id);
@@ -749,13 +1303,85 @@ export default function App() {
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
       fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+      fetch(`/api/sessions/${encodeURIComponent(id)}/history`, { method: "DELETE" }).catch(() => {});
+      delete sessionProjectsRef.current[id];
+      delete sessionPreviewsRef.current[id];
+      try {
+        localStorage.removeItem(`vyrexo_chat_history_${id}`);
+        const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+        delete map[id];
+        localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+      } catch {}
       if (id === activeSession) {
         disconnect();
         setActiveSession(null);
+        setActiveProject(null);
+        activeProjectRef.current = null;
+        setProjectBound(false);
+        sentProjectPathRef.current = "";
+        setChatLog([]);
       }
     },
     [activeSession, disconnect]
   );
+
+  const handleClearCurrentChat = useCallback(() => {
+    if (!activeSession) return;
+    setChatLog([]);
+    try {
+      localStorage.removeItem(`vyrexo_chat_history_${activeSession}`);
+    } catch {}
+    fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history`, {
+      method: "DELETE",
+    }).catch(() => {});
+  }, [activeSession]);
+
+  const handleDeleteOldChats = useCallback(
+    async (days: number) => {
+      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+      const toRemove = sessions.filter((s) => getSessionTimestamp(s) < cutoff);
+      for (const s of toRemove) {
+        try {
+          localStorage.removeItem(`vyrexo_chat_history_${s.id}`);
+        } catch {}
+      }
+      setSessions((prev) => prev.filter((s) => getSessionTimestamp(s) >= cutoff));
+      if (activeSession && toRemove.some((s) => s.id === activeSession)) {
+        disconnect();
+        setActiveSession(null);
+        setActiveProject(null);
+        setChatLog([]);
+      }
+      try {
+        await fetch(
+          `/api/sessions?older_than_days=${days}&user_id=${encodeURIComponent(user?.id || "dev-local-user")}`,
+          { method: "DELETE" }
+        );
+      } catch {}
+    },
+    [sessions, activeSession, disconnect, user?.id]
+  );
+
+  const handleClearAllHistory = useCallback(async () => {
+    for (const s of sessions) {
+      try {
+        localStorage.removeItem(`vyrexo_chat_history_${s.id}`);
+      } catch {}
+    }
+    setChatLog([]);
+    setSessions([]);
+    disconnect();
+    setActiveSession(null);
+    setActiveProject(null);
+    try {
+      await fetch(
+        `/api/sessions?clear_all=true&user_id=${encodeURIComponent(user?.id || "dev-local-user")}`,
+        { method: "DELETE" }
+      );
+    } catch {}
+    createSession();
+  }, [sessions, disconnect, user?.id, createSession]);
 
   // Connect WS + start voice when session is selected
   useEffect(() => {
@@ -772,7 +1398,7 @@ export default function App() {
   // Update narration when WS connects and push voice config to the backend
   useEffect(() => {
     if (wsStatus === "connected") {
-      setNarration("Connected! Say 'Rex' to start, or click the orb");
+      setNarration("Say 'Rex' to start, or click the orb");
 
       // Push the user's saved voice preference so backend TTS uses the right voice
       try {
@@ -787,7 +1413,7 @@ export default function App() {
           sendMessage({
             type: "voice.config",
             payload: {
-              voice: prefs.voice || "andrew",
+              voice: prefs.voice || "adam",
               rate: rateMap[prefs.speed] || "+0%",
             },
           });
@@ -795,21 +1421,22 @@ export default function App() {
       } catch {
         // Settings not set yet; backend will use default voice
       }
-    } else if (wsStatus === "connecting") {
-      setNarration("Connecting to Vyrexo...");
     }
   }, [wsStatus, sendMessage]);
 
-  // Restore a previously connected project on load so tasks stay scoped to it.
+  // Restore session-isolated projects map on initial load
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("vyrexo_project");
+      const saved = localStorage.getItem("vyrexo_session_projects");
       if (saved) {
-        const p = JSON.parse(saved);
-        if (p?.path) setActiveProject({ path: p.path, name: p.name || "project" });
+        const map = JSON.parse(saved);
+        sessionProjectsRef.current = map;
+        if (activeSession && map[activeSession]) {
+          setActiveProject(map[activeSession]);
+        }
       }
     } catch {}
-  }, []);
+  }, [activeSession]);
 
   // A fresh socket means the backend hasn't been told our project yet.
   useEffect(() => {
@@ -841,52 +1468,91 @@ export default function App() {
     sendMessage({ type: "text.input", payload: { text } });
     setOrbState("thinking");
     setNarration("On it — let me get started.");
-  }, [pendingCmd, wsStatus, projectBound, sendMessage]);
+  }, [pendingCmd, wsStatus, projectBound, sendMessage, unmuteAudio]);
 
   // ── Project + VS Code ────────────────────────────────────────
   // Browsers cannot expose an absolute filesystem path, so the directory
   // picker is used (when available) only to suggest a folder name; the user
   // confirms the absolute path. The backend validates it, indexes it, and
   // scopes every subsequent task in this session to that folder.
-  const handleConnectProject = useCallback(async () => {
-    // Ask the local backend to open a native OS folder picker — it returns the
-    // real absolute path (browsers can't), so binding is reliable.
-    setNarration("Opening the folder picker — pick your project folder...");
-    let path = "";
-    try {
-      const res = await fetch("http://127.0.0.1:8001/api/projects/pick", { method: "POST" });
-      const data = await res.json();
-      if (!data.ok || !data.path) {
-        setNarration(data.cancelled ? "No folder selected." : (data.error || "Couldn't open the folder picker."));
-        return;
+  const handleConnectProject = useCallback(() => {
+    setConnectProjectModalOpen(true);
+  }, []);
+
+  const handleSelectProjectFromModal = useCallback(
+    (project: {
+      name: string;
+      path: string;
+      summary?: string;
+      filesCount?: number;
+      techStack?: string[];
+      source?: string;
+    }) => {
+      setActiveProject(project);
+      activeProjectRef.current = project;
+      setNarration(`Connected to ${project.name}${project.filesCount ? ` (${project.filesCount} files)` : ""}.`);
+      sentProjectPathRef.current = "";
+
+      const currentSessionId = activeSession || `session-${Date.now()}`;
+      sessionProjectsRef.current[currentSessionId] = project;
+      try {
+        const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+        map[currentSessionId] = project;
+        localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+      } catch {}
+
+      if (!activeSession) {
+        createSession();
+      } else if (wsStatus === "connected") {
+        sentProjectPathRef.current = project.path;
+        sendMessage({ type: "project.set", payload: { path: project.path } });
       }
-      path = data.path;
-    } catch {
-      setNarration("Couldn't reach the folder picker. Is the backend running?");
-      return;
-    }
+    },
+    [activeSession, wsStatus, sendMessage, createSession]
+  );
 
-    const name = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "project";
-    setActiveProject({ path, name });
-    setNarration(`Connecting to ${name}...`);
-    sentProjectPathRef.current = ""; // force a (re)send of the new path
-
-    if (!activeSession) {
-      // Start a session; the WS-connected effect binds the project once open.
-      createSession();
-    } else if (wsStatus === "connected") {
-      sentProjectPathRef.current = path;
-      sendMessage({ type: "project.set", payload: { path } });
-    }
-  }, [activeSession, wsStatus, sendMessage, createSession]);
+  const handleDisconnectProject = useCallback(async () => {
+    if (!activeSession) return;
+    try {
+      await fetch(`/api/projects?sessionId=${encodeURIComponent(activeSession)}`, {
+        method: "DELETE",
+      });
+    } catch {}
+    setActiveProject(null);
+    activeProjectRef.current = null;
+    setProjectBound(false);
+    sentProjectPathRef.current = "";
+    sessionProjectsRef.current[activeSession] = null;
+    try {
+      const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+      delete map[activeSession];
+      localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+    } catch {}
+    setNarration("Project disconnected from this session.");
+    setConnectProjectModalOpen(false);
+  }, [activeSession]);
 
   const handleOpenVSCode = useCallback(async () => {
     try {
-      await fetch("http://127.0.0.1:8001/api/projects/vscode", {
+      const res = await fetch("/api/projects/vscode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: activeProject?.path || "." }),
       });
+      const data = await res.json();
+      if (data?.ok) {
+        setVsCodeDetails({
+          targetPath: data.targetPath,
+          vscodeUri: data.vscodeUri,
+          cursorUri: data.cursorUri,
+          windsurfUri: data.windsurfUri,
+        });
+        setVsCodeModalOpen(true);
+        // Attempt browser deep-link trigger to open VS Code app directly
+        if (data.vscodeUri && typeof window !== "undefined") {
+          window.location.href = data.vscodeUri;
+        }
+      }
     } catch (err) {
       console.error("Failed to open VS Code:", err);
     }
@@ -971,6 +1637,47 @@ export default function App() {
     if (!text && images.length === 0 && docs.length === 0 && !video) return;
     unmuteAudio(); // new turn → allow Rex's reply to play
     setPendingProposal(null); // any typed message supersedes a pending yes/no
+
+    // Lightweight client fast-path for text input (<10ms instant response)
+    if (images.length === 0 && docs.length === 0 && !video) {
+      const fastResult = checkClientFastPath(text);
+      if (fastResult) {
+        if (fastResult.action === "preview") {
+          setActiveRightTab("preview");
+          setRightPanelCollapsed(false);
+        } else if (fastResult.action === "code") {
+          setActiveRightTab("code");
+          setRightPanelCollapsed(false);
+        } else if (fastResult.action === "chat") {
+          setActiveRightTab("chat");
+        } else if (fastResult.action === "clear") {
+          setChatLog([]);
+          setTextInput("");
+          setNarration("Chat cleared. Ready for your next idea.");
+          setTranscript("");
+          return;
+        } else if (fastResult.action === "stop") {
+          handleInterruptVoice();
+          setTextInput("");
+          return;
+        }
+
+        setChatLog((prev) => [
+          ...prev,
+          { role: "user", text },
+          { role: "assistant", text: fastResult.reply },
+        ]);
+        setTextInput("");
+        setTranscript(text);
+        setNarration(fastResult.spoken);
+        recordAiSpeech(fastResult.spoken);
+        setOrbState("speaking");
+        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm");
+        sendMessage({ type: "text.input", payload: { text, fastPath: true } });
+        return;
+      }
+    }
+
     const chips = [...docs.map((d) => d.name), ...(video ? [`🎬 ${video.name}`] : [])];
     setChatLog((prev) => [
       ...prev,
@@ -984,7 +1691,7 @@ export default function App() {
     setAttachedVideo(null);
     setOrbState("thinking");
     setActiveRightTab("chat");
-  }, [textInput, attachedImages, attachedDocs, attachedVideo, sendMessage]);
+  }, [textInput, attachedImages, attachedDocs, attachedVideo, sendMessage, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice]);
 
   // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
   const respondToProposal = useCallback(
@@ -997,7 +1704,7 @@ export default function App() {
       setOrbState("thinking");
       setNarration(accept ? "On it — getting started now." : "Okay, leaving it as is.");
     },
-    [sendMessage]
+    [sendMessage, unmuteAudio]
   );
 
   // ── Keyboard shortcuts ──────────────────────────────────────
@@ -1007,6 +1714,7 @@ export default function App() {
 
       if (e.code === "Space") {
         e.preventDefault();
+        primeSpeechSynthesis();
         forceActivate();
       }
       if (e.code === "Escape") {
@@ -1045,29 +1753,46 @@ export default function App() {
           activeSessionId={activeSession ?? undefined}
           collapsed={sidebarCollapsed}
           width={sidebarWidth}
+          user={user}
+          onSignOut={signOut}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
           onSessionClick={handleSessionClick}
           onNewSession={createSession}
           onRenameSession={handleRenameSession}
           onDeleteSession={handleDeleteSession}
+          onClearCurrentChat={handleClearCurrentChat}
+          onDeleteOldChats={handleDeleteOldChats}
+          onClearAllHistory={handleClearAllHistory}
         />
         {!sidebarCollapsed && (
           <ResizeHandle onDelta={(dx) => setSidebarWidth((w) => clamp(w + dx, 180, 520))} />
         )}
         <div
-          className="flex-1 flex flex-col items-center justify-center relative"
+          className="flex-1 flex flex-col items-center justify-center relative z-10"
           style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)" }}
         >
           {/* User profile */}
-          <div className="absolute top-4 right-5 flex items-center gap-3">
-            <button onClick={signOut} className="text-[11px] text-[var(--muted)] hover:text-[var(--text3)] transition-colors">
-              Sign out
+          <div className="absolute top-4 right-5 flex items-center gap-2.5 z-20">
+            <button
+              onClick={signOut}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-xs font-medium text-[var(--muted2)] hover:text-red-500 hover:border-red-500/40 hover:bg-red-500/10 transition-all cursor-pointer shadow-sm"
+              title="Sign out of your account"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="opacity-75 flex-shrink-0">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span>Sign out</span>
             </button>
-            <div className="flex items-center gap-2 px-3 py-[5px] rounded-full border border-transparent hover:border-[var(--border2)] hover:bg-[#ffffff08] transition-all">
-              <div className="w-[30px] h-[30px] rounded-full flex items-center justify-center text-xs font-bold text-white" style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}>
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-full border border-[var(--border2)] bg-[var(--surface)] shadow-sm">
+              <div
+                className="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0 shadow-sm"
+                style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
+              >
                 {user.user_metadata?.full_name?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || "U"}
               </div>
-              <span className="text-[13px] text-[var(--text2)] font-medium">
+              <span className="text-xs text-[var(--text)] font-medium pr-1">
                 {user.user_metadata?.full_name || user.email?.split("@")[0]}
               </span>
             </div>
@@ -1121,17 +1846,22 @@ export default function App() {
         activeSessionId={activeSession}
         collapsed={sidebarCollapsed}
         width={sidebarWidth}
+        user={user}
+        onSignOut={signOut}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         onSessionClick={handleSessionClick}
         onNewSession={createSession}
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
+        onClearCurrentChat={handleClearCurrentChat}
+        onDeleteOldChats={handleDeleteOldChats}
+        onClearAllHistory={handleClearAllHistory}
       />
       {!sidebarCollapsed && (
         <ResizeHandle onDelta={(dx) => setSidebarWidth((w) => clamp(w + dx, 180, 520))} />
       )}
 
-      <div className="flex-1 flex flex-col relative">
+      <div className="flex-1 flex flex-col relative z-10">
         {/* Toggle left */}
         <div className="absolute top-3 left-3 z-50">
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
@@ -1158,9 +1888,18 @@ export default function App() {
           </button>
           <div className={`w-[6px] h-[6px] rounded-full ${wsStatus === "connected" ? "bg-[#22c55e] shadow-[0_0_6px_#22c55e88]" : wsStatus === "connecting" ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`} />
           <span className="text-[11px] text-[var(--muted2)]">{wsStatus}</span>
-          <span className="text-[10px] text-[var(--muted)] px-1.5 py-0.5 rounded bg-[var(--border)] border border-[var(--border2)]">
-            {voiceMode === "active_conversation" ? "Voice Active" : voiceMode === "waiting_for_wake" ? "Say 'Rex'" : "Voice Off"}
-          </span>
+          <div className="flex items-center gap-1.5 text-[10.5px] px-2 py-0.5 rounded-md bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)]">
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                voiceMode === "active_conversation"
+                  ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]"
+                  : "bg-[#6888C8]"
+              }`}
+            />
+            <span className="font-mono">
+              {voiceMode === "active_conversation" ? "Voice Active" : "Say 'Rex'"}
+            </span>
+          </div>
           <ThemeToggle />
           <button onClick={handleOpenVSCode} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[#1e6fff] hover:bg-[#1e6fff15] transition-all p-0" title="Open in VS Code">
             <svg width="16" height="16" viewBox="0 0 100 100" fill="none">
@@ -1170,6 +1909,17 @@ export default function App() {
           <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all" title="Settings">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </a>
+          <button
+            onClick={signOut}
+            className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-500 transition-all cursor-pointer"
+            title="Sign out"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+          </button>
         </div>
 
         {/* Toggle right */}
@@ -1299,7 +2049,7 @@ export default function App() {
                 placeholder="Type a command, attach a file, or say 'Rex'..."
                 className="flex-1 bg-[var(--input)] border border-[var(--border2)] rounded-lg py-2 px-3 text-xs text-[var(--text)] placeholder:text-[var(--muted)] outline-none focus:border-[#3B599844]"
               />
-              <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all">
+              <button onClick={handleTextSubmit} className="px-3 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all flex-shrink-0">
                 Send
               </button>
             </div>
@@ -1336,6 +2086,117 @@ export default function App() {
           setOrbState("idle");
           setNarration("Interrupted. What would you like instead?");
         }}
+        onConnectProject={handleConnectProject}
+        sessionId={activeSession || "default"}
+        onClearChat={handleClearCurrentChat}
+      />
+
+      {/* VS Code & Desktop IDE Bridge Dialog */}
+      {vsCodeModalOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setVsCodeModalOpen(false)}
+        >
+          <div
+            className="w-[460px] max-w-[95vw] rounded-2xl border border-[var(--border2)] bg-[var(--surface)] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-[var(--border2)]">
+              <div className="flex items-center gap-2.5">
+                <span className="p-2 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/20">
+                  <svg width="20" height="20" viewBox="0 0 100 100" fill="none">
+                    <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
+                  </svg>
+                </span>
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--text)]">IDE & Local Editor Sync</h3>
+                  <p className="text-[11px] text-[var(--muted2)]">Rex code changes are reflected in real time</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setVsCodeModalOpen(false)}
+                className="w-7 h-7 rounded-lg border border-[var(--border2)] bg-[var(--surface2)] text-[var(--muted2)] hover:text-[var(--text)] flex items-center justify-center text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="text-[11px] font-medium text-[var(--muted2)]">Workspace Path</label>
+                <div className="mt-1 flex items-center gap-2 p-2 rounded-lg bg-[var(--input)] border border-[var(--border2)] font-mono text-[11px] text-[var(--text)]">
+                  <span className="truncate flex-1">{vsCodeDetails.targetPath || activeProject?.path || "Current Workspace"}</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(vsCodeDetails.targetPath || activeProject?.path || "");
+                      setVsCodeDetails((prev) => ({ ...prev, copied: true }));
+                      setTimeout(() => setVsCodeDetails((prev) => ({ ...prev, copied: false })), 2000);
+                    }}
+                    className="px-2 py-1 bg-[var(--surface2)] hover:bg-[var(--border2)] text-[10px] rounded border border-[var(--border2)] text-[var(--text3)] flex-shrink-0"
+                  >
+                    {vsCodeDetails.copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium text-[var(--muted2)]">Launch Directly in Your Editor</label>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <a
+                    href={vsCodeDetails.vscodeUri || `vscode://file/${activeProject?.path || ""}`}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#007ACC] hover:bg-[#007ACC]/10 transition-all text-center group"
+                  >
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#007ACC]">VS Code</span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">Desktop app</span>
+                  </a>
+                  <a
+                    href={vsCodeDetails.cursorUri || `cursor://file/${activeProject?.path || ""}`}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#7c3aed] hover:bg-[#7c3aed]/10 transition-all text-center group"
+                  >
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#a78bfa]">Cursor</span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">AI Editor</span>
+                  </a>
+                  <a
+                    href={vsCodeDetails.windsurfUri || `windsurf://file/${activeProject?.path || ""}`}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#06b6d4] hover:bg-[#06b6d4]/10 transition-all text-center group"
+                  >
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#22d3ee]">Windsurf</span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">Codeium</span>
+                  </a>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--border2)] text-[11px] text-[var(--muted2)] space-y-1.5 leading-relaxed">
+                <div className="flex items-center gap-1.5 font-medium text-[var(--text)]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
+                  Two-Way Real-Time Synchronization
+                </div>
+                <p>
+                  Any files created or edited by Rex in this session are written directly to your connected project files. When opened in VS Code, file changes reload automatically.
+                </p>
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <button
+                  onClick={() => setVsCodeModalOpen(false)}
+                  className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Connect Project & Workspace Modal */}
+      <ConnectProjectModal
+        isOpen={connectProjectModalOpen}
+        onClose={() => setConnectProjectModalOpen(false)}
+        onSelectProject={handleSelectProjectFromModal}
+        onDisconnectProject={handleDisconnectProject}
+        currentProjectPath={activeProject?.path}
+        sessionId={activeSession || undefined}
       />
     </div>
   );
