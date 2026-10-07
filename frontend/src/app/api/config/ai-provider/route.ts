@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   getOpenAIConfig,
   saveOpenAIConfig,
+  removeOpenAIConfig,
   testOpenAIConnection,
   getChariotConfig,
   saveChariotConfig,
@@ -160,5 +161,22 @@ export async function POST(request: NextRequest) {
       { ok: false, error: err?.message || String(err) },
       { status: 500 }
     );
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const provider = searchParams.get("provider") || "openai";
+    if (provider === "openai") {
+      removeOpenAIConfig();
+      return NextResponse.json({
+        ok: true,
+        message: "OpenAI API key removed successfully. The system now exclusively uses Google Gemini 3.8 Flash for coding models.",
+      });
+    }
+    return NextResponse.json({ ok: false, error: "Unsupported provider for removal" }, { status: 400 });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err?.message || String(err) }, { status: 500 });
   }
 }

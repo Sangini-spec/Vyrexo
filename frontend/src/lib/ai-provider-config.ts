@@ -86,6 +86,21 @@ export function getOpenAIConfig(): AIProviderConfig {
   };
 }
 
+export function removeOpenAIConfig(): void {
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_MODEL;
+  try {
+    const cfgPath = resolveConfigPath();
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const data = JSON.parse(raw);
+      delete data.openAiApiKey;
+      delete data.openAiModel;
+      fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf-8");
+    }
+  } catch {}
+}
+
 /**
  * Saves or updates OpenAI configuration to disk for persistent runtime use.
  */
