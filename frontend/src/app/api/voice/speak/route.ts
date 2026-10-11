@@ -1,9 +1,206 @@
 import { NextRequest, NextResponse } from "next/server";
+import { spawn } from "child_process";
+import path from "path";
+import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
-import { getChariotConfig } from "@/lib/ai-provider-config";
+import { getElevenLabsConfig } from "@/lib/ai-provider-config";
+import { detectEmotionFromContext, type EmotionTone } from "@/lib/emotion-detector";
 
-// In-memory flag tracking whether Chariot API has run out of credits to prevent voice jitter mid-session
-let isChariotCreditsExhausted = false;
+// In-memory LRU audio cache for synthesized phrases to eliminate duplicate API calls and guarantee <5ms response
+const voiceAudioCache = new Map<string, { buffer: Buffer; contentType: string; timestamp: number }>();
+const MAX_CACHE_ENTRIES = 300;
+
+function getCachedAudio(key: string): { buffer: Buffer; contentType: string } | null {
+  const item = voiceAudioCache.get(key);
+  if (!item) return null;
+  return { buffer: item.buffer, contentType: item.contentType };
+}
+
+function setCachedAudio(key: string, buffer: Buffer, contentType: string = "audio/mpeg"): void {
+  if (voiceAudioCache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = voiceAudioCache.keys().next().value;
+    if (oldestKey) voiceAudioCache.delete(oldestKey);
+  }
+  voiceAudioCache.set(key, { buffer, contentType, timestamp: Date.now() });
+}
+
+function getWorkerScriptPath(): string {
+  const p1 = path.join(process.cwd(), "frontend", "scripts", "synthesize.cjs");
+  if (fs.existsSync(p1)) return p1;
+  const p2 = path.join(process.cwd(), "scripts", "synthesize.cjs");
+  if (fs.existsSync(p2)) return p2;
+  const p3 = "/app/applet/frontend/scripts/synthesize.cjs";
+  if (fs.existsSync(p3)) return p3;
+  return p1;
+}
+
+// Map user settings voice names to verified ElevenLabs voices
+function mapElevenLabsVoice(voiceId?: string): string {
+  const v = (voiceId || "").toLowerCase().trim();
+
+  // If user passes explicit 20+ char ElevenLabs voice ID directly
+  if (v.length >= 20 && /^[a-zA-Z0-9]+$/.test(v)) {
+    return v;
+  }
+
+  // Brian: Deep, thoughtful, narrative British male
+  if (v.includes("brian") || v.includes("ryan") || v.includes("british")) {
+    return "nPczCjzI2devNBz1zQrb";
+  }
+  // George: Raspy, emotive, conversational American male
+  if (v.includes("george")) {
+    return "JBFqnCBsd6RMkjVDRZzb";
+  }
+  // Rachel: Calm, deeply empathetic, compassionate female
+  if (v.includes("rachel") || v.includes("ava") || v.includes("empathetic_female") || v.includes("female")) {
+    return "EXAVITQu4vr4xnSDxMaL";
+  }
+  // Charlotte: Elegant, warm, natural cadence
+  if (v.includes("charlotte") || v.includes("sonia")) {
+    return "Xb7hH8MSUJpSbSDYk0k2";
+  }
+  // Nicole: Soft, playful, caring conversational voice
+  if (v.includes("nicole")) {
+    return "cgSgspJ2msm6clMCkdW9";
+  }
+  // Default Adam: Deeply conversational, warm, articulate American male
+  return "pNInz6obpgDQGcFmaJgB";
+}
+
+// Synthesizes speech using ElevenLabs API (highest tier emotional nuance & authentic human touch)
+async function synthesizeWithElevenLabs(
+  text: string,
+  apiKey: string,
+  modelId: string = "eleven_turbo_v2_5",
+  voiceId?: string,
+  emotion?: string
+): Promise<Buffer | null> {
+  const elevenVoiceId = mapElevenLabsVoice(voiceId);
+
+  // Emotional tuning: lower stability + higher style gives deep empathy, natural vocal inflection, and genuine warmth
+  let stability = 0.38;
+  let similarityBoost = 0.85;
+  let style = 0.42;
+
+  if (emotion === "empathetic") {
+    stability = 0.28; // Deep emotional nuance, gentle compassionate tone, patient warmth
+    style = 0.65;
+    similarityBoost = 0.88;
+  } else if (emotion === "upbeat") {
+    stability = 0.38; // Dynamic, lively, smiling vocal energy
+    style = 0.55;
+    similarityBoost = 0.82;
+  } else if (emotion === "calm") {
+    stability = 0.50; // Smooth, steady, focused cadence
+    style = 0.25;
+    similarityBoost = 0.86;
+  }
+
+  try {
+    const abortCtrl = new AbortController();
+    const timeout = setTimeout(() => abortCtrl.abort(), 12000);
+
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}`, {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey.trim(),
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: modelId || "eleven_turbo_v2_5",
+        voice_settings: {
+          stability,
+          similarity_boost: similarityBoost,
+          style,
+          use_speaker_boost: true,
+        },
+      }),
+      signal: abortCtrl.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength > 200) {
+        return Buffer.from(arrayBuffer);
+      }
+    } else {
+      const errJson = await res.json().catch(() => null);
+      console.warn("[VoiceSpeak] ElevenLabs API error response:", res.status, errJson);
+    }
+  } catch (err: any) {
+    console.warn("[VoiceSpeak] ElevenLabs request notice:", err?.message || err);
+  }
+  return null;
+}
+
+// Synthesizes speech using Microsoft Edge Neural TTS isolated child process (Always reliable, high-fidelity neural voices, zero-quota)
+async function synthesizeWithEdgeTTS(
+  text: string,
+  voiceId: string = "adam",
+  emotion: string = "warm",
+  speed: string = "normal"
+): Promise<Buffer | null> {
+  const scriptPath = getWorkerScriptPath();
+  if (!fs.existsSync(scriptPath)) {
+    console.warn("[VoiceSpeak] EdgeTTS worker script not found at:", scriptPath);
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const proc = spawn("node", [scriptPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const chunks: Buffer[] = [];
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try { proc.kill("SIGKILL"); } catch {}
+        console.warn("[VoiceSpeak] EdgeTTS worker timed out after 7s");
+        resolve(null);
+      }
+    }, 7000);
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+
+    proc.on("close", (code) => {
+      clearTimeout(timeout);
+      if (resolved) return;
+      resolved = true;
+      if (code === 0) {
+        const audioBuf = Buffer.concat(chunks);
+        resolve(audioBuf.length > 200 ? audioBuf : null);
+      } else {
+        console.warn("[VoiceSpeak] EdgeTTS worker exited with code:", code);
+        resolve(null);
+      }
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      if (resolved) return;
+      resolved = true;
+      console.warn("[VoiceSpeak] EdgeTTS spawn error:", err);
+      resolve(null);
+    });
+
+    proc.stdin.write(
+      JSON.stringify({
+        text,
+        voice: voiceId,
+        emotion,
+        speed,
+      })
+    );
+    proc.stdin.end();
+  });
+}
 
 // Lazy Gemini client helper
 function getGeminiClient(): GoogleGenAI | null {
@@ -40,20 +237,20 @@ function pcm16ToWav(pcmData: Uint8Array, sampleRate = 24000, numChannels = 1): U
   view.setUint8(10, 0x56); // V
   view.setUint8(11, 0x45); // E
 
-  // fmt subchunk
+  // fmt chunk
   view.setUint8(12, 0x66); // f
-  view.setUint8(13, 0x6d); // m
+  view.setUint8(13, 0x6D); // m
   view.setUint8(14, 0x74); // t
   view.setUint8(15, 0x20); // ' '
-  view.setUint32(16, 16, true);          // Subchunk1Size (16 for PCM)
-  view.setUint16(20, 1, true);           // AudioFormat (1 = PCM)
-  view.setUint16(22, numChannels, true); // NumChannels
-  view.setUint32(24, sampleRate, true);  // SampleRate
-  view.setUint32(28, byteRate, true);    // ByteRate
-  view.setUint16(32, blockAlign, true);  // BlockAlign
-  view.setUint16(34, 16, true);          // BitsPerSample
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
 
-  // data subchunk
+  // data chunk
   view.setUint8(36, 0x64); // d
   view.setUint8(37, 0x61); // a
   view.setUint8(38, 0x74); // t
@@ -70,31 +267,17 @@ function mapVoiceName(voiceId?: string): string {
   if (v.includes("female") || v.includes("ava") || v.includes("rachel") || v.includes("nicole")) {
     return "Kore";
   }
-  if (v.includes("charon")) {
+  if (v.includes("ryan") || v.includes("british") || v.includes("charon") || v.includes("brian")) {
     return "Charon";
   }
-  // Default natural masculine voice for Rex
+  if (v.includes("sonia") || v.includes("charlotte") || v.includes("aoede")) {
+    return "Aoede";
+  }
   return "Puck";
 }
 
-// Map user settings voice names to verified Chariot voice IDs (all tested with HTTP 200 on api.chariot.in)
-function mapChariotVoice(voiceId?: string): string {
-  const v = (voiceId || "").toLowerCase();
-  if (v.includes("ava") || v.includes("female") || v.includes("mia") || v.includes("rachel")) {
-    return "909b5ef9-8388-4da4-ba39-974a545edc91"; // Mia / Ava (American Female, expressive & natural)
-  }
-  if (v.includes("ryan") || v.includes("british")) {
-    return "62a6bdfa-1405-4be3-93be-31cff252f9f8"; // Ryan (British Male, calm & steady)
-  }
-  if (v.includes("sonia") || v.includes("alan")) {
-    return "43a25626-d785-49d1-ad25-b734496714fb"; // Alan / Sonia (Articulate & clear)
-  }
-  // Default natural American male voice for Rex
-  return "bac7d666-094d-4698-91fa-741d60fce662"; // Matt / Adam (American Male, confident & articulate)
-}
-
-// Trim gracefully at sentence boundary to ensure complete, natural thoughts
-function trimToSentenceBoundary(input: string, maxLen = 560): string {
+// Trim gracefully to 1-2 complete conversational sentences for snappy, natural speech
+function trimToConversationalSpeech(input: string, maxLen = 320): string {
   const trimmed = input.trim();
   if (trimmed.length <= maxLen) return trimmed;
   const sub = trimmed.slice(0, maxLen);
@@ -106,77 +289,64 @@ function trimToSentenceBoundary(input: string, maxLen = 560): string {
     sub.lastIndexOf("!\n"),
     sub.lastIndexOf("?\n")
   );
-  if (lastPunctuation > 180) {
+  if (lastPunctuation > 80) {
     return sub.slice(0, lastPunctuation + 1).trim();
   }
   const lastSpace = sub.lastIndexOf(" ");
-  if (lastSpace > 180) {
-    return sub.slice(0, lastSpace).trim() + "...";
+  if (lastSpace > 80) {
+    return sub.slice(0, lastSpace).trim() + ".";
   }
   return sub.trim();
 }
 
 /**
- * Cleans text for TTS synthesis: completely strips any asterisks stage directions
- * (e.g. *takes a deep breath*, *sighs*, *chuckles*) and replaces them with natural
- * acoustic micro-pauses (, ... ) so the voice engine inhales/pauses organically
- * without ever reading the literal words aloud.
+ * Prepares natural spoken dialogue by stripping technical artifacts, markdown, and code blocks
  */
 function cleanSpokenTextForTTS(raw: string): string {
-  let cleaned = raw
+  if (!raw) return "";
+
+  const cleaned = raw
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`[^`]+`/g, " ")
-    // Strip asterisks stage directions and action cues: *takes a deep breath*, *sighs*, etc.
-    .replace(/\*+[^*]+?\*+/g, ", ... ")
-    // Strip parenthetical stage directions: (takes a breath), (pauses), etc.
-    .replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat|laugh|smile)[^)]*\)/gi, ", ... ")
+    // Convert asterisks stage directions into natural comma micro-pauses
+    .replace(/\*+(?:takes?\s+(?:a\s+)?(?:deep\s+|little\s+|quick\s+|gentle\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ")
+    .replace(/\*+[^*]+?\*+/g, ", ")
+    // Convert parenthetical stage directions into natural commas
+    .replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat|laugh|smile)[^)]*\)/gi, ", ")
     // Strip XML/HTML style breath tags
-    .replace(/<breath\s*\/?>/gi, ", ... ")
+    .replace(/<breath\s*\/?>/gi, ", ")
     .replace(/<[^>]+>/g, " ")
-    // Strip unadorned literal breath words so TTS engines NEVER speak "takes a little breath" aloud
-    .replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ... ")
+    // Replace unadorned literal breath words with natural comma pauses
+    .replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ")
     // Remove markdown symbols
     .replace(/[_#~|]/g, "")
-    // Normalize ellipses and comma pauses
-    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ... ")
-    .replace(/\.{3,}/g, "...")
+    // Normalize commas and punctuation so voice never drags
+    .replace(/\s*,\s*,\s*/g, ", ")
+    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ")
+    .replace(/\.{3,}/g, ".")
     .replace(/\s+/g, " ")
     .replace(/^\s*[,.\s]+/, "")
     .trim();
 
-  return trimToSentenceBoundary(cleaned, 560);
+  return trimToConversationalSpeech(cleaned, 320);
 }
 
 /**
- * Injects natural conversational pacing and acoustic breath pauses for human-like delivery
+ * Injects natural conversational pacing and subtle human breath pauses without dragging
  */
 function injectHumanEmotionAndBreaths(text: string, emotion?: string): string {
   let humanized = text.trim();
 
-  // If text starts with conversational transitions, ensure smooth human breath
+  // Natural comma pacing on conversational transitions for organic breathing
   if (/^(yeah|yes|hey|alright|ok|okay|sure|got it|whew|so|well)\b/i.test(humanized)) {
-    humanized = humanized.replace(/^(yeah|yes|hey|alright|ok|okay|sure|got it|whew|so|well)[,.]?\s*/i, "$1, ... ");
+    humanized = humanized.replace(/^(yeah|yes|hey|alright|ok|okay|sure|got it|whew|so|well)[,.]?\s*/i, "$1, ");
   }
 
-  // If text has multiple sentences, insert an organic acoustic pause at major transitions
-  const sentences = humanized.split(/(?<=[.!?])\s+/);
-  if (sentences.length >= 2 && humanized.length > 50) {
-    humanized = sentences
-      .map((s, idx) => {
-        if (idx === 1 && /^(and|also|now|so|first|second|then|here|let's|let us|we can)\b/i.test(s)) {
-          return `, ... ${s}`;
-        }
-        if (idx === 2 && /^(finally|plus|overall|what's next|how does)\b/i.test(s)) {
-          return `, ... ${s}`;
-        }
-        return s;
-      })
-      .join(" ");
-  }
-
-  // Ensure friendly, authentic phrasing without robotic meta-tags
+  // Ensure clean, fluid sentence cadence without sluggish delays
   humanized = humanized
-    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ... ")
+    .replace(/\s*,\s*,\s*/g, ", ")
+    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ")
+    .replace(/\.{3,}/g, ".")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -188,8 +358,13 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const text = (body.text as string) || "";
     const voiceId = (body.voice as string) || "adam";
-    const emotion = (body.emotion as string) || "warm";
-    const preferGemini = Boolean(body.preferGemini || body.saveCredits);
+    const speed = (body.speed as string) || "normal";
+    const userPrompt = (body.userPrompt as string) || "";
+    let emotion = (body.emotion as string) || "auto";
+    if (!emotion || emotion === "auto") {
+      emotion = detectEmotionFromContext(userPrompt || text, text);
+    }
+    const explicitElevenKey = (body.elevenLabsApiKey as string) || req.headers.get("xi-api-key") || req.headers.get("x-elevenlabs-api-key") || "";
 
     if (!text.trim()) {
       return NextResponse.json({ ok: false, error: "Empty text" }, { status: 400 });
@@ -197,133 +372,140 @@ export async function POST(req: NextRequest) {
 
     // Prepare complete, grammatically sound spoken text with zero stage directions
     const cleanText = cleanSpokenTextForTTS(text);
+    if (!cleanText) {
+      return NextResponse.json({ ok: false, error: "Empty cleaned text" }, { status: 400 });
+    }
 
-    // 1. High-fidelity Chariot TTS synthesis if configured, not exhausted, and not in credit-saving mode
-    const chariotKey = process.env.CHARIOT_API_KEY?.trim() || getChariotConfig().chariotApiKey;
-    if (chariotKey && !preferGemini && !isChariotCreditsExhausted) {
-      try {
-        const chariotVoiceId = mapChariotVoice(voiceId);
-        const chariotRes = await fetch("https://api.chariot.in/v1/tts", {
-          method: "POST",
+    // Check memory cache first to return in <1ms with 0 quota consumption
+    const cacheKey = `${voiceId.toLowerCase()}:${emotion.toLowerCase()}:${speed.toLowerCase()}:${cleanText.toLowerCase()}`;
+    const cachedItem = getCachedAudio(cacheKey);
+    if (cachedItem) {
+      return new Response(cachedItem.buffer as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          "Content-Type": cachedItem.contentType,
+          "Content-Length": cachedItem.buffer.byteLength.toString(),
+          "X-TTS-Provider": "neural-cached",
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
+    }
+
+    // ── TIER 1: ElevenLabs TTS (Highest Emotional Nuance & Authentic Human Touch) ──
+    const elevenConfig = getElevenLabsConfig();
+    const activeElevenKey =
+      process.env.ELEVEN_LABS_API_KEY?.trim() ||
+      process.env.ELEVENLABS_API_KEY?.trim() ||
+      process.env.XI_API_KEY?.trim() ||
+      explicitElevenKey.trim() ||
+      elevenConfig.elevenLabsApiKey;
+
+    if (activeElevenKey) {
+      const elevenAudio = await synthesizeWithElevenLabs(
+        cleanText,
+        activeElevenKey,
+        elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
+        voiceId,
+        emotion
+      );
+      if (elevenAudio && elevenAudio.byteLength > 200) {
+        setCachedAudio(cacheKey, elevenAudio, "audio/mpeg");
+        return new Response(elevenAudio as unknown as BodyInit, {
+          status: 200,
           headers: {
-            "chariotai-api-key": chariotKey,
-            "Content-Type": "application/json",
+            "Content-Type": "audio/mpeg",
+            "Content-Length": elevenAudio.byteLength.toString(),
+            "X-TTS-Provider": "elevenlabs",
+            "Cache-Control": "no-cache",
           },
-          body: JSON.stringify({
-            voice_id: chariotVoiceId,
-            text: cleanText,
-          }),
         });
-
-        if (chariotRes.ok) {
-          const wavArrayBuffer = await chariotRes.arrayBuffer();
-          return new Response(wavArrayBuffer, {
-            status: 200,
-            headers: {
-              "Content-Type": "audio/wav",
-              "Content-Length": wavArrayBuffer.byteLength.toString(),
-              "X-TTS-Provider": "chariot",
-              "Cache-Control": "no-cache",
-            },
-          });
-        }
-
-        // If credits exhausted or rate limited, permanently latch to Gemini TTS to maintain 100% consistent voice
-        if (chariotRes.status === 403 || chariotRes.status === 402 || chariotRes.status === 429) {
-          isChariotCreditsExhausted = true;
-          console.info(`[api/voice/speak] Chariot credits depleted (${chariotRes.status}), stabilizing permanently on Gemini TTS.`);
-        } else {
-          console.warn(`[api/voice/speak] Chariot TTS status ${chariotRes.status}, routing to Gemini TTS...`);
-        }
-      } catch (chariotErr) {
-        console.warn("[api/voice/speak] Chariot error, routing to Gemini TTS:", chariotErr);
       }
     }
 
-    const ai = getGeminiClient();
-    if (!ai) {
-      return NextResponse.json({ ok: false, fallback: "browser", reason: "no_gemini_client" });
+    // ── TIER 2: Edge Neural TTS (Always reliable, high-fidelity neural voice, emotion/speed tuned) ──
+    const edgeAudio = await synthesizeWithEdgeTTS(cleanText, voiceId, emotion, speed);
+    if (edgeAudio && edgeAudio.byteLength > 200) {
+      setCachedAudio(cacheKey, edgeAudio, "audio/mpeg");
+      return new Response(edgeAudio as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Content-Length": edgeAudio.byteLength.toString(),
+          "X-TTS-Provider": "edge-neural",
+          "Cache-Control": "no-cache",
+        },
+      });
     }
 
-    const prebuiltVoice = mapVoiceName(voiceId);
-    const expressiveSpeechText = injectHumanEmotionAndBreaths(cleanText, emotion);
+    // ── TIER 3: Google Gemini Neural TTS (Expressive Studio Neural Voice) ──
+    const ai = getGeminiClient();
+    if (ai) {
+      const prebuiltVoice = mapVoiceName(voiceId);
+      const expressiveSpeechText = injectHumanEmotionAndBreaths(cleanText, emotion);
 
-    // Emotion style mapping for natural human pacing and breath
-    const emotionStyle =
-      emotion === "upbeat"
-        ? "Energetic, articulate software engineer teammate with natural conversational cadence, authentic vocal inflection, and organic breath pauses"
-        : emotion === "calm"
-        ? "Thoughtful, grounded software architect with calm cadence, natural breath pauses, and warm vocal inflection"
-        : emotion === "empathetic"
-        ? "Empathetic, attentive collaborator speaking naturally with gentle breath pauses and friendly cadence"
-        : "Warm, authentic human voice, conversational pacing, natural teammate inflection with organic breath pauses";
+      // Fast model sequence: flash-lite-tts is responsive and avoids 429 quota traps
+      const candidateModels = ["gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-tts"];
 
-    const candidateModels = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"];
-    let audioPart: any = null;
-
-    for (const model of candidateModels) {
-      try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: expressiveSpeechText,
-                },
-              ],
-            },
-          ] as any,
-          config: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: prebuiltVoice,
+      for (const model of candidateModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: expressiveSpeechText,
+                  },
+                ],
+              },
+            ] as any,
+            config: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: prebuiltVoice,
+                  },
                 },
               },
             },
-          },
-        });
+          });
 
-        const candidate = response.candidates?.[0];
-        const parts = candidate?.content?.parts || [];
-        const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
-        if (found?.inlineData?.data) {
-          audioPart = found;
-          break;
+          const candidate = response.candidates?.[0];
+          const parts = candidate?.content?.parts || [];
+          const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
+          if (found?.inlineData?.data) {
+            const base64Data = found.inlineData.data;
+            const rawBuffer = Buffer.from(base64Data, "base64");
+
+            const hasRiffHeader = rawBuffer.length >= 12 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
+            const finalWavBytes = hasRiffHeader
+              ? rawBuffer
+              : Buffer.from(pcm16ToWav(new Uint8Array(rawBuffer), 24000, 1));
+
+            // Store in memory cache for instant future replay
+            setCachedAudio(cacheKey, finalWavBytes, "audio/wav");
+
+            return new Response(finalWavBytes as unknown as BodyInit, {
+              status: 200,
+              headers: {
+                "Content-Type": "audio/wav",
+                "Content-Length": finalWavBytes.byteLength.toString(),
+                "X-TTS-Provider": "gemini",
+                "Cache-Control": "no-cache",
+              },
+            });
+          }
+        } catch {
+          // If 429 quota or unsupported, try next model in candidate list
+          continue;
         }
-      } catch (err) {
-        console.info(`[api/voice/speak] Model ${model} not available, trying next...`);
       }
     }
 
-    if (!audioPart || !audioPart.inlineData?.data) {
-      return NextResponse.json({ ok: false, fallback: "browser", reason: "no_audio_part" });
-    }
-
-    const base64Data = audioPart.inlineData.data;
-    const rawBuffer = Buffer.from(base64Data, "base64");
-
-    // Gemini 3.8 unary default returns a complete WAV file with RIFF header.
-    // Verify whether buffer already has RIFF header to avoid corrupting with a double-header.
-    const hasRiffHeader = rawBuffer.length >= 12 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
-    const finalWavBytes = hasRiffHeader
-      ? rawBuffer
-      : Buffer.from(pcm16ToWav(new Uint8Array(rawBuffer), 24000, 1));
-
-    return new Response(finalWavBytes.buffer as ArrayBuffer, {
-      status: 200,
-      headers: {
-        "Content-Type": "audio/wav",
-        "Content-Length": finalWavBytes.byteLength.toString(),
-        "X-TTS-Provider": "gemini",
-        "Cache-Control": "no-cache",
-      },
-    });
+    return NextResponse.json({ ok: false, fallback: "browser", reason: "tts_unavailable" });
   } catch (err: any) {
-    // Graceful fallback on quota limits or network errors
     return NextResponse.json(
       {
         ok: false,

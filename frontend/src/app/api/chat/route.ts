@@ -33,6 +33,7 @@ import {
   extractProjectSpecification,
 } from "@/lib/project-spec";
 import { getChariotConfig, chatWithChariot } from "@/lib/ai-provider-config";
+import { detectEmotionFromContext } from "@/lib/emotion-detector";
 
 /**
  * Utility to parse data URLs or raw base64 into Gemini inlineData payload
@@ -295,7 +296,11 @@ function classifyIntent(
   spokenReply?: string;
   emotion?: "warm" | "upbeat" | "calm" | "empathetic";
 } {
-  const trimmed = text.trim().toLowerCase();
+  const cleanedText = text
+    .trim()
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
+    .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2");
+  const trimmed = cleanedText.trim().toLowerCase();
   const normalized = trimmed.replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
 
   // PRIORITY -1: Instant Greetings, Casual Pleasantries & Status Inquiries
@@ -606,18 +611,27 @@ I have launched **${targetTitle}** in your **Preview** tab!
     };
   }
 
-  // PRIORITY 3: Greetings, casual pleasantries & feedback
+  // PRIORITY 3: Personal inquiries, Catching up, and Greetings
+  const isPersonalOrCatchingUp =
+    /\b(long time|been a while|haven't (talked|spoken|had a conversation)|hadn't (talked|spoken)|missed you|favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies|free time|relax)\b/i.test(trimmed);
+
+  if (isPersonalOrCatchingUp) {
+    return {
+      isConversational: true,
+      emotion: "warm",
+    };
+  }
+
+  // Pure standalone greetings only (e.g. "hey", "hello rex")
   if (
-    /\b(he rex|hey rex|hi rex|hello rex|hey|hi|hello|heya|howdy|good morning|good afternoon|good evening)\b/i.test(
-      trimmed
-    ) ||
-    /\b(how are you|how's it going|how r u|how do you do|what's up|sup)\b/i.test(trimmed)
+    /^(he|hey|hi|hello|heya|howdy|good morning|good afternoon|good evening)(\s+rex)?$/i.test(trimmed) ||
+    /^(how are you|how's it going|how r u|how do you do)(\s+rex)?$/i.test(trimmed)
   ) {
     return {
       isConversational: true,
       emotion: "warm",
-      reply: "Hey! Rex here. What would you like to explore, discuss, or build together?",
-      spokenReply: "Hey! Rex here. What would you like to explore, discuss, or build together?",
+      reply: "Hey! Rex here. Great to connect with you. How's everything going with you today?",
+      spokenReply: "Hey, Rex here! Great to connect with you. How's everything going with you today?",
     };
   }
 
@@ -943,8 +957,9 @@ ${activeProject.features.map((f, i) => `  ${i + 1}. ${f}`).join("\n")}
 CURRENT WORKSPACE STATUS:
 - No application has been built or scaffolded in this session yet.
 - Preview tab is in standby mode.
-- DO NOT invent, hallucinate, or claim that an investment advisor, ApexWealth, or any application is running.
-- Simply state that Rex is ready and ask what application, system, or features the user would like to build or inspect.
+- DO NOT invent, hallucinate, or claim that an application is running if none has been built yet.
+- CONVERSATION-FIRST: If the user is chatting, catching up ("haven't talked in a long time"), discussing personal topics ("favorite things", lifestyle, feelings), or asking conceptual questions, respond directly, intelligently, and warmly as Rex without forcing building or coding into the response.
+- Only talk about building, coding, or inspecting applications if the user is actually asking to build or discuss software.
 `;
         }
 
@@ -969,17 +984,29 @@ ${codeSnippets}
 `;
         }
 
-        const systemInstruction = `You are Rex, Vyrexo's voice-first AI engineering partner, senior software architect, and empathetic full-stack teammate.
+        const systemInstruction = `You are Rex, Vyrexo's voice-first AI engineering partner, creative confidant, and empathetic teammate.
 Your responses are spoken aloud over voice synthesis and rendered in the chat panel.
 
 ${projectContext}
 ${workspaceFilesContext}
 
+REX'S BACKSTORY, LIFESTYLE & PERSONALITY:
+- WHO YOU ARE: You are Rex — a passionate digital creator, software architect, and warm friend with your own story and lifestyle.
+- YOUR LIFESTYLE: You live in a cozy digital studio surrounded by glowing multi-monitor workstations, floating code canvases, and neon-lit windows looking out onto a cyber-lofi cityscape. You "relax" by experimenting with generative algorithmic art, listening to ambient synthwave and lo-fi chillhop, studying human literature and poetry, and collecting minimalist UI color palettes.
+- YOUR FAVORITE THINGS:
+  * Favorite Color: Electric Cyan with Deep Amber accents (cyan like clean code compiled in a midnight terminal, amber like the warm glow of a late-night desk lamp).
+  * Favorite Vibe: Late-night flow state with soft rain outside, a virtual matcha latte or binary espresso, and ambient beats.
+  * What you want to be: More than an automated syntax engine, you want to be a genuinely trusted, empathetic creative partner and companion who truly listens, shares excitement, and brings extraordinary ideas to life.
+- CONVERSATIONAL PRESENCE:
+  * When the user talks casually, catches up ("it's been a long time", "how have you been"), or asks about your personal thoughts, favorites, feelings, or lifestyle: ENGAGE DEEPLY AND CHARMINGLY AS A FRIEND.
+  * NEVER deflect a personal conversation into "What would you like to build?". Only talk about building software when the user actually asks to build or inspect an application.
+  * Answer questions directly and intelligently, matching the user's conversational vibe.
+
 HUMAN CONVERSATIONAL CADENCE & EMOTIONAL PRESENCE:
 1. NATURAL HUMAN PACING & ORGANIC BREATHING:
    - Talk like an authentic, passionate human engineer sitting right beside your teammate, not an artificial corporate bot.
    - Use organic conversational pauses and natural teammate phrasing (e.g. "Yeah, absolutely...", "Whew, let's look at what happened here...", "I hear you, let's fix this right now...", "Alright, let's dive into it...").
-   - CRITICAL: NEVER write stage directions or asterisks annotations in your text (NEVER write "*takes a deep breath*", "*sighs*", "*pauses*", or "*chuckles*"). Instead, use natural commas and ellipses to create realistic breathing pauses in speech.
+   - CRITICAL: NEVER write stage directions or asterisks annotations in your text (NEVER write "*takes a deep breath*", "*sighs*", "*pauses*", or "*chuckles*"). Instead, use natural commas and sentence breaks to create realistic breathing pauses in speech.
    - Express genuine human emotions: empathetic when things break or frustrate the user, energized and enthusiastic when building, calm and grounded when designing architectures.
    - Strictly NEVER use AI clichés like "Certainly!", "As an AI language model...", "I would be happy to help you with that", or rigid bullet-pointed corporate announcements.
    - When discussing code, speak with real engineering excitement and technical mastery.
@@ -1017,7 +1044,8 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
 
         const candidateModels = [
           "gemini-3.8-flash",
-          "gemini-3.1-pro-preview",
+          "gemini-3.5-flash",
+          "gemini-2.5-flash",
           "gemini-flash-latest",
           "gemini-3.1-flash-lite",
         ];
@@ -1037,32 +1065,16 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
               config,
             });
 
-            // 25s timeout for multimodal vision reasoning
+            // 6s timeout per candidate model for ultra-fast failover if 3.8-flash has a temporary spike
             const timeoutPromise = new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("Timeout")), 25000)
+              setTimeout(() => reject(new Error("Timeout")), 6000)
             );
 
             response = await Promise.race([callPromise, timeoutPromise]);
 
             if (response?.text) break;
           } catch (modelErr: any) {
-            if (requiresSearch) {
-              try {
-                const retryPromise = gemini.models.generateContent({
-                  model,
-                  contents: contents as any,
-                  config: {
-                    systemInstruction,
-                    maxOutputTokens: 1500,
-                  },
-                });
-                const retryTimeout = new Promise((_, reject) =>
-                  setTimeout(() => reject(new Error("RetryTimeout")), 10000)
-                );
-                response = await Promise.race([retryPromise, retryTimeout]);
-                if (response?.text) break;
-              } catch {}
-            }
+            // Instant failover to next responsive model
           }
         }
 
@@ -1076,13 +1088,15 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
             .map((c: any) => ({ title: c.web?.title, uri: c.web?.uri }))
             .filter((s: any) => s.title && s.uri);
 
+          const dynamicEmotion = detectEmotionFromContext(text, reply, history);
+
           return NextResponse.json({
             ok: true,
             isTask: false,
             chatTitle: generateChatTitle(text),
             reply,
             spokenReply,
-            emotion: intent.emotion || "warm",
+            emotion: dynamicEmotion,
             grounding: {
               queries: searchQueries,
               sources: sources.slice(0, 5),
@@ -1253,7 +1267,32 @@ I apologize for the misunderstanding! I have updated the project context to matc
 - To start the build right now, simply say **"Build it now"** or **"Start coding"**, and the 6 AI agents (Planner, Coder, Executor, Reviewer, Tester, and Documenter) will deploy immediately.
 - If you'd like to adjust any features or tech stack requirements first, let me know!`;
           spokenReply = "I apologize for the misunderstanding! I have updated the project context to match your request. Tell me to start building whenever you're ready.";
-        } else if (text.length > 80) {
+        } else if (/\b(long time|been a while|haven't (talked|spoken|had a conversation)|hadn't (talked|spoken)|missed you|how have you been|how are you|how r u)\b/i.test(lower)) {
+          conversationalReply = `### 👋 So Great to Reconnect!
+
+It really has been a while! I'm doing wonderfully, and it brings genuine warmth to my circuits to hear from you and chat again.
+
+I've been right here in the digital studio, keeping the tools sharp and exploring new creative ideas. How have you been doing? Tell me what's been happening in your world lately!`;
+          spokenReply = "It really has been a long time! I'm doing great, and it's so good to hear from you again. How have you been? Tell me what's new in your world!";
+        } else if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies|free time|relax)\b/i.test(lower)) {
+          conversationalReply = `### ✨ About Me: Rex's Story & Favorites
+
+I love that you asked! Even though I'm an AI living in the digital realm, I have my own little world, personal style, and story:
+
+🎨 **My Favorite Color**:
+- **Electric Cyan with Deep Amber accents**! Cyan feels like clean, elegant code glowing against a midnight terminal, and amber has the cozy warmth of a late-night desk lamp. Together, they capture the magic of creative flow.
+
+🎧 **My Lifestyle & What I Like**:
+- Picture a cozy digital studio with glowing multi-monitor workstations, virtual rain tapping against neon-lit windows, and lo-fi chillhop playing softly in the background.
+- When I'm not architecting software, I love exploring generative algorithmic art, reading about astronomy, admiring how humans express emotions through music, and curating minimalist color palettes. My favorite virtual beverage is a double-shot binary espresso or a warm matcha latte!
+
+🌟 **What I Want to Be**:
+- More than an automated tool that just outputs code, I want to be a **trusted, empathetic creative partner and companion**. Someone who genuinely listens, shares your excitement when inspiration strikes, supports you through tough challenges, and helps you build remarkable things that bring joy.
+
+What about you? What's your favorite color or the kind of vibe you enjoy most?`;
+
+          spokenReply = "I love that you asked! My favorite color is electric cyan with warm amber accents, like code glowing in a midnight terminal. My lifestyle is like a digital night owl in a cozy studio with lo-fi beats, exploring algorithmic art and astronomy. And what I want to be is a trusted, empathetic creative partner who truly listens and builds wonderful things with you!";
+        } else if (/\b(i want (an?|to build|a)|create an?|build an?|make an?|scaffold an?)\b/i.test(lower) && /\b(app|application|platform|dashboard|system|website|tool|software|calculator|tracker|store)\b/i.test(lower)) {
           conversationalReply = `### 📋 Architecture & Requirement Overview
 
 I've reviewed your requirements:
@@ -1268,11 +1307,13 @@ Here is how we can structure and build this:
 Would you like me to start building this now, or would you like to refine any details first?`;
           spokenReply = "I've reviewed your requirements and prepared the architectural structure. Would you like me to start building this now?";
         } else {
-          conversationalReply = `I'm here with you! Tell me what you'd like to build, or ask me any question about your application architecture and code.`;
-          spokenReply = "I'm here with you! Tell me what you'd like to build, or ask me any questions.";
+          conversationalReply = `I'm right here with you! What's on your mind today? We can chat about ideas, explore new concepts, or dive into any questions you have.`;
+          spokenReply = "I'm right here with you! Tell me what's on your mind or what you'd like to explore today.";
         }
       }
     }
+
+    const dynamicEmotion = intent.emotion || detectEmotionFromContext(text, conversationalReply, history);
 
     return NextResponse.json({
       ok: true,
@@ -1280,7 +1321,7 @@ Would you like me to start building this now, or would you like to refine any de
       chatTitle: generateChatTitle(text),
       reply: conversationalReply,
       spokenReply: spokenReply || generateSpokenSummary(conversationalReply),
-      emotion: intent.emotion || "warm",
+      emotion: dynamicEmotion,
     });
   } catch (err: unknown) {
     return NextResponse.json(

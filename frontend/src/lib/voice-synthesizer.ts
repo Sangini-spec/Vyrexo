@@ -57,7 +57,7 @@ export interface VoiceProfile {
   baseRate: number;
 }
 
-// Exactly 4 curated voice profiles: 2 male (American & British), 2 female (American & British)
+// Curated 6 voice profiles (3 male, 3 female)
 export const VOICE_PROFILES: Record<string, VoiceProfile> = {
   // ── MALE VOICES ──
   adam: {
@@ -75,25 +75,44 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
       "Alex",
       "Fred",
     ],
-    basePitch: 0.88,
-    baseRate: 1.0,
+    basePitch: 0.98,
+    baseRate: 1.08,
   },
-  ryan: {
-    name: "Ryan",
+  brian: {
+    name: "Brian",
     gender: "Male",
     accent: "British",
-    vibe: "Calm, steady & articulate British cadence",
+    vibe: "Calm, thoughtful & narrative British cadence",
     preferredNames: [
+      "Microsoft Brian Online (Natural)",
+      "Microsoft Brian",
       "Microsoft Ryan Online (Natural)",
-      "Microsoft George Online (Natural)",
-      "Microsoft George",
+      "Microsoft Ryan",
       "Google UK English Male",
       "Daniel",
       "Oliver",
       "Arthur",
     ],
-    basePitch: 0.86,
-    baseRate: 0.98,
+    basePitch: 0.96,
+    baseRate: 1.05,
+  },
+  ryan: {
+    name: "Brian",
+    gender: "Male",
+    accent: "British",
+    vibe: "Calm, steady & articulate British cadence",
+    preferredNames: [
+      "Microsoft Brian Online (Natural)",
+      "Microsoft Brian",
+      "Microsoft Ryan Online (Natural)",
+      "Microsoft Ryan",
+      "Google UK English Male",
+      "Daniel",
+      "Oliver",
+      "Arthur",
+    ],
+    basePitch: 0.96,
+    baseRate: 1.05,
   },
 
   // ── FEMALE VOICES ──
@@ -111,8 +130,23 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
       "Allison",
       "Microsoft Zira",
     ],
-    basePitch: 1.05,
-    baseRate: 1.02,
+    basePitch: 1.04,
+    baseRate: 1.08,
+  },
+  rachel: {
+    name: "Rachel",
+    gender: "Female",
+    accent: "American",
+    vibe: "Calm, compassionate & deeply empathetic American voice",
+    preferredNames: [
+      "Microsoft Jenny Online (Natural)",
+      "Microsoft Aria Online (Natural)",
+      "Google US English",
+      "Samantha",
+      "Victoria",
+    ],
+    basePitch: 1.02,
+    baseRate: 1.04,
   },
   sonia: {
     name: "Sonia",
@@ -128,8 +162,48 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
       "Stephanie",
       "Microsoft Hazel",
     ],
+    basePitch: 1.02,
+    baseRate: 1.06,
+  },
+  charlotte: {
+    name: "Charlotte",
+    gender: "Female",
+    accent: "British",
+    vibe: "Elegant, warm & natural British cadence",
+    preferredNames: [
+      "Microsoft Sonia Online (Natural)",
+      "Microsoft Libby Online (Natural)",
+      "Google UK English Female",
+      "Serena",
+    ],
+    basePitch: 1.02,
+    baseRate: 1.05,
+  },
+  george: {
+    name: "George",
+    gender: "Male",
+    accent: "American",
+    vibe: "Warm, raspy & articulate expressive male voice",
+    preferredNames: [
+      "Microsoft Guy Online (Natural)",
+      "Microsoft David Online (Natural)",
+      "Alex",
+    ],
+    basePitch: 0.95,
+    baseRate: 1.06,
+  },
+  nicole: {
+    name: "Nicole",
+    gender: "Female",
+    accent: "American",
+    vibe: "Soft, gentle & caring conversational female voice",
+    preferredNames: [
+      "Microsoft Jenny Online (Natural)",
+      "Google US English",
+      "Samantha",
+    ],
     basePitch: 1.05,
-    baseRate: 0.98,
+    baseRate: 1.04,
   },
 
   // ── BACKWARD-COMPATIBILITY FALLBACK ALIASES ──
@@ -139,17 +213,8 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
     accent: "American",
     vibe: "Deep, articulate & conversational American voice",
     preferredNames: ["Microsoft Guy Online (Natural)", "Microsoft David", "Alex"],
-    basePitch: 0.88,
-    baseRate: 1.0,
-  },
-  brian: {
-    name: "Ryan",
-    gender: "Male",
-    accent: "British",
-    vibe: "Calm, steady & articulate British cadence",
-    preferredNames: ["Microsoft Ryan Online (Natural)", "Google UK English Male", "Daniel"],
-    basePitch: 0.86,
-    baseRate: 0.98,
+    basePitch: 0.98,
+    baseRate: 1.08,
   },
   antoni: {
     name: "Adam",
@@ -157,8 +222,8 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
     accent: "American",
     vibe: "Deep, articulate & conversational American voice",
     preferredNames: ["Microsoft Guy Online (Natural)", "Microsoft David", "Alex"],
-    basePitch: 0.88,
-    baseRate: 1.0,
+    basePitch: 0.98,
+    baseRate: 1.08,
   },
   josh: {
     name: "Adam",
@@ -166,26 +231,8 @@ export const VOICE_PROFILES: Record<string, VoiceProfile> = {
     accent: "American",
     vibe: "Deep, articulate & conversational American voice",
     preferredNames: ["Microsoft Guy Online (Natural)", "Alex"],
-    basePitch: 0.88,
-    baseRate: 1.0,
-  },
-  rachel: {
-    name: "Ava",
-    gender: "Female",
-    accent: "American",
-    vibe: "Warm, natural & clear American voice",
-    preferredNames: ["Microsoft Jenny Online (Natural)", "Google US English", "Samantha"],
-    basePitch: 1.05,
-    baseRate: 1.02,
-  },
-  nicole: {
-    name: "Ava",
-    gender: "Female",
-    accent: "American",
-    vibe: "Warm, natural & clear American voice",
-    preferredNames: ["Microsoft Jenny Online (Natural)", "Google US English", "Samantha"],
-    basePitch: 1.05,
-    baseRate: 1.02,
+    basePitch: 0.98,
+    baseRate: 1.08,
   },
 };
 
@@ -216,19 +263,20 @@ export function cleanTextForSpeech(raw: string): string {
   // Strip markdown links [text](url) -> text
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 
-  // Strip asterisks stage directions and breath cues (*takes a deep breath*, *sighs*, etc.)
-  text = text.replace(/\*+(?:takes?\s+(?:a\s+)?(?:deep\s+|little\s+|quick\s+|gentle\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ... ");
-  text = text.replace(/\*+[^*]+?\*+/g, ", ... ");
+  // Turn asterisks stage directions and breath cues (*takes a deep breath*, *sighs*, *chuckles*, etc.)
+  // into organic comma micro-pauses (, ) so speech takes a human breath without long awkward silences
+  text = text.replace(/\*+(?:takes?\s+(?:a\s+)?(?:deep\s+|little\s+|quick\s+|gentle\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ");
+  text = text.replace(/\*+[^*]+?\*+/g, ", ");
 
-  // Strip parenthetical stage directions: (takes a breath), (pauses), etc.
-  text = text.replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat|laugh|smile)[^)]*\)/gi, ", ... ");
+  // Turn parenthetical stage directions into natural commas
+  text = text.replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat|laugh|smile)[^)]*\)/gi, ", ");
 
-  // Strip XML/HTML style breath tags: <breath>, <breath/>
-  text = text.replace(/<breath\s*\/?>/gi, ", ... ");
+  // Strip XML/HTML style breath tags
+  text = text.replace(/<breath\s*\/?>/gi, ", ");
   text = text.replace(/<[^>]+>/g, " ");
 
-  // Strip unadorned literal breath words so TTS engines NEVER speak "takes a little breath" aloud
-  text = text.replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ... ");
+  // Replace unadorned literal breath words with natural comma pauses
+  text = text.replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ");
 
   // Strip markdown formatting characters
   text = text.replace(/[*_~#]/g, "");
@@ -239,9 +287,10 @@ export function cleanTextForSpeech(raw: string): string {
   // Convert bullets
   text = text.replace(/^\s*[-•*]\s+/gm, " ");
 
-  // Clean excessive pauses, whitespace and linebreaks
-  text = text.replace(/\s*,\s*\.\.\.\s*,?/g, ", ... ");
-  text = text.replace(/\.{3,}/g, "...");
+  // Clean excessive pauses, multiple commas, and whitespace
+  text = text.replace(/\s*,\s*,\s*/g, ", ");
+  text = text.replace(/\s*,\s*\.\.\.\s*,?/g, ", ");
+  text = text.replace(/\.{3,}/g, ".");
   text = text.replace(/\n\s*\n/g, ". ").replace(/\n/g, " ");
   text = text.replace(/\s{2,}/g, " ").trim();
 
@@ -249,13 +298,13 @@ export function cleanTextForSpeech(raw: string): string {
 }
 
 /**
- * Breaks spoken text into natural, bite-sized conversational sentences.
- * This completely eliminates Chrome's 15-second speech synthesis buffer cutoff.
+ * Breaks spoken text into natural, complete conversational sentences.
+ * Keeps entire clauses unified so speech is fluid, continuous, and never stutters.
  */
 export function splitIntoSpeechChunks(text: string): string[] {
   if (!text) return [];
 
-  // Match sentences ending in punctuation or clause boundaries
+  // Match sentences ending in punctuation
   const rawChunks = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
   const results: string[] = [];
 
@@ -263,12 +312,12 @@ export function splitIntoSpeechChunks(text: string): string[] {
     const trimmed = chunk.trim();
     if (!trimmed) continue;
 
-    // If a sentence is very long (> 130 chars), split at commas or semi-colons for natural breath pauses
-    if (trimmed.length > 130) {
+    // Only split if a single uninterrupted sentence is exceptionally long (> 240 chars)
+    if (trimmed.length > 240) {
       const subParts = trimmed.split(/([,;:]\s+)/);
       let current = "";
       for (const part of subParts) {
-        if ((current + part).length > 120 && current.length > 20) {
+        if ((current + part).length > 200 && current.length > 30) {
           results.push(current.trim());
           current = part;
         } else {
@@ -287,9 +336,12 @@ export function splitIntoSpeechChunks(text: string): string[] {
 const FEMALE_VOICE_PATTERNS = /(female|woman|zira|jenny|aria|samantha|victoria|karen|susan|catherine|lisa|stephanie|hazel|helena|eva|fiona|veena|tessa|moira|google us english|sonia|ava)/i;
 const MALE_VOICE_PATTERNS = /(male|man|guy|david|mark|george|richard|daniel|oliver|alex|fred|google uk english male|christopher|ryan|andrew|adam|brian)/i;
 
+// Cache resolved browser voice per profile to guarantee 100% voice consistency across all turns
+const resolvedVoiceCache = new Map<string, SpeechSynthesisVoice>();
+
 /**
  * Finds the highest quality, most natural browser voice matching the requested profile.
- * Strictly honors requested Gender so male profiles never sound female.
+ * Locks the voice for the session so Rex's timbre never flips mid-dialogue.
  */
 export function pickBrowserVoice(
   profileId: string,
@@ -297,9 +349,16 @@ export function pickBrowserVoice(
 ): SpeechSynthesisVoice | null {
   if (!availableVoices || availableVoices.length === 0) return null;
 
+  const cached = resolvedVoiceCache.get(profileId);
+  if (cached && availableVoices.some((v) => v.name === cached.name)) {
+    return cached;
+  }
+
   const profile = VOICE_PROFILES[profileId] || VOICE_PROFILES.adam;
   const isMale = profile.gender === "Male";
   const isBritish = profile.accent === "British";
+
+  let selected: SpeechSynthesisVoice | null = null;
 
   // 1. First attempt: match against profile's specific curated preferred voice list
   for (const preferred of profile.preferredNames) {
@@ -309,65 +368,60 @@ export function pickBrowserVoice(
         v.voiceURI.toLowerCase().includes(preferred.toLowerCase())
     );
     if (match) {
-      // If profile is male, verify this matched voice is not an accidental female match
       if (isMale && FEMALE_VOICE_PATTERNS.test(match.name) && !MALE_VOICE_PATTERNS.test(match.name)) {
         continue;
       }
-      return match;
+      selected = match;
+      break;
     }
   }
 
-  // 2. Exact Accent & Gender candidate filtering (prioritize en-GB for British, en-US for American)
-  const targetPrefix = isBritish ? "en-gb" : "en-us";
-  const accentVoices = availableVoices.filter((v) =>
-    v.lang.replace("_", "-").toLowerCase().startsWith(targetPrefix)
-  );
+  // 2. Exact Accent & Gender candidate filtering
+  if (!selected) {
+    const targetPrefix = isBritish ? "en-gb" : "en-us";
+    const accentVoices = availableVoices.filter((v) =>
+      v.lang.replace("_", "-").toLowerCase().startsWith(targetPrefix)
+    );
 
-  if (accentVoices.length > 0) {
-    if (isMale) {
-      const maleAccent = accentVoices.find(
-        (v) => MALE_VOICE_PATTERNS.test(v.name) && !FEMALE_VOICE_PATTERNS.test(v.name)
-      );
-      if (maleAccent) return maleAccent;
-      const nonFemale = accentVoices.filter((v) => !FEMALE_VOICE_PATTERNS.test(v.name));
-      if (nonFemale.length > 0) return nonFemale[0];
-    } else {
-      const femaleAccent = accentVoices.find((v) => FEMALE_VOICE_PATTERNS.test(v.name));
-      if (femaleAccent) return femaleAccent;
-      const nonMale = accentVoices.filter((v) => !MALE_VOICE_PATTERNS.test(v.name));
-      if (nonMale.length > 0) return nonMale[0];
+    if (accentVoices.length > 0) {
+      if (isMale) {
+        const maleAccent = accentVoices.find(
+          (v) => MALE_VOICE_PATTERNS.test(v.name) && !FEMALE_VOICE_PATTERNS.test(v.name)
+        );
+        selected = maleAccent || accentVoices.filter((v) => !FEMALE_VOICE_PATTERNS.test(v.name))[0] || null;
+      } else {
+        const femaleAccent = accentVoices.find((v) => FEMALE_VOICE_PATTERNS.test(v.name));
+        selected = femaleAccent || accentVoices.filter((v) => !MALE_VOICE_PATTERNS.test(v.name))[0] || null;
+      }
     }
   }
 
   // 3. Fallback: Any English voices matching gender
-  const englishVoices = availableVoices.filter((v) => v.lang.startsWith("en"));
-  const voicePool = englishVoices.length > 0 ? englishVoices : availableVoices;
+  if (!selected) {
+    const englishVoices = availableVoices.filter((v) => v.lang.startsWith("en"));
+    const voicePool = englishVoices.length > 0 ? englishVoices : availableVoices;
 
-  if (isMale) {
-    // Strictly find voices identified as male
-    const maleCandidate = voicePool.find(
-      (v) => MALE_VOICE_PATTERNS.test(v.name) && !FEMALE_VOICE_PATTERNS.test(v.name)
-    );
-    if (maleCandidate) return maleCandidate;
-
-    // Reject known female voices
-    const nonFemale = voicePool.filter((v) => !FEMALE_VOICE_PATTERNS.test(v.name));
-    if (nonFemale.length > 0) return nonFemale[0];
-  } else {
-    // Female profile: prioritize female voices
-    const femaleCandidate = voicePool.find((v) => FEMALE_VOICE_PATTERNS.test(v.name));
-    if (femaleCandidate) return femaleCandidate;
-
-    const nonMale = voicePool.filter((v) => !MALE_VOICE_PATTERNS.test(v.name));
-    if (nonMale.length > 0) return nonMale[0];
+    if (isMale) {
+      const maleCandidate = voicePool.find(
+        (v) => MALE_VOICE_PATTERNS.test(v.name) && !FEMALE_VOICE_PATTERNS.test(v.name)
+      );
+      selected = maleCandidate || voicePool.filter((v) => !FEMALE_VOICE_PATTERNS.test(v.name))[0] || availableVoices[0];
+    } else {
+      const femaleCandidate = voicePool.find((v) => FEMALE_VOICE_PATTERNS.test(v.name));
+      selected = femaleCandidate || voicePool.filter((v) => !MALE_VOICE_PATTERNS.test(v.name))[0] || availableVoices[0];
+    }
   }
 
-  // Fallback to first available voice
-  return availableVoices[0] || null;
+  if (selected) {
+    resolvedVoiceCache.set(profileId, selected);
+  }
+
+  return selected;
 }
 
 /**
  * Computes humanized pitch and rate based on voice profile, user speed preference, and emotion tone.
+ * Calibrated for a prompt, natural conversational tempo (never sluggish or dragging).
  */
 export function calculateAcousticParams(
   settings: VoiceSettings,
@@ -376,7 +430,7 @@ export function calculateAcousticParams(
   const profile = VOICE_PROFILES[settings.voice] || VOICE_PROFILES.adam;
 
   let speedMultiplier = 1.0;
-  if (settings.speed === "slow") speedMultiplier = 0.9;
+  if (settings.speed === "slow") speedMultiplier = 0.94;
   if (settings.speed === "fast") speedMultiplier = 1.15;
 
   let emotionPitchOffset = 0.0;
@@ -384,33 +438,31 @@ export function calculateAcousticParams(
 
   switch (settings.emotion) {
     case "upbeat":
-      emotionPitchOffset = +0.07;
-      emotionRateOffset = +0.05;
+      emotionPitchOffset = +0.04;
+      emotionRateOffset = +0.04;
       break;
     case "warm":
-      emotionPitchOffset = +0.03;
-      emotionRateOffset = 0.0;
+      emotionPitchOffset = +0.02;
+      emotionRateOffset = +0.01;
       break;
     case "calm":
-      emotionPitchOffset = -0.04;
-      emotionRateOffset = -0.06;
+      emotionPitchOffset = -0.02;
+      emotionRateOffset = -0.02;
       break;
     case "empathetic":
-      emotionPitchOffset = +0.02;
-      emotionRateOffset = -0.04;
+      emotionPitchOffset = +0.01;
+      emotionRateOffset = 0.0;
       break;
   }
 
   let basePitch = profile.basePitch;
 
-  // If user chose a male voice, but browser voice is a generic or female voice like "Google US English",
-  // pitch-shift downward to produce a deep masculine resonance rather than a female voice
   if (profile.gender === "Male" && actualVoiceName && FEMALE_VOICE_PATTERNS.test(actualVoiceName)) {
-    basePitch = 0.78;
+    basePitch = 0.88;
   }
 
-  const finalPitch = Math.max(0.68, Math.min(1.4, basePitch + emotionPitchOffset));
-  const finalRate = Math.max(0.7, Math.min(1.5, profile.baseRate * speedMultiplier + emotionRateOffset));
+  const finalPitch = Math.max(0.80, Math.min(1.25, basePitch + emotionPitchOffset));
+  const finalRate = Math.max(1.0, Math.min(1.28, profile.baseRate * speedMultiplier + emotionRateOffset));
 
   return { pitch: finalPitch, rate: finalRate };
 }

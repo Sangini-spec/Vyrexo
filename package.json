@@ -13,7 +13,8 @@
     "lint": "npm run lint --prefix frontend"
   },
   "dependencies": {
-    "jszip": "^3.10.2"
+    "jszip": "^3.10.2",
+    "msedge-tts": "^2.0.9"
   },
   "devDependencies": {
     "@types/jszip": "^3.4.1"

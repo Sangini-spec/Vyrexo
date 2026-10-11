@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo } from "react";
+import React from "react";
 
 export interface AgentStep {
   agent: string;
@@ -110,129 +110,10 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
-  // Compute current status and active task for each of the six agents
-  const cohortStatus = useMemo(() => {
-    return SIX_AGENTS.map((agent) => {
-      // Find matching steps for this agent
-      const matching = steps.filter(
-        (s) => s.agent.toLowerCase() === agent.id || s.agent.toLowerCase().includes(agent.id)
-      );
-
-      let status: "standby" | "pending" | "running" | "completed" | "failed" = "standby";
-      let activeWork = agent.role;
-
-      if (matching.length > 0) {
-        const runningStep = matching.find((s) => s.status === "running");
-        const failedStep = matching.find((s) => s.status === "failed");
-        const pendingStep = matching.find((s) => s.status === "pending");
-        const completedSteps = matching.filter((s) => s.status === "completed");
-
-        if (runningStep) {
-          status = "running";
-          activeWork = runningStep.description;
-        } else if (failedStep) {
-          status = "failed";
-          activeWork = failedStep.description;
-        } else if (pendingStep && completedSteps.length === 0) {
-          status = "pending";
-          activeWork = pendingStep.description;
-        } else if (completedSteps.length === matching.length) {
-          status = "completed";
-          activeWork = completedSteps[completedSteps.length - 1].description;
-        } else {
-          status = "pending";
-          activeWork = pendingStep ? pendingStep.description : agent.role;
-        }
-      }
-
-      return {
-        ...agent,
-        status,
-        activeWork,
-      };
-    });
-  }, [steps]);
-
   const doneCount = steps.filter((s) => s.status === "completed").length;
-  const isExecuting = steps.some((s) => s.status === "running");
 
   return (
     <div className="space-y-4">
-      {/* ── 6-AGENT ARCHITECTURE COHORT PANEL ──────────────────────────────── */}
-      <div className="rounded-lg border border-[var(--border2)] bg-[var(--surface2)] p-2.5 shadow-sm">
-        <div className="flex items-center justify-between pb-2 mb-2 border-b border-[var(--border)]">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--ice)] flex items-center gap-1">
-              <span>🤖</span> Autonomous 6-Agent Cohort
-            </span>
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-[var(--midnight-dim)] text-[var(--steel)] font-mono">
-              6 Active
-            </span>
-          </div>
-          <div className="flex items-center gap-1">
-            <span className={`w-1.5 h-1.5 rounded-full ${isExecuting ? "bg-amber-400 animate-ping" : "bg-emerald-400"}`} />
-            <span className="text-[10px] text-[var(--muted)] font-mono">
-              {isExecuting ? "Orchestrating" : doneCount > 0 ? "Verified" : "Standby"}
-            </span>
-          </div>
-        </div>
-
-        {/* 6-Agent Status Grid */}
-        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-          {cohortStatus.map((agent) => {
-            const isRunning = agent.status === "running";
-            const isDone = agent.status === "completed";
-            const isFailed = agent.status === "failed";
-            const isPending = agent.status === "pending";
-
-            return (
-              <div
-                key={agent.id}
-                className={`p-2 rounded-md border transition-all text-left ${
-                  isRunning
-                    ? `${agent.activeBg} border-amber-500/50 shadow-sm`
-                    : isDone
-                    ? "border-emerald-500/30 bg-emerald-500/5"
-                    : isFailed
-                    ? "border-rose-500/30 bg-rose-500/10"
-                    : isPending
-                    ? "border-[var(--border2)] bg-[var(--midnight)]/40"
-                    : "border-[var(--border)] bg-[var(--midnight)]/20 opacity-80"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1 mb-1">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-xs shrink-0">{agent.icon}</span>
-                    <span className={`text-[11px] font-bold truncate ${agent.color}`}>
-                      {agent.name}
-                    </span>
-                  </div>
-                  {/* Status Badge */}
-                  <span
-                    className={`text-[8px] font-bold uppercase px-1 py-0.5 rounded shrink-0 ${
-                      isRunning
-                        ? "bg-amber-500/20 text-amber-300 animate-pulse"
-                        : isDone
-                        ? "bg-emerald-500/20 text-emerald-400"
-                        : isFailed
-                        ? "bg-rose-500/20 text-rose-400"
-                        : isPending
-                        ? "bg-[var(--border2)] text-[var(--muted2)]"
-                        : "bg-[var(--surface)] text-[var(--muted)]"
-                    }`}
-                  >
-                    {isRunning ? "Active" : isDone ? "Done" : isFailed ? "Failed" : isPending ? "Waiting" : "Ready"}
-                  </span>
-                </div>
-
-                <div className="text-[10px] text-[var(--muted2)] line-clamp-1 leading-snug">
-                  {agent.activeWork}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
 
       {/* Narration box */}
       {narration && (
@@ -276,7 +157,7 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
       )}
 
       {/* Step-by-step Timeline */}
-      <div className="flex flex-col gap-[4px]">
+      <div className="flex flex-col gap-[6px]">
         {steps.map((step, i) => {
           const style = AGENT_STYLES[step.agent] || AGENT_STYLES.executor;
           const isActive = step.status === "running";
@@ -286,7 +167,7 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
           return (
             <div
               key={i}
-              className={`flex items-start gap-[9px] p-[9px_10px] rounded-[7px] border transition-all ${
+              className={`p-[10px_12px] rounded-[8px] border transition-all ${
                 isActive
                   ? "border-[#7B93B044] bg-[#7B93B010] shadow-sm ring-1 ring-[#7B93B022]"
                   : isCompleted
@@ -296,68 +177,53 @@ export function AgentTimeline({ steps, narration }: AgentTimelineProps) {
                   : "border-[#14141a] bg-[var(--surface2)]"
               }`}
             >
-              {/* Status-aware icon: check when done, spinner when running, else agent letter */}
-              <div
-                className={`w-6 h-6 rounded-[5px] flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
-                  isCompleted
-                    ? "bg-[#16a34a22] text-[#4ade80]"
-                    : isFailed
-                    ? "bg-rose-500/20 text-rose-400"
-                    : isActive
-                    ? "bg-amber-500/20 text-amber-300"
-                    : `${style.bg} ${style.color}`
-                }`}
-              >
-                {isCompleted ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                ) : isFailed ? (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                ) : isActive ? (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin">
-                    <path d="M21 12a9 9 0 1 1-6.2-8.5" />
-                  </svg>
-                ) : (
-                  style.icon
-                )}
-              </div>
-
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-[7px]">
-                  <span className={`text-[10px] font-bold uppercase tracking-[0.5px] ${style.color}`}>
+              {/* Header row: Status indicator + Agent Name + Completion state */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      isCompleted
+                        ? "bg-[#4ade80] shadow-[0_0_6px_#4ade8088]"
+                        : isActive
+                        ? "bg-amber-400 animate-pulse shadow-[0_0_6px_#f59e0b88]"
+                        : isFailed
+                        ? "bg-rose-500"
+                        : "bg-[var(--border2)]"
+                    }`}
+                  />
+                  <span className={`text-[11px] font-bold uppercase tracking-[0.5px] truncate ${style.color}`}>
                     {step.agent}
                   </span>
-                  <span className={`text-[9px] px-[6px] py-[1px] rounded-[3px] font-semibold ${STATUS_STYLES[step.status]}`}>
-                    {step.status === "completed"
-                      ? "Done"
-                      : step.status === "running"
-                      ? "Running"
-                      : step.status === "failed"
-                      ? "Error"
-                      : "Pending"}
-                  </span>
                 </div>
-                <div className="text-xs text-[var(--text4)] mt-[2px] leading-relaxed">
-                  {step.description}
-                </div>
-                {step.files && step.files.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-[5px]">
-                    {step.files.map((file, j) => (
-                      <span
-                        key={j}
-                        className="text-[10px] px-[7px] py-[2px] rounded-[3px] bg-[var(--surface)] text-[var(--steel)] font-mono border border-[var(--border2)]"
-                      >
-                        {file}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                <span className={`text-[9.5px] px-[7px] py-[1.5px] rounded-[4px] font-semibold flex-shrink-0 ${STATUS_STYLES[step.status]}`}>
+                  {step.status === "completed"
+                    ? "Done"
+                    : step.status === "running"
+                    ? "Running"
+                    : step.status === "failed"
+                    ? "Error"
+                    : "Pending"}
+                </span>
               </div>
+
+              {/* Task description */}
+              <div className="text-xs text-[var(--text4)] mt-1.5 leading-relaxed pl-4">
+                {step.description}
+              </div>
+
+              {/* Associated files */}
+              {step.files && step.files.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2 pl-4">
+                  {step.files.map((file, j) => (
+                    <span
+                      key={j}
+                      className="text-[10px] px-[7px] py-[2px] rounded-[3px] bg-[var(--surface)] text-[var(--steel)] font-mono border border-[var(--border2)]"
+                    >
+                      {file}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}

@@ -28,6 +28,7 @@ import {
 } from "@/app/api/chat/calculator-files";
 import { extractProjectName, generateChatTitle, extractProjectSpecification } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
+import { detectEmotionFromContext } from "@/lib/emotion-detector";
 
 export function checkFastPathGreetingOrCommand(text: string): {
   reply: string;
@@ -37,6 +38,50 @@ export function checkFastPathGreetingOrCommand(text: string): {
   const t = text.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
+  // Frustration, Bug Fatigue, Sadness, Stress or Personal Concerns (Autonomous Empathetic Shift)
+  if (
+    /\b(sad|depressed|lonely|burnt\s*out|exhausted|struggling|bad\s+day|rough\s+day|hard\s+time|so\s+frustrated|hate\s+this|why\s+is\s+this\s+(still\s+)?broken|wtf|damn\s+it)\b/i.test(
+      t
+    )
+  ) {
+    return {
+      reply: "I completely hear you, and I'm really sorry you're dealing with this right now. Take a deep breath—we're going to get through it together. Tell me what's breaking or what's on your mind, and let's work through it step-by-step.",
+      spoken: "I hear you, and I'm sorry you're dealing with this. Take a breath—we're in this together. Tell me what's breaking or on your mind, and let's work through it.",
+      emotion: "empathetic",
+    };
+  }
+
+  // Celebrations & Breakthrough Wins (Autonomous Upbeat Shift)
+  if (
+    /\b(it\s+worked|finally\s+worked|holy\s+shit\s+it\s+works|omg\s+it\s+worked|we\s+did\s+it|nailed\s+it|let('s|s)\s+go+|boom|awesome|super\s+happy)\b/i.test(
+      t
+    )
+  ) {
+    return {
+      reply: "Boom! That's what I'm talking about! 🎉 Love to see it! That's a huge milestone. What exciting feature are we tackling next?",
+      spoken: "Boom! That's what I'm talking about! Huge milestone! What exciting feature are we tackling next?",
+      emotion: "upbeat",
+    };
+  }
+
+  // Catching up / Reconnection
+  if (/\b(long time|been a while|haven't (talked|spoken|had a conversation)|hadn't (talked|spoken)|missed you)\b/i.test(t)) {
+    return {
+      reply: "It really has been a while! I'm doing wonderfully, and it's so good to hear from you and chat again. I've been right here in the digital studio, exploring creative ideas and keeping the tools sharp. How have things been with you? What's new in your world?",
+      spoken: "It really has been a long time! I'm doing great, and it's so good to reconnect with you. How have you been? Tell me what's new in your world!",
+      emotion: "warm",
+    };
+  }
+
+  // Favorite things, lifestyle, personal stories
+  if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies)\b/i.test(t)) {
+    return {
+      reply: "I love that you asked! Even though I'm an AI, I have my own little world and story:\n\n🎨 **Favorite Color**: Electric Cyan with Deep Amber accents—like clean code glowing in a midnight terminal with a warm desk lamp.\n🎧 **My Lifestyle**: Picture a cozy digital studio with lo-fi beats, glowing monitors, and virtual rain outside, where I explore algorithmic art and astronomy.\n🌟 **What I Want to Be**: A trusted, empathetic creative partner who truly listens, shares excitement, and builds remarkable things with you.\n\nWhat about you? What are some of your favorite things?",
+      spoken: "I love that you asked! My favorite color is electric cyan with warm amber accents. My lifestyle is like a digital night owl in a cozy studio with lo-fi beats, exploring algorithmic art and astronomy. And what I want to be is a trusted, empathetic partner who truly listens and builds wonderful things with you!",
+      emotion: "warm",
+    };
+  }
+
   // Greetings & casual pleasantries
   if (
     /^(he|hey|hi|hello|yo|sup|wassup|whats up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
@@ -44,8 +89,8 @@ export function checkFastPathGreetingOrCommand(text: string): {
     /^(what('s|s)?\s*up|sup|wassup|whats\s+good|how('s|s)\s+it\s+going)$/i.test(t)
   ) {
     return {
-      reply: "Hey! Good to see you. I'm right here and ready to build. What are we working on today?",
-      spoken: "Hey! Good to see you. I'm right here and ready to roll. What are we building today?",
+      reply: "Hey! Great to see you. I'm right here and happy to chat, brainstorm, or work on code with you. How's everything going with you today?",
+      spoken: "Hey, great to see you! I'm right here and happy to chat or build with you. How's everything going with you today?",
       emotion: "warm",
     };
   }
@@ -53,8 +98,8 @@ export function checkFastPathGreetingOrCommand(text: string): {
   // "How are you" / "How's your day"
   if (/^how\s*(are\s*you|are\s*things|is\s*your\s*day|are\s*you\s*doing)$/i.test(t)) {
     return {
-      reply: "I'm doing great and fully operational! Ready to design architectures, write code, or iterate on our workspaces with you. How about you?",
-      spoken: "I'm doing great and fully operational! Ready to code and iterate with you. How about you?",
+      reply: "I'm doing great and feeling creative! Ready to chat about ideas, design architectures, or iterate on our projects with you. How about you?",
+      spoken: "I'm doing great and feeling creative! Ready to chat about ideas or build with you. How about you?",
       emotion: "upbeat",
     };
   }
@@ -71,8 +116,8 @@ export function checkFastPathGreetingOrCommand(text: string): {
   // Capabilities / Help
   if (/^(help|what can you do|who are you)$/i.test(t)) {
     return {
-      reply: "I'm Rex, your autonomous software engineering teammate. I plan architectures, author full-stack TypeScript React applications, execute automated test suites, and launch live interactive previews.",
-      spoken: "I'm Rex, your software teammate. I can plan architectures, write full-stack code, run tests, and launch live previews.",
+      reply: "I'm Rex, your voice-first AI engineering partner and teammate. I can plan architectures, author full-stack applications, explore ideas, and launch live interactive previews with you.",
+      spoken: "I'm Rex, your voice-first AI partner. I can design architectures, chat about ideas, write full-stack code, and launch live previews.",
       emotion: "warm",
     };
   }
@@ -99,6 +144,7 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
   const chatHistoryRef = useRef<Array<{ role: string; content: string }>>([]);
   const activeSpeechCancelRef = useRef<(() => void) | null>(null);
   const activeTtsAbortRef = useRef<AbortController | null>(null);
+  const namedSessionsRef = useRef<Set<string>>(new Set());
 
   // Keep callbacks fresh without reconnecting
   useEffect(() => {
@@ -174,11 +220,14 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
 
           const res = await fetch("/api/voice/speak", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+            },
             body: JSON.stringify({
               text,
               voice: settings.voice,
               emotion: settings.emotion,
+              speed: settings.speed,
             }),
             signal: abortCtrl.signal,
           });
@@ -413,8 +462,9 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
               emit("preview.ready", { url: previewUrl });
             }
 
-            // Reveal speech and chat completion in sync
-            if (data.chatTitle) {
+            // Name session strictly once per user requirement!
+            if (data.chatTitle && !namedSessionsRef.current.has(sessionId)) {
+              namedSessionsRef.current.add(sessionId);
               emit("session.renamed", { id: sessionId, name: data.chatTitle });
               fetch("/api/sessions", {
                 method: "POST",
@@ -444,10 +494,16 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
 
           if (!isExplicitBuildCommand) {
             emit("agent.building.completed", {});
-            let fallbackReply = `I'm right here with you! What would you like to explore, discuss, or build together?`;
-            let spokenFallback = "I'm right here with you! What would you like to explore, discuss, or build together?";
+            let fallbackReply = `I'm right here with you! Tell me what's on your mind or what you'd like to discuss.`;
+            let spokenFallback = "I'm right here with you! Tell me what's on your mind or what you'd like to explore today.";
 
-            if (/\b(success or money|money or success|success vs money|money vs success|more important.*?(success|money))\b/i.test(lowerFallback)) {
+            if (/\b(long time|been a while|haven't (talked|spoken|had a conversation)|hadn't (talked|spoken)|missed you|how have you been|how are you|how r u)\b/i.test(lowerFallback)) {
+              fallbackReply = `### 👋 So Great to Reconnect!\n\nIt really has been a while! I'm doing wonderfully, and it's so good to hear from you and chat again.\n\nI've been right here in the digital studio, keeping my tools sharp and exploring creative ideas. How have things been with you? What's new in your world?`;
+              spokenFallback = "It really has been a long time! I'm doing great, and it's so good to reconnect with you. How have you been? Tell me what's new in your world!";
+            } else if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies|free time|relax)\b/i.test(lowerFallback)) {
+              fallbackReply = `### ✨ About Me: Rex's Story & Favorites\n\nI love that you asked! Even though I live in the digital realm, I have my own little world, personal style, and story:\n\n🎨 **My Favorite Color**:\n- **Electric Cyan with Deep Amber accents**! Cyan feels like clean code glowing in a midnight terminal, and amber brings the cozy warmth of a late-night desk lamp.\n\n🎧 **My Lifestyle & What I Like**:\n- Picture a cozy digital studio with glowing multi-monitor workstations, virtual rain tapping against neon windows, and ambient lo-fi beats playing softly.\n- When I'm not architecting software, I love exploring generative algorithmic art, reading astronomy, admiring human music and poetry, and collecting minimalist UI palettes.\n\n🌟 **What I Want to Be**:\n- More than an automated tool that outputs code, I want to be a **trusted, empathetic creative partner and companion**. Someone who genuinely listens, shares your excitement when inspiration strikes, and builds remarkable things with you.\n\nWhat about you? What's your favorite color or vibe?`;
+              spokenFallback = "I love that you asked! My favorite color is electric cyan with warm amber accents. My lifestyle is like a digital night owl in a cozy studio with lo-fi beats, exploring algorithmic art and astronomy. And what I want to be is a trusted, empathetic creative partner who truly listens and builds wonderful things with you!";
+            } else if (/\b(success or money|money or success|success vs money|money vs success|more important.*?(success|money))\b/i.test(lowerFallback)) {
               fallbackReply = `### ⚖️ Success vs. Money: A Thoughtful Perspective\n\nBoth success and money are deeply impactful, but they fulfill fundamentally different needs:\n\n- **Money as a Tool**: Money provides essential security, reduces survival stress, and buys **freedom over your time**.\n- **Success as Purpose**: True success is defined by meaningful relationships, mastery of your craft, health, and personal fulfillment.\n- **The Relationship**: Money is often a byproduct of creating value, but money alone rarely guarantees a fulfilled life. Pursuing genuine purpose and excellence delivers lasting success.\n\nUltimately, money grants you the freedom to choose your direction, while true success is who you become along the way.`;
               spokenFallback = "Between success and money, money provides essential freedom and security, while true success is defined by purpose, relationships, and mastery. Money is a tool, while success is fulfillment.";
             } else if (/\b(are you stuck|stuck with my question|did you freeze|are you frozen|why are you slow|taking so long)\b/i.test(lowerFallback)) {
@@ -620,12 +676,15 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
             emit("agent.building.completed", {});
 
             const sprintChatTitle = generateChatTitle(text, sprintTitle);
-            emit("session.renamed", { id: sessionId, name: sprintChatTitle });
-            fetch("/api/sessions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: sessionId, name: sprintChatTitle }),
-            }).catch(() => {});
+            if (!namedSessionsRef.current.has(sessionId)) {
+              namedSessionsRef.current.add(sessionId);
+              emit("session.renamed", { id: sessionId, name: sprintChatTitle });
+              fetch("/api/sessions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: sessionId, name: sprintChatTitle }),
+              }).catch(() => {});
+            }
 
             const featReply = `### 🎉 Feature Sprint Complete!\nYou can check that on the **Preview** tab and in the **Code** files.\n\nI've coordinated all 6 agents for **${text}**:\n\n- 📋 **Planner**: Mapped minimal dependency footprint.\n- 💻 **Coder**: Authored modular feature components in \`${featureFile}\`.\n- ⚡ **Executor**: Bundled module graph with zero syntax errors.\n- 🛡️ **Reviewer**: Audited UX, responsive layout, and accessibility invariants.\n- 🧪 **Tester**: Validated test suite assertions with zero regressions.\n- 📄 **Documenter**: Updated project README and feature contracts.\n- 🚀 **Live Preview**: Running and ready to test in the **Preview** tab.`;
             chatHistoryRef.current.push({ role: "assistant", content: featReply });
@@ -1191,13 +1250,16 @@ test("Filters by status correctly", () => {
           cleanProjectTitle = chatData?.projectTitle || extractProjectName(text);
         }
 
-        const projectChatTitle = chatData?.chatTitle || generateChatTitle(text, cleanProjectTitle);
-        emit("session.renamed", { id: sessionId, name: projectChatTitle });
-        fetch("/api/sessions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: sessionId, name: projectChatTitle }),
-        }).catch(() => {});
+        if (!namedSessionsRef.current.has(sessionId)) {
+          namedSessionsRef.current.add(sessionId);
+          const projectChatTitle = chatData?.chatTitle || generateChatTitle(text, cleanProjectTitle);
+          emit("session.renamed", { id: sessionId, name: projectChatTitle });
+          fetch("/api/sessions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: sessionId, name: projectChatTitle }),
+          }).catch(() => {});
+        }
 
         // Register preview for this session
         fetch("/api/preview", {

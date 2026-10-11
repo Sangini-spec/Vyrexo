@@ -13,7 +13,9 @@ interface SessionRecord {
 }
 
 // In-memory store for sessions during development and container runtime
-const sessionStore = new Map<string, SessionRecord[]>();
+const sessionStore: Map<string, SessionRecord[]> =
+  (globalThis as any).__vyrexo_sessions_store ||
+  ((globalThis as any).__vyrexo_sessions_store = new Map<string, SessionRecord[]>());
 
 const DEFAULT_SESSIONS: SessionRecord[] = [
   {
@@ -72,15 +74,22 @@ export async function POST(request: NextRequest) {
     };
 
     if (existingIndex >= 0) {
-      current[existingIndex] = { ...current[existingIndex], ...record };
+      // The name needs to be decided only once: preserve existing meaningful name unless forceRename is explicitly requested
+      const currentName = current[existingIndex].name;
+      const finalName =
+        currentName && currentName !== "New Session" && !body.forceRename
+          ? currentName
+          : name;
+      current[existingIndex] = { ...current[existingIndex], ...record, name: finalName };
     } else {
       current.unshift(record);
     }
     sessionStore.set(userId, current);
+    const savedRecord = existingIndex >= 0 ? current[existingIndex] : record;
 
     return NextResponse.json({
       ok: true,
-      session: record,
+      session: savedRecord,
     });
   } catch (err: unknown) {
     return NextResponse.json(

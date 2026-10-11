@@ -22,6 +22,9 @@ function applyHeuristicCorrections(raw: string): string {
 
   // 1. Common acoustic homophones & colloquialisms
   text = text
+    // "Lyrics" / "Lex" / "Wrecks" at start -> Rex
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
+    .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2")
     // "he" -> "Hey," when used as opening salutation
     .replace(/^he\s+(whatever|rex|can\s+you|could\s+you|what|how|show|run|build|tell|i\s+want)/i, "Hey, $1")
     .replace(/^he$/i, "Hey")

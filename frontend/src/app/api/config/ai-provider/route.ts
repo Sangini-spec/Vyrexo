@@ -7,6 +7,10 @@ import {
   getChariotConfig,
   saveChariotConfig,
   testChariotConnection,
+  getElevenLabsConfig,
+  saveElevenLabsConfig,
+  removeElevenLabsConfig,
+  testElevenLabsConnection,
 } from "@/lib/ai-provider-config";
 
 export async function GET() {
@@ -15,6 +19,29 @@ export async function GET() {
 
   const chariotConfig = getChariotConfig();
   const isChariotConfigured = Boolean(chariotConfig.chariotApiKey);
+
+  const elevenConfig = getElevenLabsConfig();
+  const isElevenConfigured = Boolean(elevenConfig.elevenLabsApiKey);
+
+  let elevenStatus = isElevenConfigured ? "ready" : "unconfigured";
+  let elevenCharCount: number | null = null;
+  let elevenCharLimit: number | null = null;
+
+  if (isElevenConfigured && elevenConfig.elevenLabsApiKey) {
+    try {
+      const res = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": elevenConfig.elevenLabsApiKey },
+      });
+      if (res.ok) {
+        const sub = await res.json();
+        elevenCharCount = sub.character_count ?? 0;
+        elevenCharLimit = sub.character_limit ?? 10000;
+        elevenStatus = "connected";
+      }
+    } catch {
+      elevenStatus = "ready";
+    }
+  }
 
   let chariotCredits: number | null = null;
   let chariotStatus = isChariotConfigured ? "ready" : "unconfigured";
@@ -34,7 +61,9 @@ export async function GET() {
   }
 
   let activeProvider = "gemini";
-  if (isChariotConfigured) {
+  if (isElevenConfigured) {
+    activeProvider = "elevenlabs";
+  } else if (isChariotConfigured) {
     activeProvider = "chariot";
   } else if (isOpenAiConfigured) {
     activeProvider = "openai";
@@ -43,6 +72,23 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     provider: activeProvider,
+    elevenlabs: {
+      configured: isElevenConfigured,
+      status: elevenStatus,
+      characterCount: elevenCharCount,
+      characterLimit: elevenCharLimit,
+      model: elevenConfig.elevenLabsModel,
+      source: elevenConfig.source,
+      maskedKey: elevenConfig.elevenLabsApiKey
+        ? `${elevenConfig.elevenLabsApiKey.slice(0, 4)}...${elevenConfig.elevenLabsApiKey.slice(-4)}`
+        : null,
+      voices: [
+        { id: "adam", name: "Adam (American Male - Conversational, Expressive)", elevenId: "pNInz6obpgDQGcFmaJgB", status: "active" },
+        { id: "ryan", name: "Brian (British Male - Rich, Narrative)", elevenId: "nPczCjzI2devNBz1zQrb", status: "active" },
+        { id: "ava", name: "Rachel (American Female - Calm, Empathetic)", elevenId: "21m00Tcm4TlvDq8ikWAM", status: "active" },
+        { id: "sonia", name: "Charlotte (British Female - Elegant, Warm)", elevenId: "XB0fDUnXU5powFXDhCwa", status: "active" },
+      ],
+    },
     chariot: {
       configured: isChariotConfigured,
       status: chariotStatus,
@@ -82,17 +128,48 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const provider = (typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "chariot") as "chariot" | "openai";
+    const provider = (typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "elevenlabs") as "elevenlabs" | "chariot" | "openai";
     const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
     const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : undefined;
-    const model = typeof body.model === "string" ? body.model.trim() : (provider === "chariot" ? "chariot-coder" : "gpt-4o");
+    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_turbo_v2_5" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
     const testOnly = Boolean(body.testOnly);
 
     if (!apiKey) {
       return NextResponse.json(
-        { ok: false, error: `${provider === "chariot" ? "Chariot" : "OpenAI"} API key is required` },
+        { ok: false, error: `${provider === "elevenlabs" ? "ElevenLabs" : provider === "chariot" ? "Chariot" : "OpenAI"} API key is required` },
         { status: 400 }
       );
+    }
+
+    if (provider === "elevenlabs") {
+      const benchmark = await testElevenLabsConnection(apiKey, model);
+      if (!benchmark.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: benchmark.error || "Failed to authenticate with ElevenLabs API",
+            latencyMs: benchmark.latencyMs,
+          },
+          { status: 400 }
+        );
+      }
+
+      if (!testOnly) {
+        saveElevenLabsConfig(apiKey, model);
+      }
+
+      return NextResponse.json({
+        ok: true,
+        provider: "elevenlabs",
+        saved: !testOnly,
+        latencyMs: benchmark.latencyMs,
+        model: benchmark.model,
+        characterCount: benchmark.characterCount,
+        characterLimit: benchmark.characterLimit,
+        message: testOnly
+          ? `ElevenLabs connection test successful (${benchmark.latencyMs}ms roundtrip).`
+          : `ElevenLabs voice AI integrated successfully for human-like emotionally aware voice synthesis (${benchmark.latencyMs}ms roundtrip).`,
+      });
     }
 
     if (provider === "chariot") {
@@ -167,7 +244,14 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const provider = searchParams.get("provider") || "openai";
+    const provider = searchParams.get("provider") || "elevenlabs";
+    if (provider === "elevenlabs") {
+      removeElevenLabsConfig();
+      return NextResponse.json({
+        ok: true,
+        message: "ElevenLabs configuration removed successfully. System uses Microsoft Edge Neural Voice & Gemini.",
+      });
+    }
     if (provider === "openai") {
       removeOpenAIConfig();
       return NextResponse.json({

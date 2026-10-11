@@ -189,115 +189,90 @@ export function extractProjectName(
  * - "How is your mom?" -> "Casual Chat"
  * - "Fix the login bug in navbar" -> "Navbar Fix"
  */
+const TITLE_STOP_WORDS = new Set([
+  "i", "me", "my", "myself", "we", "our", "ours", "you", "your", "he", "she", "it", "they", "them",
+  "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were",
+  "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "would", "should",
+  "could", "ought", "will", "shall", "can", "may", "might", "must", "a", "an", "the", "and", "but",
+  "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against",
+  "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up",
+  "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here",
+  "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most",
+  "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+  "just", "build", "make", "create", "want", "need", "like", "please", "code", "app", "application",
+  "good", "great", "job", "work", "already", "also", "let", "see", "think", "tell"
+]);
+
+/**
+ * Intelligent Chat Naming (Strictly concise, max 14 characters):
+ * Produces ultra-short, sidebar-friendly topic titles that need no stretching.
+ * If user only chatted or greeted, strictly returns "Greeting".
+ */
 export function generateChatTitle(prompt: string, projectName?: string): string {
-  if (!prompt || typeof prompt !== "string") return "New Project";
+  if (!prompt || typeof prompt !== "string") return "New Session";
 
-  const lower = prompt.trim().toLowerCase();
+  const p = prompt.trim();
+  const lower = p.toLowerCase();
 
-  // Social / casual topics
-  if (lower.includes("how are you") || lower.includes("what's up") || lower.includes("how's it going") || lower.includes("hello") || lower.includes("hey")) {
-    return "Casual Chat";
-  }
-  if (lower.includes("mom") || lower.includes("family") || lower.includes("human") || lower.includes("who are you")) {
-    return "Rex Chat";
-  }
-  if (lower.includes("useless") || lower.includes("joke") || lower.includes("funny") || lower.includes("haha") || lower.includes("lol")) {
-    return "Team Banter";
-  }
-  if (lower.includes("why is this") || lower.includes("still broken") || lower.includes("debug") || lower.includes("error") || lower.includes("not working")) {
-    return "Debug Help";
-  }
-  if (lower.includes("dark mode") || lower.includes("theme") || lower.includes("color")) {
-    return "Theme Styling";
-  }
-  if (lower.includes("auth") || lower.includes("login") || lower.includes("signup") || lower.includes("oauth")) {
-    return "Auth Flow";
+  // 1. Social & Casual Greetings (User requirement: strictly name "Greeting")
+  const isGreetingPattern =
+    /^(he|hey|hi|hello|yo|howdy|sup|greetings|hola|heya|hiya)\b/i.test(lower) ||
+    /\b(how('s|s)?\s*it\s*going|how\s*are\s*you|what('s|s)?\s*up|what\s+is\s+up|wassup|good\s*(morning|afternoon|evening|day))\b/i.test(lower) ||
+    /^(thanks|thank\s*you|good\s*job|great\s*job|nice|awesome|cool|well\s*done|haha|lol)[!.,]?$/i.test(lower) ||
+    /^(hey|hi|hello)\s*(rex|assistant|there)?[!.,?]*$/i.test(lower);
+
+  const isBuildingCommand = /\b(build|create|make|code|implement|generate|design|fix|debug|refactor|write|run|add|deploy)\b/i.test(lower);
+
+  if (isGreetingPattern && !isBuildingCommand) {
+    return "Greeting";
   }
 
-  // Food / restaurant applications
-  if (lower.includes("food") && (lower.includes("ai") || lower.includes("recommend"))) {
-    return "Food AI";
-  }
-  if (lower.includes("food") || lower.includes("restaurant") || lower.includes("delivery") || lower.includes("meal")) {
-    return "Food Delivery";
-  }
+  // 2. Focused Domain Classifications (Short, punchy, strictly <= 14 chars for sidebar visibility)
+  if (lower.includes("pomodoro") || (lower.includes("timer") && !lower.includes("crypto"))) return "Pomodoro";
+  if (lower.includes("calculator") || lower.includes("math")) return "Calculator";
+  if (lower.includes("clothing") || lower.includes("fashion") || lower.includes("ecommerce") || lower.includes("store") || lower.includes("shop")) return "Store";
+  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare")) return "Beauty Store";
+  if (lower.includes("food") || lower.includes("restaurant") || lower.includes("recipe") || lower.includes("meal")) return "Food App";
+  if (lower.includes("friend") || lower.includes("amity") || lower.includes("bestie")) return "Friend App";
+  if (lower.includes("landing page") || lower.includes("landing")) return "Landing Page";
+  if (lower.includes("dashboard") || lower.includes("saas") || lower.includes("analytics")) return "Dashboard";
+  if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum")) return "Crypto App";
+  if (lower.includes("invest") || lower.includes("stock") || lower.includes("portfolio") || lower.includes("finance")) return "Finance App";
+  if (lower.includes("todo") || lower.includes("task") || lower.includes("kanban")) return "Task Board";
+  if (lower.includes("weather") || lower.includes("forecast")) return "Weather App";
+  if (lower.includes("music") || lower.includes("audio") || lower.includes("podcast")) return "Music App";
+  if (lower.includes("note") || lower.includes("journal") || lower.includes("markdown")) return "Notes App";
+  if (lower.includes("chat") || lower.includes("messenger")) return "Chat App";
+  if (lower.includes("fitness") || lower.includes("workout") || lower.includes("gym")) return "Fitness App";
+  if (lower.includes("game") || lower.includes("puzzle")) return "Game";
+  if (lower.includes("auth") || lower.includes("login") || lower.includes("signup")) return "Auth Flow";
+  if (lower.includes("voice") || lower.includes("eleven") || lower.includes("tts")) return "Voice Settings";
+  if (lower.includes("api") || lower.includes("backend") || lower.includes("fastapi") || lower.includes("rest")) return "REST API";
+  if (lower.includes("bug") || lower.includes("error") || lower.includes("fix") || lower.includes("broken")) return "Bug Fix";
 
-  // SaaS / productivity
-  if (lower.includes("productivity") || lower.includes("employee")) {
-    return "Productivity SaaS";
-  }
-  if (lower.includes("dashboard") && lower.includes("saas")) {
-    return "SaaS Dashboard";
-  }
-  if (lower.includes("dashboard") || lower.includes("analytics")) {
-    return "Analytics Dash";
-  }
-
-  // Coding agent / AI
-  if (lower.includes("coding agent") || lower.includes("code agent") || lower.includes("autonomous agent")) {
-    return "Coding Agent";
-  }
-  if (lower.includes("landing page") || lower.includes("landing")) {
-    if (lower.includes("ai")) return "AI Landing";
-    if (lower.includes("saas")) return "SaaS Landing";
-    return "Landing Page";
-  }
-
-  // E-commerce & store
-  if (lower.includes("clothing") || lower.includes("clothes") || lower.includes("fashion")) {
-    return "Clothing Store";
-  }
-  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare")) {
-    return "Beauty Store";
-  }
-  if (lower.includes("ecommerce") || lower.includes("e-commerce") || lower.includes("store") || lower.includes("shop")) {
-    return "Online Store";
-  }
-
-  // Finance / crypto
-  if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum")) {
-    return "Crypto Tracker";
-  }
-  if (lower.includes("investment") || lower.includes("portfolio") || lower.includes("wealth") || lower.includes("stock")) {
-    return "Wealth Advisor";
-  }
-
-  // Calculator / tools
-  if (lower.includes("calculator") || lower.includes("math")) {
-    return "Smart Calculator";
-  }
-
-  // If a clean project name was derived, use 2-word variation
-  if (projectName && projectName.length > 2 && projectName.length <= 15) {
-    if (lower.includes("app") || lower.includes("application")) return `${projectName} App`;
-    if (lower.includes("platform")) return `${projectName} Platform`;
+  if (projectName && projectName.length >= 3 && projectName.length <= 14) {
     return projectName;
   }
 
-  // Extract up to 2 salient nouns
-  const keywords = prompt
-    .replace(/[^\w\s]/g, "")
+  // 3. Extract 1-2 salient domain keywords, truncated strictly to <= 14 chars
+  const cleanWords = p
+    .replace(/[^\w\s]/g, " ")
     .split(/\s+/)
-    .filter(
-      (w) =>
-        !/^(build|make|create|develop|code|generate|implement|want|need|please|like|a|an|the|for|in|on|with|to|of|and|is|me|us|our|my|you|this|that|so|from|it|by|at)$/i.test(
-          w
-        )
-    )
-    .slice(0, 2);
+    .filter((w) => w.length > 1 && !TITLE_STOP_WORDS.has(w.toLowerCase()));
 
-  if (keywords.length >= 2) {
-    const k1 = keywords[0].charAt(0).toUpperCase() + keywords[0].slice(1).toLowerCase();
-    const k2 = keywords[1].charAt(0).toUpperCase() + keywords[1].slice(1).toLowerCase();
-    return `${k1} ${k2}`;
+  if (cleanWords.length >= 2) {
+    const w1 = cleanWords[0].charAt(0).toUpperCase() + cleanWords[0].slice(1).toLowerCase();
+    const w2 = cleanWords[1].charAt(0).toUpperCase() + cleanWords[1].slice(1).toLowerCase();
+    const combo = `${w1} ${w2}`;
+    return combo.length <= 14 ? combo : w1.slice(0, 14);
   }
 
-  if (keywords.length === 1) {
-    const k1 = keywords[0].charAt(0).toUpperCase() + keywords[0].slice(1).toLowerCase();
-    return `${k1} App`;
+  if (cleanWords.length === 1) {
+    const w1 = cleanWords[0].charAt(0).toUpperCase() + cleanWords[0].slice(1).toLowerCase();
+    return w1.slice(0, 14);
   }
 
-  return "Project Workspace";
+  return "Project";
 }
 
 /**

@@ -15,6 +15,22 @@ export interface ChariotConfig {
   source: "env" | "disk" | "none";
 }
 
+export interface ElevenLabsConfig {
+  elevenLabsApiKey: string | null;
+  elevenLabsModel: string;
+  source: "env" | "disk" | "none";
+}
+
+export interface ElevenLabsBenchmarkResult {
+  ok: boolean;
+  latencyMs: number;
+  model: string;
+  message?: string;
+  error?: string;
+  characterCount?: number;
+  characterLimit?: number;
+}
+
 export interface ChariotBenchmarkResult {
   ok: boolean;
   latencyMs: number;
@@ -558,6 +574,174 @@ export async function testChariotConnection(
         completion: 0,
         total: availableCredits,
       },
+    };
+  } catch (err: any) {
+    const latencyMs = Date.now() - startTime;
+    return {
+      ok: false,
+      latencyMs,
+      model: modelName,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+/**
+ * Retrieves the current ElevenLabs API key and configuration.
+ * Priority: process.env.ELEVENLABS_API_KEY / process.env.XI_API_KEY -> persistent disk config (.data/ai-config.json)
+ */
+export function getElevenLabsConfig(): ElevenLabsConfig {
+  const envKey = (
+    process.env.ELEVEN_LABS_API_KEY ||
+    process.env.ELEVENLABS_API_KEY ||
+    process.env.XI_API_KEY
+  )?.trim();
+  const envModel = process.env.ELEVENLABS_MODEL?.trim() || "eleven_turbo_v2_5";
+
+  if (envKey) {
+    return {
+      elevenLabsApiKey: envKey,
+      elevenLabsModel: envModel,
+      source: "env",
+    };
+  }
+
+  // Check persistent disk config
+  const cfgPath = resolveConfigPath();
+  if (fs.existsSync(cfgPath)) {
+    try {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed.elevenLabsApiKey) {
+        return {
+          elevenLabsApiKey: parsed.elevenLabsApiKey.trim(),
+          elevenLabsModel: parsed.elevenLabsModel?.trim() || envModel,
+          source: "disk",
+        };
+      }
+    } catch {}
+  }
+
+  return {
+    elevenLabsApiKey: null,
+    elevenLabsModel: envModel,
+    source: "none",
+  };
+}
+
+/**
+ * Saves or updates ElevenLabs configuration to disk for persistent runtime use.
+ */
+export function saveElevenLabsConfig(
+  apiKey: string,
+  model: string = "eleven_turbo_v2_5"
+): void {
+  const cfgPath = resolveConfigPath();
+  const dir = path.dirname(cfgPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  let existing: any = {};
+  if (fs.existsSync(cfgPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+    } catch {}
+  }
+
+  const data = {
+    ...existing,
+    elevenLabsApiKey: apiKey.trim(),
+    elevenLabsModel: model.trim() || "eleven_turbo_v2_5",
+    updatedAt: new Date().toISOString(),
+  };
+
+  fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf-8");
+  process.env.ELEVENLABS_API_KEY = apiKey.trim();
+  process.env.ELEVENLABS_MODEL = model.trim() || "eleven_turbo_v2_5";
+}
+
+/**
+ * Removes and purges ElevenLabs configuration from disk and environment.
+ */
+export function removeElevenLabsConfig(): void {
+  delete process.env.ELEVENLABS_API_KEY;
+  delete process.env.XI_API_KEY;
+  delete process.env.ELEVENLABS_MODEL;
+
+  try {
+    const cfgPath = resolveConfigPath();
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      delete parsed.elevenLabsApiKey;
+      delete parsed.elevenLabsModel;
+      parsed.updatedAt = new Date().toISOString();
+      fs.writeFileSync(cfgPath, JSON.stringify(parsed, null, 2), "utf-8");
+    }
+  } catch {}
+}
+
+/**
+ * Benchmark and validate an ElevenLabs API key.
+ * Queries GET /v1/user/subscription to check remaining quota and tier.
+ */
+export async function testElevenLabsConnection(
+  explicitKey?: string,
+  explicitModel?: string
+): Promise<ElevenLabsBenchmarkResult> {
+  const cfg = getElevenLabsConfig();
+  const apiKey = explicitKey?.trim() || cfg.elevenLabsApiKey;
+  const modelName = explicitModel?.trim() || cfg.elevenLabsModel || "eleven_turbo_v2_5";
+
+  if (!apiKey) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      model: modelName,
+      error: "No ElevenLabs API key provided or configured.",
+    };
+  }
+
+  const startTime = Date.now();
+  try {
+    const abortCtrl = new AbortController();
+    const timeout = setTimeout(() => abortCtrl.abort(), 10000);
+
+    const res = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
+      method: "GET",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+      },
+      signal: abortCtrl.signal,
+    });
+    clearTimeout(timeout);
+
+    const latencyMs = Date.now() - startTime;
+    const body = await res.json().catch(() => null);
+
+    if (!res.ok) {
+      const errMsg = body?.detail?.message || body?.message || `HTTP ${res.status} from ElevenLabs API`;
+      return {
+        ok: false,
+        latencyMs,
+        model: modelName,
+        error: errMsg,
+      };
+    }
+
+    const charCount = body?.character_count ?? 0;
+    const charLimit = body?.character_limit ?? 10000;
+    const tier = body?.tier || "creator";
+
+    return {
+      ok: true,
+      latencyMs,
+      model: modelName,
+      characterCount: charCount,
+      characterLimit: charLimit,
+      message: `ElevenLabs connected successfully (${tier} tier, ${(charLimit - charCount).toLocaleString()} chars remaining).`,
     };
   } catch (err: any) {
     const latencyMs = Date.now() - startTime;

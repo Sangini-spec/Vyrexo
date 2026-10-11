@@ -85,21 +85,21 @@ export function RightPanel({
 }: RightPanelProps) {
   return (
     <div
-      className="flex flex-col flex-shrink-0 bg-[var(--panel)] border-l border-[var(--border)] overflow-hidden"
+      className="flex flex-col flex-shrink-0 bg-[var(--panel)] border-l border-[var(--border)] overflow-hidden relative z-20"
       style={{ width: collapsed ? 0 : width, opacity: collapsed ? 0 : 1, pointerEvents: collapsed ? "none" : "auto" }}
     >
       {/* Tab bar */}
-      <div className="flex items-center justify-between border-b border-[var(--border)] px-[6px]">
-        <div className="flex">
+      <div className="flex items-center justify-between border-b border-[var(--border)] px-[6px] h-12 flex-shrink-0 bg-[var(--panel)]">
+        <div className="flex min-w-0">
           {TABS.map((tab) => {
             const active = tab.key === activeTab;
             return (
               <button
                 key={tab.key}
                 onClick={() => onTabChange(tab.key)}
-                className={`py-[9px] px-4 text-xs font-medium border-b-2 transition-all ${
+                className={`py-[9px] px-3 sm:px-4 text-xs font-medium border-b-2 transition-all flex-shrink-0 ${
                   active
-                    ? "text-[var(--steel)] border-[var(--steel)]"
+                    ? "text-[var(--steel)] border-[var(--steel)] font-semibold"
                     : "text-[var(--muted)] border-transparent hover:text-[var(--text4)]"
                 }`}
               >

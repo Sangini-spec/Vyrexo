@@ -15,6 +15,7 @@ import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
 import { primeSpeechSynthesis, speakHumanizedText } from "@/lib/voice-synthesizer";
+import { detectEmotionFromContext, getEmotionStateMeta, type EmotionTone } from "@/lib/emotion-detector";
 
 // A persisted, renamable chat session. Stored in localStorage so they survive
 // reloads; grouped/labelled for the Sidebar at render time.
@@ -97,33 +98,20 @@ function checkClientFastPath(rawText: string): FastPathResponse | null {
   const t = rawText.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // Simple greetings & pleasantries
-  if (
-    /^(he|hey|hi|hello|yo|sup|wassup|whats up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
-    /^(he|hey|hi|hello)\s+(rex|there|team|friend|mate)$/i.test(t) ||
-    /^(what('s|s)?\s*up|sup|wassup|whats\s+good|how('s|s)\s+it\s+going)$/i.test(t)
-  ) {
+  // Single word greetings only — allow all deeper conversational remarks to route to Rex's personality
+  if (/^(he|hey|hi|hello|yo|howdy)$/i.test(t) || /^(he|hey|hi|hello)\s+rex$/i.test(t)) {
     return {
-      reply: "Hey! Good to see you. I'm right here with you and ready to build. What are we working on today?",
-      spoken: "Hey, ... Good to see you! I'm right here with you and ready to build. What are we working on today?",
+      reply: "Hey! Great to see you. How's everything going with you today?",
+      spoken: "Hey, great to see you! How's everything going with you today?",
       emotion: "warm",
-    };
-  }
-
-  // How are you / state check
-  if (/^how\s*(are\s*you|are\s*things|is\s*your\s*day|are\s*you\s*doing)$/i.test(t)) {
-    return {
-      reply: "I'm doing great and fully operational! Ready to design architectures, write code, or iterate on workspaces with you. How about you?",
-      spoken: "I'm doing great! Feeling energized and fully focused. Ready to dive into code and iterate with you. How about you?",
-      emotion: "upbeat",
     };
   }
 
   // Status / Health check
   if (/^(status|system status|health|are you ready|ping)$/i.test(t)) {
     return {
-      reply: "All systems 100% active. Neural voice pipeline, real-time code compiler, and sandbox preview are ready.",
-      spoken: "All systems active. Voice pipeline, code compiler, and preview sandboxes are ready.",
+      reply: "All systems active and fully responsive. Ready whenever you are!",
+      spoken: "All systems active and fully responsive. Ready whenever you are!",
       emotion: "calm",
     };
   }
@@ -353,15 +341,32 @@ export default function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
-  // Resizable panel widths (drag the divider). Persisted across reloads.
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
+
+  const handleResizeRightPanel = useCallback(
+    (dx: number) => {
+      setRightPanelWidth((w) => {
+        const windowW = typeof window !== "undefined" ? window.innerWidth : 1280;
+        const currentSidebarW = sidebarCollapsed ? 0 : sidebarWidth;
+        // Never allow right panel to crush center column below 360px
+        const maxAllowed = Math.max(280, Math.min(720, windowW - currentSidebarW - 360));
+        return clamp(w - dx, 280, maxAllowed);
+      });
+    },
+    [sidebarCollapsed, sidebarWidth]
+  );
+
   useEffect(() => {
     try {
       const s = localStorage.getItem("vyrexo_sidebar_w");
       const r = localStorage.getItem("vyrexo_rightpanel_w");
+      const windowW = typeof window !== "undefined" ? window.innerWidth : 1280;
       if (s) setSidebarWidth(clamp(parseInt(s), 180, 520));
-      if (r) setRightPanelWidth(clamp(parseInt(r), 280, 760));
+      if (r) {
+        const maxAllowed = Math.max(280, Math.min(720, windowW - 260 - 360));
+        setRightPanelWidth(clamp(parseInt(r), 280, maxAllowed));
+      }
     } catch {}
   }, []);
   useEffect(() => { try { localStorage.setItem("vyrexo_sidebar_w", String(sidebarWidth)); } catch {} }, [sidebarWidth]);
@@ -372,6 +377,7 @@ export default function App() {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
   const [orbState, setOrbState] = useState<OrbState>("idle");
+  const [activeEmotion, setActiveEmotion] = useState<EmotionTone>("warm");
   const [transcript, setTranscript] = useState("");
   const [mode, setMode] = useState("normal");
   const [steps, setSteps] = useState<AgentStep[]>([]);
@@ -726,6 +732,9 @@ export default function App() {
         beginUtterance();
         flushPendingRex(); // reveal Rex's text exactly as his voice begins
         setOrbState("speaking");
+        if (msg.payload?.emotion) {
+          setActiveEmotion(msg.payload.emotion as EmotionTone);
+        }
         break;
 
       case "voice.output.end":
@@ -765,7 +774,16 @@ export default function App() {
         const targetId = (msg.payload.id as string) || activeSession;
         if (newName && targetId) {
           setSessions((prev) =>
-            prev.map((s) => (s.id === targetId ? { ...s, name: newName } : s))
+            prev.map((s) => {
+              if (s.id === targetId) {
+                // The name needs to be decided only once!
+                if (s.name && s.name !== "New Session") {
+                  return s;
+                }
+                return { ...s, name: newName };
+              }
+              return s;
+            })
           );
         }
         break;
@@ -927,12 +945,37 @@ export default function App() {
 
   // Unified voice synthesis: keeps Rex's voice 100% consistent across all turns
   const playUnifiedVoice = useCallback(
-    async (spokenText: string, emotion: string = "warm") => {
+    async (spokenText: string, emotion: string = "warm", userPrompt?: string) => {
+      let currentVoice = "adam";
+      let currentSpeed: "slow" | "normal" | "fast" = "normal";
+      if (typeof window !== "undefined") {
+        try {
+          const stored = localStorage.getItem("vyrexo_voice");
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (parsed.voice) currentVoice = parsed.voice;
+            if (parsed.speed) currentSpeed = parsed.speed;
+          }
+        } catch {}
+      }
+
+      const effectiveEmotion: EmotionTone =
+        (emotion as EmotionTone) || detectEmotionFromContext(userPrompt || spokenText, spokenText);
+      setActiveEmotion(effectiveEmotion);
+
       try {
         const res = await fetch("/api/voice/speak", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: spokenText, emotion }),
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: spokenText,
+            voice: currentVoice,
+            emotion,
+            speed: currentSpeed,
+            userPrompt,
+          }),
         });
         if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
           const buffer = await res.arrayBuffer();
@@ -945,10 +988,11 @@ export default function App() {
           }
         }
       } catch {}
+
       // Fallback only if server audio endpoint fails
       speakHumanizedText(
         spokenText,
-        { voice: "adam", speed: "normal", emotion: emotion as any },
+        { voice: currentVoice, speed: currentSpeed, emotion: emotion as any },
         { onEnd: () => setOrbState(voiceListeningRef.current ? "listening" : "idle") }
       );
     },
@@ -1030,6 +1074,8 @@ export default function App() {
 
       // Heuristic fast-correction for zero perceived lag
       let cleanText = raw.trim()
+        .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
+        .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2")
         .replace(/^he\s+(whatever|rex|can\s+you|could\s+you|what|how|show|run|build|tell|i\s+want)/i, "Hey, $1")
         .replace(/^he\s+how\s+are\s+you/i, "Hey, how are you?")
         .replace(/^he$/i, "Hey")
@@ -1079,7 +1125,7 @@ export default function App() {
         setNarration(fastResult.spoken);
         recordAiSpeech(fastResult.spoken);
         setOrbState("speaking");
-        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm");
+        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm", cleanText);
         sendMessage({ type: "text.input", payload: { text: cleanText, fastPath: true } });
         setTranscript("");
         return;
@@ -1293,6 +1339,11 @@ export default function App() {
 
   const handleRenameSession = useCallback((id: string, name: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+    fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name, forceRename: true }),
+    }).catch(() => {});
     fetch(`/api/sessions/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -1672,7 +1723,7 @@ export default function App() {
         setNarration(fastResult.spoken);
         recordAiSpeech(fastResult.spoken);
         setOrbState("speaking");
-        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm");
+        playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm", text);
         sendMessage({ type: "text.input", payload: { text, fastPath: true } });
         return;
       }
@@ -1861,77 +1912,136 @@ export default function App() {
         <ResizeHandle onDelta={(dx) => setSidebarWidth((w) => clamp(w + dx, 180, 520))} />
       )}
 
-      <div className="flex-1 flex flex-col relative z-10">
-        {/* Toggle left */}
-        <div className="absolute top-3 left-3 z-50">
-          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
-          </button>
-        </div>
+      <div className="flex-1 flex flex-col min-w-[340px] relative overflow-hidden">
+        {/* Top Navigation Bar - strictly contained within center area, cannot collide or submerge into right sidebar */}
+        <header className="h-12 flex-shrink-0 flex items-center justify-between px-3 border-b border-[var(--border)] bg-[var(--surface)]/80 backdrop-blur-xl z-20 overflow-hidden min-w-0">
+          {/* Left: Sidebar toggle + Mode + Connect project */}
+          <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
+            <button
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all flex-shrink-0 cursor-pointer"
+              title="Toggle sidebar"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M9 3v18" />
+              </svg>
+            </button>
 
-        {/* Floating bar */}
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-[10px] px-[14px] py-[5px] bg-[var(--bar)] backdrop-blur-xl border border-[var(--border2)] rounded-xl">
-          <ModeIndicator mode={mode} />
-          <button
-            onClick={handleConnectProject}
-            title={activeProject ? `Working in ${activeProject.path} — click to change` : "Connect a project folder"}
-            className={`flex items-center gap-[5px] text-[11px] font-medium px-2 py-[3px] rounded-md border transition-all max-w-[180px] ${
-              activeProject
-                ? "text-[var(--ice)] border-[#3B599840] bg-[#3B599815] hover:bg-[#3B599825]"
-                : "text-[var(--muted)] border-[var(--border2)] bg-[var(--border)] hover:text-[var(--text3)] hover:border-[var(--steel)]"
-            }`}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
-            <span className="truncate">{activeProject ? activeProject.name : "Connect project"}</span>
-          </button>
-          <div className={`w-[6px] h-[6px] rounded-full ${wsStatus === "connected" ? "bg-[#22c55e] shadow-[0_0_6px_#22c55e88]" : wsStatus === "connecting" ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`} />
-          <span className="text-[11px] text-[var(--muted2)]">{wsStatus}</span>
-          <div className="flex items-center gap-1.5 text-[10.5px] px-2 py-0.5 rounded-md bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)]">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                voiceMode === "active_conversation"
-                  ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]"
-                  : "bg-[#6888C8]"
+            <ModeIndicator mode={mode} />
+
+            <button
+              onClick={handleConnectProject}
+              title={activeProject ? `Working in ${activeProject.path} — click to change` : "Connect a project folder"}
+              className={`hidden xl:flex items-center gap-[5px] text-[11px] font-medium px-2 py-[4px] rounded-md border transition-all max-w-[140px] truncate ${
+                activeProject
+                  ? "text-[var(--ice)] border-[#3B599840] bg-[#3B599815] hover:bg-[#3B599825]"
+                  : "text-[var(--muted)] border-[var(--border2)] bg-[var(--border)] hover:text-[var(--text3)] hover:border-[var(--steel)]"
               }`}
-            />
-            <span className="font-mono">
-              {voiceMode === "active_conversation" ? "Voice Active" : "Say 'Rex'"}
-            </span>
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <span className="truncate">{activeProject ? activeProject.name : "Connect project"}</span>
+            </button>
           </div>
-          <ThemeToggle />
-          <button onClick={handleOpenVSCode} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[#1e6fff] hover:bg-[#1e6fff15] transition-all p-0" title="Open in VS Code">
-            <svg width="16" height="16" viewBox="0 0 100 100" fill="none">
-              <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
-            </svg>
-          </button>
-          <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all" title="Settings">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </a>
-          <button
-            onClick={signOut}
-            className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-500 transition-all cursor-pointer"
-            title="Sign out"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16 17 21 12 16 7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-          </button>
-        </div>
 
-        {/* Toggle right */}
-        <div className="absolute top-3 right-3 z-50">
-          <button onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)} className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
-          </button>
-        </div>
+          {/* Right: Status + Voice + Theme + Actions + Right panel toggle */}
+          <div className="flex items-center gap-1.5 flex-shrink-0 ml-auto">
+            {/* WS Connection dot */}
+            <div className="hidden 2xl:flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--border)] text-[11px] text-[var(--muted2)]">
+              <div className={`w-[6px] h-[6px] rounded-full ${wsStatus === "connected" ? "bg-[#22c55e] shadow-[0_0_6px_#22c55e88]" : wsStatus === "connecting" ? "bg-yellow-500 animate-pulse" : "bg-red-500"}`} />
+              <span className="capitalize">{wsStatus}</span>
+            </div>
+
+            {/* Wake Word indicator */}
+            <div className="hidden 2xl:flex items-center gap-1.5 text-[10.5px] px-2 py-1 rounded-md bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)]">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  voiceMode === "active_conversation"
+                    ? "bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]"
+                    : "bg-[#6888C8]"
+                }`}
+              />
+              <span className="font-mono">
+                {voiceMode === "active_conversation" ? "Voice Active" : "Say 'Rex'"}
+              </span>
+            </div>
+
+            <ThemeToggle />
+
+            <a
+              href="/settings"
+              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-[7px] border border-[#3B599833] bg-[#3B599812] hover:bg-[#3B599825] text-[11px] font-medium text-[var(--ice)] transition-all flex-shrink-0"
+              title={`Rex Voice Identity: ${getEmotionStateMeta(activeEmotion).label}`}
+            >
+              <span>🎙️</span>
+              <span className="hidden xl:inline font-mono">
+                {orbState === "speaking" ? getEmotionStateMeta(activeEmotion).badge : "Voice"}
+              </span>
+              {orbState === "speaking" && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full animate-pulse"
+                  style={{ backgroundColor: getEmotionStateMeta(activeEmotion).auraColor }}
+                />
+              )}
+            </a>
+
+            <button onClick={handleOpenVSCode} className="hidden sm:flex w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] items-center justify-center hover:border-[#1e6fff] hover:bg-[#1e6fff15] transition-all p-0 flex-shrink-0 cursor-pointer" title="Open in VS Code">
+              <svg width="16" height="16" viewBox="0 0 100 100" fill="none">
+                <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
+              </svg>
+            </button>
+
+            <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all flex-shrink-0 cursor-pointer" title="Settings">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </a>
+
+            <button
+              onClick={signOut}
+              className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] flex items-center justify-center hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-500 transition-all cursor-pointer flex-shrink-0"
+              title="Sign out"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
+
+            {/* Toggle Right Panel Button */}
+            <button
+              onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)}
+              className={`w-[30px] h-[30px] rounded-[7px] border transition-all flex items-center justify-center flex-shrink-0 cursor-pointer ${
+                rightPanelCollapsed
+                  ? "border-[var(--border2)] bg-[var(--border)] text-[var(--icon)] hover:border-[var(--steel)] hover:text-[var(--steel)]"
+                  : "border-[var(--steel)] bg-[#3B59981A] text-[var(--steel)]"
+              }`}
+              title={rightPanelCollapsed ? "Open right panel" : "Collapse right panel"}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M15 3v18" />
+              </svg>
+            </button>
+          </div>
+        </header>
 
         {/* Orb center */}
-        <div className="flex-1 flex flex-col items-center justify-center" style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 70%)" }}>
+        <div className="flex-1 flex flex-col items-center justify-center relative overflow-hidden" style={{ background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 70%)" }}>
           <Orb state={orbState} transcript={transcript || undefined} onClick={handleOrbClick} />
+
+          {orbState === "speaking" && (
+            <div className="mt-3 flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--surface)]/80 backdrop-blur-md border border-[var(--border2)] text-xs font-medium shadow-sm transition-all animate-fadeIn">
+              <span
+                className="w-2 h-2 rounded-full animate-pulse"
+                style={{ backgroundColor: getEmotionStateMeta(activeEmotion).auraColor }}
+              />
+              <span className="text-[var(--text2)] font-mono text-[11px]">
+                {getEmotionStateMeta(activeEmotion).label}
+              </span>
+            </div>
+          )}
 
           {/* Proposal banner — Rex asking to proceed (e.g. implement fixes) */}
           {pendingProposal && (
@@ -2064,7 +2174,7 @@ export default function App() {
 
       {/* Right panel — 4 tabs: Chat / Code / Task / Preview */}
       {!rightPanelCollapsed && (
-        <ResizeHandle onDelta={(dx) => setRightPanelWidth((w) => clamp(w - dx, 280, 760))} />
+        <ResizeHandle onDelta={handleResizeRightPanel} />
       )}
       <RightPanel
         collapsed={rightPanelCollapsed}
