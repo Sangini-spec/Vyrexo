@@ -210,6 +210,26 @@ export function generateVercelConfig(): string {
 }
 
 /**
+ * Standard render.yaml Blueprint configuration for Render hosting
+ */
+export function generateRenderConfig(title: string): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "vyrexo-app";
+  return `services:
+  - type: web
+    name: ${slug}
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: PORT
+        value: 3000
+`;
+}
+
+/**
  * Standard tsconfig.json
  */
 export function generateTsConfig(): string {
@@ -496,6 +516,9 @@ test("project metadata validation", () => {
   }
   if (!fileMap.has("vercel.json")) {
     fileMap.set("vercel.json", generateVercelConfig());
+  }
+  if (!fileMap.has("render.yaml")) {
+    fileMap.set("render.yaml", generateRenderConfig(title));
   }
   if (!fileMap.has("README.md")) {
     fileMap.set("README.md", generateReadme(title, summary, techStack));

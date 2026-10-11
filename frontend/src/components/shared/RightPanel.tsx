@@ -350,7 +350,7 @@ function CodeTab({
 
   // ── Deployment Center dialog ──
   const [deployOpen, setDeployOpen] = useState(false);
-  const [deployTarget, setDeployTarget] = useState<"live_container" | "github_actions" | "vercel">("live_container");
+  const [deployTarget, setDeployTarget] = useState<"live_container" | "render" | "github_actions" | "vercel">("render");
   const [deployBusy, setDeployBusy] = useState(false);
   const [deployCopiedUrl, setDeployCopiedUrl] = useState(false);
   const [deployCopiedCiYaml, setDeployCopiedCiYaml] = useState(false);
@@ -362,6 +362,7 @@ function CodeTab({
     liveUrl?: string;
     previewUrl?: string;
     vercelDeployUrl?: string;
+    renderDeployUrl?: string;
     durationMs?: number;
     filesCount?: number;
     compilation?: { success: boolean; durationMs: number; output: string; bundleSize?: number };
@@ -1394,7 +1395,24 @@ jobs:
             {/* Tab 1: Deployment Target & Execution */}
             {deployActiveTab === "overview" && (
               <div className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div
+                    onClick={() => setDeployTarget("render")}
+                    className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                      deployTarget === "render"
+                        ? "border-emerald-500 bg-emerald-500/10 shadow-sm"
+                        : "border-[var(--border2)] bg-[var(--surface2)] hover:border-[var(--steel)]"
+                    }`}
+                  >
+                    <div className="text-xs font-semibold text-[var(--text)] flex items-center justify-between">
+                      <span>Render Cloud</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono">render.yaml</span>
+                    </div>
+                    <p className="text-[10px] text-[var(--muted)] mt-1 leading-snug">
+                      Host on Render Web Service with preconfigured <code className="text-[9px]">render.yaml</code> Blueprint & health checks.
+                    </p>
+                  </div>
+
                   <div
                     onClick={() => setDeployTarget("live_container")}
                     className={`p-3 rounded-xl border cursor-pointer transition-all ${
@@ -1438,7 +1456,7 @@ jobs:
                     }`}
                   >
                     <div className="text-xs font-semibold text-[var(--text)] flex items-center justify-between">
-                      <span>Vercel / Cloud</span>
+                      <span>Vercel / Docker</span>
                       <span className="text-[10px] text-indigo-400">Cloud</span>
                     </div>
                     <p className="text-[10px] text-[var(--muted)] mt-1 leading-snug">
@@ -1446,6 +1464,32 @@ jobs:
                     </p>
                   </div>
                 </div>
+
+                {deployTarget === "render" && (
+                  <div className="p-3.5 rounded-xl bg-[var(--surface2)] border border-[var(--border2)] space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-[var(--text)]">Render Web Service Blueprint Ready</span>
+                      <a
+                        href="https://dashboard.render.com/blueprint/new?repo=https://github.com/Sangini-spec/Vyrexo"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-all"
+                      >
+                        Open Render Blueprint ↗
+                      </a>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px] font-mono bg-black/30 p-2.5 rounded-lg border border-[var(--border)]">
+                      <div>
+                        <span className="text-[var(--muted)] block text-[10px]">Build Command</span>
+                        <span className="text-emerald-300">npm install && npm run build</span>
+                      </div>
+                      <div>
+                        <span className="text-[var(--muted)] block text-[10px]">Start Command</span>
+                        <span className="text-emerald-300">npm run start</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* If already deployed */}
                 {deployResult?.status === "live" && (

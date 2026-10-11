@@ -14,11 +14,12 @@ export interface DeploymentRecord {
   id: string;
   sessionId: string;
   projectTitle: string;
-  target: "live_container" | "github_actions" | "vercel" | "docker";
+  target: "live_container" | "github_actions" | "vercel" | "render" | "docker";
   status: "building" | "live" | "failed";
   liveUrl: string;
   previewUrl: string;
   vercelDeployUrl?: string;
+  renderDeployUrl?: string;
   createdAt: number;
   completedAt: number;
   durationMs: number;
@@ -165,14 +166,15 @@ export async function POST(request: NextRequest) {
     const proto = request.headers.get("x-forwarded-proto") || "https";
     const fullLiveUrl = `${proto}://${host}${previewUrl}`;
 
-    // Vercel deploy link
-    const vercelDeployUrl = `https://vercel.com/new/import?s=https://github.com/developer/${project.slug}`;
+    // Vercel & Render deploy links
+    const vercelDeployUrl = `https://vercel.com/new/import?s=https://github.com/Sangini-spec/Vyrexo`;
+    const renderDeployUrl = `https://dashboard.render.com/blueprint/new?repo=https://github.com/Sangini-spec/Vyrexo`;
 
     steps.push({
       name: "Live Container Provisioning & Routing",
       status: "completed",
       durationMs: Date.now() - step5Start,
-      log: `Deployment live at ${previewUrl} with isolated session runtime.`,
+      log: `Deployment live at ${previewUrl} with Render Blueprint (render.yaml) ready.`,
     });
 
     const isSuccess = compilation.success && testing.success;
@@ -186,6 +188,7 @@ export async function POST(request: NextRequest) {
       liveUrl: fullLiveUrl,
       previewUrl,
       vercelDeployUrl,
+      renderDeployUrl,
       createdAt: startTime,
       completedAt: Date.now(),
       durationMs: Date.now() - startTime,
