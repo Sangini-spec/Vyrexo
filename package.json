@@ -6,15 +6,14 @@
     "frontend"
   ],
   "scripts": {
-    "postinstall": "npm install --prefix frontend",
-    "dev": "npm run dev --prefix frontend",
-    "build": "npm run build --prefix frontend",
-    "start": "npm run start --prefix frontend",
-    "lint": "npm run lint --prefix frontend"
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend",
+    "start": "npm run start --workspace=frontend",
+    "lint": "npm run lint --workspace=frontend"
   },
   "dependencies": {
     "jszip": "^3.10.2",
-    "msedge-tts": "^2.0.9"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/jszip": "^3.4.1"
