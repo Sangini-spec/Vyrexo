@@ -14,6 +14,8 @@ class LLMSettings(BaseSettings):
     model_heavy: str = "gemini-3.8-flash"
     model_light: str = "gemini-3.8-flash"
     gemini_api_key: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
     groq_api_key: str = ""
     openrouter_api_key: str = ""
     # Generic overrides for any OpenAI-compatible endpoint
@@ -88,6 +90,8 @@ class Settings(BaseSettings):
 
     # Provider keys at top level for convenience (no LLM_ prefix needed in .env)
     gemini_api_key: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
     groq_api_key: str = ""
     openrouter_api_key: str = ""
 
@@ -101,6 +105,10 @@ class Settings(BaseSettings):
         # Sync top-level API keys to the nested LLM settings so either form works
         if self.gemini_api_key and not self.llm.gemini_api_key:
             self.llm.gemini_api_key = self.gemini_api_key
+        if self.anthropic_api_key and not self.llm.anthropic_api_key:
+            self.llm.anthropic_api_key = self.anthropic_api_key
+        if self.openai_api_key and not self.llm.openai_api_key:
+            self.llm.openai_api_key = self.openai_api_key
         if self.groq_api_key and not self.llm.groq_api_key:
             self.llm.groq_api_key = self.groq_api_key
         if self.openrouter_api_key and not self.llm.openrouter_api_key:

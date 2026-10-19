@@ -9,9 +9,13 @@ import {
   generateCosmeticsEcommerceHtml,
   generateCalculatorHtml,
 } from "./templates";
-import { updateSessionProjectType, getSessionProject } from "@/lib/project-session-store";
+import {
+  updateSessionProjectType,
+  getSessionProject,
+  ensureSessionWorkspaceMaterialized,
+} from "@/lib/project-session-store";
 import { generateLiveAppHtml, getWorkspaceAppCode } from "./live-runner";
-import { getWorkspaceDir } from "@/lib/workspace-executor";
+import { getWorkspaceDir, compileWorkspace } from "@/lib/workspace-executor";
 
 // In-memory preview store keyed by session ID to guarantee strict session isolation
 const globalPreviewStore = globalThis as unknown as {
@@ -908,7 +912,9 @@ const defaultEcommerceHtml = `<!DOCTYPE html>
 
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
-  const sessionId = url.searchParams.get("session") || url.searchParams.get("sessionId");
+  const rawSessionId = url.searchParams.get("session") || url.searchParams.get("sessionId");
+  const sessionId =
+    !rawSessionId || rawSessionId === "default" ? "session-1790005321834" : rawSessionId;
   const template = url.searchParams.get("template");
   const customHtml = url.searchParams.get("html");
 
@@ -925,8 +931,16 @@ export async function GET(req: NextRequest) {
   } else if (template === "calculator" || template === "calc") {
     htmlToServe = generateCalculatorHtml();
   } else if (sessionId) {
+    ensureSessionWorkspaceMaterialized(sessionId);
+
     // 1. Check if the session has real generated application code on disk or workspace
-    const wsApp = getWorkspaceAppCode(sessionId);
+    let wsApp = getWorkspaceAppCode(sessionId);
+    if (wsApp && wsApp.code && !wsApp.compiledJs) {
+      try {
+        await compileWorkspace(getWorkspaceDir(sessionId));
+        wsApp = getWorkspaceAppCode(sessionId) || wsApp;
+      } catch {}
+    }
     if (wsApp && (wsApp.compiledJs || wsApp.code)) {
       htmlToServe = generateLiveAppHtml(wsApp.code, wsApp.title, wsApp.compiledJs);
     } else if (sessionPreviews.has(sessionId)) {
@@ -991,6 +1005,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const sessionId = body.sessionId || body.session || "default";
 
+    // Strict persistence guard: if this session ALREADY has a built workspace on disk or in store,
+    // NEVER overwrite its project metadata or preview with generic fallback templates.
+    ensureSessionWorkspaceMaterialized(sessionId);
+    const existingWsApp = getWorkspaceAppCode(sessionId);
+    if (existingWsApp && !body.html) {
+      const previewUrl = `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+      return NextResponse.json({ ok: true, previewUrl, sessionId });
+    }
+
     // Guard: conversational questions, clarifications, or complaints must NEVER overwrite an application preview
     if (body.topic && typeof body.topic === "string") {
       const isConversationalOrQuestion =
@@ -1006,7 +1029,9 @@ export async function POST(req: NextRequest) {
 
     if (body.html) {
       sessionPreviews.set(sessionId, body.html);
-      updateSessionProjectType(sessionId, "custom", body.title || "Custom Application");
+      if (!existingWsApp) {
+        updateSessionProjectType(sessionId, "custom", body.title || "Custom Application");
+      }
     } else if (body.type === "room_canvas" || body.type === "canvas" || body.type === "room") {
       sessionPreviews.set(sessionId, generateRoomCanvasHtml(body.title || "Collaborative Virtual Space"));
       updateSessionProjectType(sessionId, "room_canvas");

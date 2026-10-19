@@ -1,0 +1,35 @@
+{
+  "project": {
+    "id": "session-1790005321834",
+    "type": "custom",
+    "title": "RailGo — High-Speed Train & Railway Booking Platform",
+    "summary": "Interactive software application for RailGo — High-Speed Train & Railway Booking Platform.",
+    "features": [
+      "Dedicated isolated sandbox workspace (10 files)",
+      "Interactive components and state management",
+      "Automated build and unit test verification"
+    ],
+    "techStack": [
+      "React 19",
+      "TypeScript",
+      "Tailwind CSS",
+      "Vite",
+      "Bun Test"
+    ],
+    "components": [
+      "README.md",
+      "index.html",
+      "package.json",
+      "src/components/App.tsx",
+      "src/main.tsx",
+      "src/styles/globals.css",
+      "src/types/index.ts",
+      "tests/app.test.ts",
+      "tsconfig.json",
+      "vite.config.ts"
+    ],
+    "previewUrl": "/api/preview?session=session-1790005321834",
+    "createdAt": 1792401428955
+  },
+  "updatedAt": 1792401428955
+}

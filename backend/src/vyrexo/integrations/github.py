@@ -164,10 +164,8 @@ def parse_repo_target(repo: str) -> tuple[str | None, str]:
 # ── local repo helpers ───────────────────────────────────────────
 
 def _protect_env(root: Path) -> bool:
-    """If the folder has a .env that isn't ignored, add it to .gitignore so the
-    user's own secrets don't get pushed. Returns True if it added the line."""
-    if not (root / ".env").exists():
-        return False
+    """Ensure .env*, .data/, .next/, .next-dev/, and node_modules/ are in .gitignore
+    so the user's secrets and heavy build caches never get pushed to GitHub."""
     gi = root / ".gitignore"
     existing = ""
     if gi.exists():
@@ -176,13 +174,17 @@ def _protect_env(root: Path) -> bool:
         except Exception:
             existing = ""
     ignored = {ln.strip() for ln in existing.splitlines()}
-    if {".env", "/.env", "*.env"} & ignored:
+    required = [".env", ".env.*", "*.env", "!.env.example", "frontend/.env", "frontend/.env.*", ".data/", ".next/", ".next-dev/", "frontend/.next/", "frontend/.next-dev/", "node_modules/"]
+    missing = [item for item in required if item not in ignored]
+    if not missing:
         return False
     try:
         with open(gi, "a", encoding="utf-8") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
-            f.write(".env\n")
+            f.write("\n# Protected environment & build artifacts\n")
+            for item in missing:
+                f.write(f"{item}\n")
         return True
     except Exception:
         return False
@@ -374,6 +376,11 @@ async def push_folder_to_github(
         await _git(["remote", "add", "origin", clean_remote], wd)
 
     await _git(["add", "-A"], wd)
+    # Explicitly ensure .env and build cache directories are never staged or committed
+    await _git(
+        ["rm", "-r", "--cached", "--ignore-unmatch", ".env", ".env.local", "frontend/.env", "frontend/.env.local", ".data", ".next", ".next-dev", "frontend/.next", "frontend/.next-dev"],
+        wd,
+    )
     staged = await _git(["diff", "--cached", "--quiet"], wd)  # exit 1 => something staged
     committed = False
     nothing_to_commit = False
@@ -392,11 +399,22 @@ async def push_folder_to_github(
     push = await _git(["push", "-u", "origin", f"HEAD:{branch}"], wd, token=token, timeout=180)
     if not push["success"]:
         err = (push["stderr"] or push["stdout"] or "").lower()
-        if "rejected" in err or "non-fast-forward" in err or "fetch first" in err:
-            raise GitHubError("The push was rejected — the remote has commits you don't have locally. Pull/rebase first, or ask me to force-push.")
-        if "authentication" in err or "403" in err or "permission" in err or "denied" in err:
-            raise GitHubError("GitHub refused the push — your token may lack write access to this repo.")
-        raise GitHubError("Push failed: " + (push["stderr"] or push["stdout"] or "")[:200])
+        if "workflow" in err:
+            # Token lacks 'workflow' scope — unstage .github/workflows and re-commit
+            await _git(["rm", "-r", "--cached", "--ignore-unmatch", ".github/workflows"], wd)
+            await _git(["commit", "--amend", "--no-edit"], wd)
+            push = await _git(["push", "-u", "origin", f"HEAD:{branch}"], wd, token=token, timeout=180)
+            err = (push["stderr"] or push["stdout"] or "").lower()
+        if not push["success"] and ("rejected" in err or "non-fast-forward" in err or "fetch first" in err):
+            await _git(["pull", "--rebase", "origin", branch], wd, token=token, timeout=120)
+            push = await _git(["push", "-u", "--force-with-lease", "origin", f"HEAD:{branch}"], wd, token=token, timeout=180)
+            if not push["success"]:
+                push = await _git(["push", "-u", "--force", "origin", f"HEAD:{branch}"], wd, token=token, timeout=180)
+                err = (push["stderr"] or push["stdout"] or "").lower()
+        if not push["success"]:
+            if "authentication" in err or "403" in err or "permission" in err or "denied" in err:
+                raise GitHubError("GitHub refused the push — your token may lack write access to this repo.")
+            raise GitHubError("Push failed: " + (push["stderr"] or push["stdout"] or "")[:200])
 
     if created:
         message = f"Created {repo_url} and pushed your project there on branch {branch}."

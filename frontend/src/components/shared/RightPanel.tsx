@@ -56,6 +56,8 @@ interface RightPanelProps {
   onConnectProject?: () => void;
   sessionId?: string;
   onClearChat?: () => void;
+  hasProjectFiles?: boolean;
+  projectTitle?: string;
 }
 
 const TABS: { key: RightTab; label: string }[] = [
@@ -82,6 +84,8 @@ export function RightPanel({
   onConnectProject,
   sessionId,
   onClearChat,
+  hasProjectFiles,
+  projectTitle,
 }: RightPanelProps) {
   return (
     <div
@@ -138,7 +142,13 @@ export function RightPanel({
         )}
         {activeTab === "task" && <TaskTab narration={narration} steps={steps} />}
         {activeTab === "preview" && (
-          <PreviewTab previewUrl={previewUrl} onPreviewUrlChange={onPreviewUrlChange} sessionId={sessionId} />
+          <PreviewTab
+            previewUrl={previewUrl}
+            onPreviewUrlChange={onPreviewUrlChange}
+            sessionId={sessionId}
+            hasProjectFiles={hasProjectFiles}
+            projectTitle={projectTitle}
+          />
         )}
       </div>
 
@@ -491,7 +501,15 @@ function CodeTab({
           setTree(d.tree as TreeNode[]);
           setExpanded((prev) => {
             const next = new Set(prev);
-            (d.tree as TreeNode[]).forEach((n) => n.type === "dir" && next.add(n.path));
+            const expandDirs = (nodes: TreeNode[]) => {
+              for (const n of nodes) {
+                if (n.type === "dir") {
+                  next.add(n.path);
+                  if (n.children) expandDirs(n.children);
+                }
+              }
+            };
+            expandDirs(d.tree as TreeNode[]);
             return next;
           });
 
@@ -502,20 +520,28 @@ function CodeTab({
           }
 
           if (autoSelectFirst || !openPathRef.current) {
-            const findFirstFile = (nodes: TreeNode[]): string | null => {
+            const collectAllFiles = (nodes: TreeNode[]): string[] => {
+              const out: string[] = [];
               for (const n of nodes) {
-                if (n.type === "file") return n.path;
-                if (n.children) {
-                  const found = findFirstFile(n.children);
-                  if (found) return found;
-                }
+                if (n.type === "file") out.push(n.path);
+                if (n.children) out.push(...collectAllFiles(n.children));
               }
-              return null;
+              return out;
             };
-            const first = findFirstFile(d.tree);
-            if (first) {
-              openFile(first);
+            const allFiles = collectAllFiles(d.tree as TreeNode[]);
+            const preferred =
+              allFiles.find((p) => p === "src/components/App.tsx" || p.endsWith("/App.tsx") || p === "App.tsx") ||
+              allFiles[0] ||
+              null;
+            if (preferred) {
+              openFile(preferred);
             }
+          }
+        } else {
+          setTree([]);
+          if (autoSelectFirst) {
+            setOpenPath("");
+            setOpenContent("");
           }
         }
       } catch {
@@ -591,10 +617,8 @@ function CodeTab({
     setGhStatus(null);
     setGhOpen(true);
     try {
-      const savedToken = localStorage.getItem("vyrexo_gh_token");
-      if (savedToken && !ghToken) {
-        setGhToken(savedToken);
-      }
+      // Ensure no Personal Access Token is persisted in browser localStorage
+      localStorage.removeItem("vyrexo_gh_token");
     } catch {}
 
     fetch("/api/github/status")
@@ -608,11 +632,9 @@ function CodeTab({
     setGhBusy(true);
     setGhResult(null);
     try {
-      if (ghRememberToken && ghToken.trim()) {
-        try {
-          localStorage.setItem("vyrexo_gh_token", ghToken.trim());
-        } catch {}
-      }
+      try {
+        localStorage.removeItem("vyrexo_gh_token");
+      } catch {}
 
       const fileList =
         virtualFiles.size > 0
@@ -726,6 +748,9 @@ function CodeTab({
   // Initial tree load on mount or when active project/session changes
   useEffect(() => {
     let active = true;
+    setOpenPath("");
+    setOpenContent("");
+    openPathRef.current = "";
     setTreeLoading(true);
     refreshTree(true).finally(() => {
       if (active) setTreeLoading(false);
@@ -1730,10 +1755,14 @@ function PreviewTab({
   previewUrl,
   onPreviewUrlChange,
   sessionId,
+  hasProjectFiles,
+  projectTitle,
 }: {
   previewUrl: string;
   onPreviewUrlChange: (url: string) => void;
   sessionId?: string;
+  hasProjectFiles?: boolean;
+  projectTitle?: string;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -1793,6 +1822,36 @@ function PreviewTab({
           className="flex-1 w-full bg-white"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         />
+      ) : hasProjectFiles ? (
+        <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-3.5">
+          <span className="p-3 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/25">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="6" y="4" width="4" height="16" rx="1"></rect>
+              <rect x="14" y="4" width="4" height="16" rx="1"></rect>
+            </svg>
+          </span>
+          <div className="max-w-xs space-y-1">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-300 text-[10px] font-semibold uppercase tracking-wider mb-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              Preview Paused
+            </div>
+            <h4 className="text-xs font-semibold text-[var(--text)]">
+              {projectTitle || "Project Workspace Restored"}
+            </h4>
+            <p className="text-[11px] text-[var(--muted)] leading-relaxed">
+              Your generated project files are safely restored in the <strong className="text-[var(--text3)]">Files</strong> tab. Click below or tell Rex <em className="text-[var(--ice)]">&ldquo;run the project again&rdquo;</em> to start the live preview server.
+            </p>
+          </div>
+          <button
+            onClick={() => onPreviewUrlChange(`/api/preview?session=${encodeURIComponent(sessionId || "default")}&t=${Date.now()}`)}
+            className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            Resume Live Preview
+          </button>
+        </div>
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-3">
           <span className="p-3 rounded-2xl bg-[var(--surface2)] text-[var(--steel)] border border-[var(--border2)]">
@@ -1810,7 +1869,7 @@ function PreviewTab({
           </div>
           <button
             onClick={() => onPreviewUrlChange(`/api/preview?session=${encodeURIComponent(sessionId || "default")}`)}
-            className="px-3.5 py-1.5 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all shadow-sm flex items-center gap-1.5"
+            className="px-3.5 py-1.5 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>

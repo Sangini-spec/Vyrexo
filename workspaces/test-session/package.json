@@ -1,0 +1,23 @@
+{
+  "name": "vyrexo-application",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vyrexo Application built with Vyrexo",
+  "scripts": {
+    "dev": "next dev || bun run src/components/App.tsx",
+    "build": "bun build src/components/App.tsx --outdir dist || next build",
+    "start": "next start || node dist/App.js",
+    "test": "bun test tests/app.test.ts",
+    "lint": "next lint || eslint ."
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

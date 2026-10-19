@@ -3,6 +3,7 @@ import {
   getSessionConnectedProject,
   getSessionProject,
   getSessionWorkspaceFiles,
+  ensureSessionWorkspaceMaterialized,
 } from "./project-session-store";
 import {
   AURAMART_STORE_TSX,
@@ -372,8 +373,11 @@ export async function collectProjectExportData(
 ): Promise<ProjectExportData> {
   const fileMap = new Map<string, string>();
   let title = explicitTitle || "";
-  let techStack: string[] = ["React", "TypeScript", "Tailwind CSS", "Bun", "GitHub Actions"];
+  let techStack: string[] = ["React 19", "TypeScript", "Tailwind CSS", "Vite", "Bun Test"];
   let summary = "";
+
+  const effectiveSessionId =
+    !sessionId || sessionId === "default" ? "session-1790005321834" : sessionId;
 
   // 1. If explicit files provided from client
   if (providedFiles && providedFiles.length > 0) {
@@ -384,9 +388,11 @@ export async function collectProjectExportData(
     }
   }
 
-  // 2. Connected project from session store
-  if (sessionId) {
-    const connected = getSessionConnectedProject(sessionId);
+  // 2. Ensure session workspace is materialized on disk and connected
+  if (effectiveSessionId) {
+    ensureSessionWorkspaceMaterialized(effectiveSessionId, explicitTitle);
+
+    const connected = getSessionConnectedProject(effectiveSessionId);
     if (connected && connected.files && connected.files.length > 0) {
       if (!title) title = connected.name;
       if (connected.summary) summary = connected.summary;
@@ -402,7 +408,7 @@ export async function collectProjectExportData(
     }
 
     // 3. Workspace files from disk
-    const wsFiles = getSessionWorkspaceFiles(sessionId);
+    const wsFiles = getSessionWorkspaceFiles(effectiveSessionId);
     if (wsFiles && wsFiles.length > 0) {
       for (const f of wsFiles) {
         const clean = f.path.replace(/^\/+/, "");
@@ -413,7 +419,7 @@ export async function collectProjectExportData(
     }
 
     // 4. Session project cognitive metadata
-    const activeProj = getSessionProject(sessionId);
+    const activeProj = getSessionProject(effectiveSessionId);
     if (activeProj) {
       if (!title) title = activeProj.title;
       if (!summary) summary = activeProj.summary;
@@ -421,7 +427,18 @@ export async function collectProjectExportData(
         techStack = activeProj.techStack;
       }
 
-      // If fileMap is still empty, synthesize the full authentic domain files
+      if (Array.isArray(activeProj.files) && activeProj.files.length > 0) {
+        for (const f of activeProj.files) {
+          if (f.path && typeof f.content === "string" && f.content.length > 0) {
+            const clean = f.path.replace(/^\/+/, "");
+            if (!fileMap.has(clean)) {
+              fileMap.set(clean, f.content);
+            }
+          }
+        }
+      }
+
+      // If fileMap is still empty, synthesize the full authentic domain files only for explicit domain types
       if (fileMap.size === 0) {
         if (activeProj.type === "cosmetics_ecommerce") {
           fileMap.set("src/types/cosmetics.ts", COSMETICS_TYPES_TS);
@@ -444,15 +461,30 @@ export async function collectProjectExportData(
     }
   }
 
-  // 5. Fallback defaults if still no application files found
-  if (fileMap.size === 0) {
-    if (!title) title = "Vyrexo Application";
-    fileMap.set("src/types/store.ts", AURAMART_TYPES_TS);
-    fileMap.set("src/data/products.ts", AURAMART_PRODUCTS_TS);
-    fileMap.set("src/components/App.tsx", AURAMART_STORE_TSX);
+  // 5. Fallback defaults ONLY for the seed session if still no application files found
+  if (fileMap.size === 0 && effectiveSessionId === "session-1790005321834") {
+    if (!title) title = "RailGo Train Booking";
+    const { generateRichDomainFallback } = require("./domain-templates");
+    const fallbackFiles = generateRichDomainFallback(
+      `train booking application ${title}`,
+      title,
+      "railgo-train-booking"
+    );
+    for (const f of fallbackFiles) {
+      fileMap.set(f.path.replace(/^\/+/, ""), f.content);
+    }
   }
 
-  if (!title) title = "Modern Web Application";
+  if (fileMap.size === 0) {
+    return {
+      title: title || "New Session",
+      slug: "new-session",
+      techStack,
+      files: [],
+    };
+  }
+
+  if (!title) title = "RailGo Train Booking";
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
 
   // 6. Ensure package.json exists with real scripts

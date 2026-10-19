@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
@@ -273,12 +275,17 @@ export default function SettingsPage() {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/20 to-blue-500/20 border border-indigo-500/30 flex items-center justify-center text-lg flex-shrink-0">
               🎙️
             </div>
-            <div>
-              <div className="text-xs font-semibold text-[var(--text)]">
-                Autonomous Emotional Awareness Enabled
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[var(--text)]">
+                  Autonomous Emotional Awareness Engine Active
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  ElevenLabs Primary • Gemini TTS Fallback
+                </span>
               </div>
-              <div className="text-[11.5px] text-[var(--muted2)] mt-0.5 leading-relaxed">
-                Rex automatically senses your mood: shifting to excited enthusiasm when you celebrate a win, deep empathy and calm support when you&apos;re frustrated or sharing a personal concern, and focused clarity during complex system design.
+              <div className="text-[11.5px] text-[var(--muted2)] mt-1 leading-relaxed">
+                Rex automatically senses your mood: shifting to excited enthusiasm when you celebrate a win, deep empathy and calm support when you&apos;re frustrated or sharing a personal concern, and focused clarity during complex system design. Powered continuously by ElevenLabs with instant automated fallback to Gemini API TTS if monthly credits are exceeded.
               </div>
             </div>
           </div>

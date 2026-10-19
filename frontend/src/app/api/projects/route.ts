@@ -3,10 +3,14 @@ import {
   setSessionConnectedProject,
   getSessionConnectedProject,
   removeSessionConnectedProject,
+  getSessionProject,
+  getSessionWorkspaceFiles,
+  ensureSessionWorkspaceMaterialized,
   analyzeCodebase,
   ConnectedProject,
   ProjectFile,
 } from "@/lib/project-session-store";
+import { getWorkspaceDir } from "@/lib/workspace-executor";
 
 interface ProjectItem {
   name: string;
@@ -29,10 +33,10 @@ const mockProjects: ProjectItem[] = [
     filesCount: 18,
   },
   {
-    name: "vyrexo-workspace",
-    path: ".",
-    description: "Current active workspace",
-    filesCount: 24,
+    name: "sandbox-workspace",
+    path: "/workspaces/default",
+    description: "Isolated sandbox project workspace",
+    filesCount: 6,
   },
 ];
 
@@ -85,12 +89,35 @@ export async function GET(request: NextRequest) {
   const sessionId = searchParams.get("sessionId");
 
   if (sessionId) {
+    ensureSessionWorkspaceMaterialized(sessionId);
     const connected = getSessionConnectedProject(sessionId);
     if (connected) {
+      const safePath = connected.path === "." ? getWorkspaceDir(sessionId) : connected.path;
       return NextResponse.json({
         ok: true,
         connected: true,
-        project: connected,
+        project: { ...connected, path: safePath },
+      });
+    }
+    const generated = getSessionProject(sessionId);
+    const wsFiles = getSessionWorkspaceFiles(sessionId);
+    if (generated && wsFiles.length > 0) {
+      return NextResponse.json({
+        ok: true,
+        connected: true,
+        project: {
+          id: `proj-${sessionId}`,
+          sessionId,
+          name: generated.title,
+          path: getWorkspaceDir(sessionId),
+          source: "workspace",
+          summary: `${generated.title} (${wsFiles.length} files)`,
+          techStack: ["React 18", "TypeScript", "Tailwind CSS"],
+          filesCount: wsFiles.length,
+          files: wsFiles,
+          connectedAt: generated.createdAt,
+          lastUpdatedAt: generated.createdAt,
+        },
       });
     }
     return NextResponse.json({
@@ -112,7 +139,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const sessionId = body.sessionId || "default";
     const name = (body.name || `project-${Date.now()}`).trim();
-    const path = body.path || `/projects/${name}`;
+    const rawPath = body.path || `/workspaces/${sessionId}`;
+    const path = rawPath === "." ? getWorkspaceDir(sessionId) : rawPath;
     const source = body.source || (body.files?.length ? "local_folder" : "workspace");
 
     let files: ProjectFile[] = Array.isArray(body.files) ? body.files : [];

@@ -1,0 +1,18 @@
+{
+  "name": "add-a-15-minute-quick-sprint-preset-button-to-the",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/components/App.tsx",
+    "test": "bun test tests/app.test.ts"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}

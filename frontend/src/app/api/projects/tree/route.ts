@@ -2,23 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   getSessionConnectedProject,
   getSessionWorkspaceFiles,
+  ensureSessionWorkspaceMaterialized,
   buildFileTree,
 } from "@/lib/project-session-store";
 import { collectProjectExportData } from "@/lib/project-export";
 
-interface TreeNode {
-  name: string;
-  type: "file" | "dir";
-  path: string;
-  children?: TreeNode[];
-}
-
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const sessionId = searchParams.get("sessionId");
+  const rawSessionId = searchParams.get("sessionId");
+  const titleHint = searchParams.get("title") || undefined;
+  const sessionId =
+    !rawSessionId || rawSessionId === "default" ? "session-1790005321834" : rawSessionId;
 
   if (sessionId) {
-    // 1. Check if session has a connected project
+    // Ensure previously built session workspace (e.g. RailGo train booking) is materialized on disk
+    ensureSessionWorkspaceMaterialized(sessionId, titleHint);
+
+    // 1. Check if session has a connected project with complete files
     const connectedProject = getSessionConnectedProject(sessionId);
     if (connectedProject && connectedProject.files && connectedProject.files.length > 0) {
       const tree = buildFileTree(connectedProject.files);
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
         ok: true,
         tree,
         project: {
-          name: "Active Workspace Project",
+          name: titleHint || "Active Sandbox Project",
           path: `workspaces/${sessionId}`,
           source: "workspace",
           filesCount: wsFiles.length,
@@ -50,9 +50,18 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 3. Fallback to synthesizing export data for this session
+    // 3. If this is a brand-new empty session ("New Session"), return empty tree until user builds
+    if (titleHint === "New Session") {
+      return NextResponse.json({
+        ok: true,
+        tree: [],
+        project: null,
+      });
+    }
+
+    // 4. Fallback to synthesizing export data for this session
     try {
-      const projectData = await collectProjectExportData(sessionId);
+      const projectData = await collectProjectExportData(sessionId, undefined, titleHint);
       if (projectData.files.length > 0) {
         const formatted = projectData.files.map((f) => ({
           path: f.path,
@@ -75,22 +84,10 @@ export async function GET(request: NextRequest) {
     } catch {}
   }
 
-  // Default starter tree
-  const defaultProject = await collectProjectExportData();
-  const formatted = defaultProject.files.map((f) => ({
-    path: f.path,
-    content: f.content,
-    size: Buffer.byteLength(f.content, "utf-8"),
-    lastModified: Date.now(),
-  }));
-  const tree = buildFileTree(formatted);
-
   return NextResponse.json({
     ok: true,
-    tree,
-    project: {
-      name: defaultProject.title,
-      filesCount: formatted.length,
-    },
+    tree: [],
+    project: null,
   });
 }
+

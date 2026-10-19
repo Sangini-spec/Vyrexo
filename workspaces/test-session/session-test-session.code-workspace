@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "name": "session-test-session",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "workbench.startupEditor": "none",
+    "explorer.autoReveal": true
+  }
+}

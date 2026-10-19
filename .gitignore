@@ -9,14 +9,33 @@ build/
 .venv/
 venv/
 
-# Node
+# Node & Next.js Build Artifacts
 node_modules/
+frontend/node_modules/
 .next/
+.next-dev/
+frontend/.next/
+frontend/.next-dev/
 out/
+frontend/out/
 
-# Environment
+# Environment & Secrets (Never commit secrets to Git/GitHub)
 .env
+.env.*
 .env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+frontend/.env
+frontend/.env.*
+frontend/.env.local
+frontend/.env.*.local
+frontend/.env.development
+frontend/.env.production
+*.env
+!.env.example
+!frontend/.env.example
 
 # IDE
 .vscode/
@@ -29,8 +48,10 @@ out/
 .DS_Store
 Thumbs.db
 
-# Vyrexo data
+# Vyrexo data & runtime stores (Never commit runtime state or secret stores)
 .vyrexo/
+.data/
+frontend/.data/
 
 # Testing
 .pytest_cache/

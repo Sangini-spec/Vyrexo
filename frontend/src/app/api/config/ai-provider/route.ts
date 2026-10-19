@@ -12,8 +12,13 @@ import {
   removeElevenLabsConfig,
   testElevenLabsConnection,
 } from "@/lib/ai-provider-config";
+import {
+  getAnthropicCodingConfig,
+  CLAUDE_CODING_MODEL,
+} from "@/lib/claude/coding-agent";
 
 export async function GET() {
+  const anthropicConfig = getAnthropicCodingConfig();
   const openAiConfig = getOpenAIConfig();
   const isOpenAiConfigured = Boolean(openAiConfig.openAiApiKey);
 
@@ -72,6 +77,18 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     provider: activeProvider,
+    codingAgent: {
+      provider: anthropicConfig.configured ? "anthropic" : "gemini",
+      configured: anthropicConfig.configured,
+      model: anthropicConfig.model,
+      maxOutputTokens: anthropicConfig.maxOutputTokens,
+      source: anthropicConfig.source,
+    },
+    conversationalAgent: {
+      provider: "gemini",
+      configured: Boolean(process.env.GEMINI_API_KEY),
+      model: "gemini-3.8-flash",
+    },
     elevenlabs: {
       configured: isElevenConfigured,
       status: elevenStatus,
@@ -79,9 +96,6 @@ export async function GET() {
       characterLimit: elevenCharLimit,
       model: elevenConfig.elevenLabsModel,
       source: elevenConfig.source,
-      maskedKey: elevenConfig.elevenLabsApiKey
-        ? `${elevenConfig.elevenLabsApiKey.slice(0, 4)}...${elevenConfig.elevenLabsApiKey.slice(-4)}`
-        : null,
       voices: [
         { id: "adam", name: "Adam (American Male - Conversational, Expressive)", elevenId: "pNInz6obpgDQGcFmaJgB", status: "active" },
         { id: "ryan", name: "Brian (British Male - Rich, Narrative)", elevenId: "nPczCjzI2devNBz1zQrb", status: "active" },
@@ -96,9 +110,6 @@ export async function GET() {
       baseUrl: chariotConfig.chariotBaseUrl,
       model: chariotConfig.chariotModel,
       source: chariotConfig.source,
-      maskedKey: chariotConfig.chariotApiKey
-        ? `${chariotConfig.chariotApiKey.slice(0, 6)}...${chariotConfig.chariotApiKey.slice(-4)}`
-        : null,
       voices: [
         { id: "adam", name: "Matt (Adam)", gender: "Male", accent: "American", status: "active" },
         { id: "ava", name: "Mia (Ava)", gender: "Female", accent: "American", status: "active" },
@@ -110,17 +121,14 @@ export async function GET() {
       configured: isOpenAiConfigured,
       model: openAiConfig.openAiModel,
       source: openAiConfig.source,
-      maskedKey: openAiConfig.openAiApiKey
-        ? `${openAiConfig.openAiApiKey.slice(0, 7)}...${openAiConfig.openAiApiKey.slice(-4)}`
-        : null,
     },
     activeAgents: [
-      { name: "planner", role: "Software Architect & Specification Engine" },
-      { name: "coder", role: "Principal TSX/React Engineer" },
+      { name: "planner", role: "Software Architect & Specification Engine", model: CLAUDE_CODING_MODEL },
+      { name: "coder", role: "Principal TSX/React Engineer (Claude Sonnet 5.5)", model: CLAUDE_CODING_MODEL },
       { name: "executor", role: "Bun Bundler & Runtime Packager" },
-      { name: "reviewer", role: "Code Quality & Static Analysis Auditor" },
-      { name: "tester", role: "Automated Bun Test Runner" },
-      { name: "documenter", role: "Technical Documentation Author" },
+      { name: "reviewer", role: "Code Quality & Autonomous Repair Auditor", model: CLAUDE_CODING_MODEL },
+      { name: "tester", role: "Automated Bun & Acceptance Test Runner" },
+      { name: "documenter", role: "Technical Documentation Author", model: CLAUDE_CODING_MODEL },
     ],
   });
 }
@@ -129,14 +137,21 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const provider = (typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "elevenlabs") as "elevenlabs" | "chariot" | "openai";
-    const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    const explicitKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    const apiKey =
+      explicitKey ||
+      (provider === "elevenlabs"
+        ? getElevenLabsConfig().elevenLabsApiKey || ""
+        : provider === "chariot"
+        ? getChariotConfig().chariotApiKey || ""
+        : getOpenAIConfig().openAiApiKey || "");
     const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : undefined;
     const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_turbo_v2_5" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
-    const testOnly = Boolean(body.testOnly);
+    const testOnly = Boolean(body.testOnly) || !explicitKey;
 
     if (!apiKey) {
       return NextResponse.json(
-        { ok: false, error: `${provider === "elevenlabs" ? "ElevenLabs" : provider === "chariot" ? "Chariot" : "OpenAI"} API key is required` },
+        { ok: false, error: `${provider === "elevenlabs" ? "ElevenLabs" : provider === "chariot" ? "Chariot" : "OpenAI"} API key is not configured on the server.` },
         { status: 400 }
       );
     }

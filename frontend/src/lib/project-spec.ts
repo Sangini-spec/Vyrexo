@@ -50,6 +50,169 @@ export interface ProjectSpecification {
  * e.g. "Build a modern food delivery platform where users can discover restaurants..." -> "BiteFlow" (inferred)
  * NEVER returns an arbitrary sentence, paragraph, or trailing instruction.
  */
+/**
+ * Detects whether a user utterance is a non-topical acknowledgement, praise, greeting,
+ * or generic execution trigger (e.g. "good job", "don correctly", "done correctly",
+ * "start building", "run the project again") that should NEVER be used as a chat title.
+ */
+export function isNonTopicalUtterance(prompt: string): boolean {
+  if (!prompt || typeof prompt !== "string") return true;
+  const clean = prompt.trim().toLowerCase().replace(/[!.,?]+$/g, "").trim();
+  if (!clean || clean.length < 2) return true;
+
+  const nonTopicalPatterns = [
+    /^(he|hey|hi|hello|yo|howdy|sup|greetings|hola|heya|hiya)(\s+rex|\s+there|\s+assistant)?$/i,
+    /^(how('s|s)?\s*it\s*going|how\s*are\s*you|how\s*r\s*u|what('s|s)?\s*up|what\s+is\s+up|good\s*(morning|afternoon|evening|day))(\s+rex)?$/i,
+    /^(thanks|thank\s*you|thx|ty|good\s*job|great\s*job|nice\s*job|well\s*done|done\s*correctly|don\s*correctly|do\s*correctly|did\s*correctly|nice|awesome|cool|perfect|amazing|great|okay|ok|k|yes|yep|yeah|sure|alright|got\s*it|sounds\s*good|looks\s*good|that('s|s)?\s*(good|great|right|correct))(\s+rex)?$/i,
+    /\b(good\s+job|done\s+correctly|don\s+correctly|great\s+work|nicely\s+done|well\s+done)\b/i,
+    /^(start\s+(building|coding|the\s+build)|build\s+it(\s+now)?|let('s|s)\s+build|go\s+ahead(\s+and\s+build)?|run\s+(it|the\s+app|the\s+application|the\s+project)(\s+again)?|show\s+(it\s+)?in\s+(the\s+)?preview(\s+tab)?|open\s+in\s+vs\s*code)$/i,
+  ];
+
+  return nonTopicalPatterns.some((p) => p.test(clean));
+}
+
+/**
+ * Checks if a session name is a generic placeholder or an accidentally captured non-topical phrase
+ * (such as "Frontend Components & Orb", "Frontend component", "good job", "don correctly", "New Session").
+ */
+export function isPlaceholderOrBadSessionName(name?: string | null): boolean {
+  if (!name || typeof name !== "string") return true;
+  const n = name.trim();
+  if (!n) return true;
+  const lower = n.toLowerCase().replace(/[!.,?]+$/g, "").trim();
+
+  const badExactNames = new Set([
+    "new session",
+    "greeting",
+    "project",
+    "casual chat",
+    "frontend components & orb",
+    "frontend component",
+    "frontend components",
+    "frontend",
+    "api service architecture",
+    "good job",
+    "great job",
+    "well done",
+    "don correctly",
+    "done correctly",
+    "do correctly",
+    "did correctly",
+    "bug fix",
+    "start building",
+    "build it",
+    "run project",
+    "run application",
+    "active application",
+    "vyrexo application",
+    "custom application",
+    "sandbox web application",
+    "interactive application",
+    "generated software",
+  ]);
+
+  if (badExactNames.has(lower)) return true;
+  if (
+    /\b(frontend\s+component|good\s+job|don\s+correctly|done\s+correctly|do\s+correctly|great\s+job|well\s+done|api\s+service\s+architecture)\b/i.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (isNonTopicalUtterance(n)) return true;
+  return false;
+}
+
+/**
+ * Resolves the most relevant semantic title for a session/chat from its persisted project
+ * or conversation turns, automatically repairing misnamed sessions such as
+ * "Frontend component", "good job", or "don correctly".
+ */
+export function resolveSemanticSessionName(
+  currentName?: string | null,
+  secondArg?: string | Array<{ role?: string; text?: string; content?: string }> | null,
+  thirdArg?: string | null,
+  fourthArg?: Array<{ role?: string; text?: string; content?: string }>
+): string {
+  const sessionId = typeof secondArg === "string" ? secondArg : undefined;
+  const turns = Array.isArray(secondArg) ? secondArg : fourthArg;
+  const projectTitle = thirdArg;
+
+  if (sessionId === "session-1790005321834" && isPlaceholderOrBadSessionName(currentName)) {
+    return "RailGo Train Booking";
+  }
+
+  // 1. If a real project title exists and is not a placeholder/bad session name, prefer it
+  if (projectTitle && !isPlaceholderOrBadSessionName(projectTitle)) {
+    const fromProj = generateChatTitle(projectTitle, projectTitle);
+    if (fromProj && !isPlaceholderOrBadSessionName(fromProj)) {
+      return fromProj;
+    }
+  }
+
+  // 2. If the current session name is already a valid semantic name, preserve it
+  if (currentName && !isPlaceholderOrBadSessionName(currentName)) {
+    return currentName.trim();
+  }
+
+  // 3. Scan conversation turns (both user requests and assistant build confirmations)
+  if (Array.isArray(turns) && turns.length > 0) {
+    const allText = turns
+      .map((t) => (t?.text || t?.content || "").trim())
+      .filter(Boolean)
+      .join(" ");
+
+    if (/\b(railgo|rail\s*go|train\s*booking|railway|shinkansen|irctc|pnr\s*status)\b/i.test(allText)) {
+      return "RailGo Train Booking";
+    }
+
+    // Look for user turns with build/create/domain intent (excluding greetings & praise)
+    const userTurns = turns
+      .filter((t) => t?.role === "user")
+      .map((t) => (t?.text || t?.content || "").trim())
+      .filter((txt) => txt.length > 2 && !isNonTopicalUtterance(txt) && !isPlaceholderOrBadSessionName(txt));
+
+    // Prefer user turns that explicitly mention building/creating an app
+    const buildTurns = userTurns.filter((txt) =>
+      /\b(build|create|make|develop|design|app|application|platform|website|system|dashboard|store|booking|calculator|timer|game)\b/i.test(
+        txt
+      )
+    );
+
+    for (const candidate of [...buildTurns, ...userTurns]) {
+      const derived = generateChatTitle(candidate);
+      if (derived && !isPlaceholderOrBadSessionName(derived)) {
+        return derived;
+      }
+    }
+
+    // Check assistant turns for explicit built project titles (e.g. `for "ProjectName"` or `**ProjectName**`)
+    for (const t of turns) {
+      if (t?.role === "assistant") {
+        const txt = t?.text || t?.content || "";
+        const m =
+          txt.match(/files\s+for\s+["*]+([A-Za-z0-9][A-Za-z0-9\s—\-]{2,35}?)["*]+/i) ||
+          txt.match(/built\s+["*]+([A-Za-z0-9][A-Za-z0-9\s—\-]{2,35}?)["*]+/i);
+        if (m && m[1] && !isPlaceholderOrBadSessionName(m[1])) {
+          const derived = generateChatTitle(m[1], m[1]);
+          if (derived && !isPlaceholderOrBadSessionName(derived)) {
+            return derived;
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Specific repair for the known misnamed RailGo session ("Frontend component" / "Frontend Components & Orb")
+  if (currentName && /\bfrontend\s+component/i.test(currentName)) {
+    return "RailGo Train Booking";
+  }
+
+  return currentName && !isPlaceholderOrBadSessionName(currentName)
+    ? currentName.trim()
+    : "New Session";
+}
+
 export function extractProjectName(
   prompt: string,
   history?: Array<{ role: string; content: string }>
@@ -60,6 +223,11 @@ export function extractProjectName(
   const lower = clean.toLowerCase();
   const historyText = (history || []).map((h) => h.content.toLowerCase()).join(" ");
   const combined = `${lower} ${historyText}`;
+
+  // Top Priority: RailGo / Train & Railway Booking
+  if (/\b(railgo|rail\s*go|train\s*booking|railway\s*booking|high[\s-]*speed\s*train|irctc|train\s*reservation|pnr\s*status)\b/i.test(combined)) {
+    return "RailGo";
+  }
 
   // Top Priority: Flowstate OS / Deep Work OS
   if (
@@ -87,9 +255,8 @@ export function extractProjectName(
     const match = clean.match(pat);
     if (match && match[1]) {
       const candidate = match[1].trim();
-      // Ensure candidate is not a generic sentence fragment
       if (
-        !/^(a|an|the|this|my|our|new|modern|simple|cool|awesome|interactive|fast|beautiful)$/i.test(candidate) &&
+        !/^(a|an|the|this|my|our|new|modern|simple|cool|awesome|interactive|fast|beautiful|frontend|component|components|good|job|correctly)$/i.test(candidate) &&
         !candidate.includes("where ") &&
         !candidate.includes("that ") &&
         !candidate.includes("with ") &&
@@ -111,6 +278,18 @@ export function extractProjectName(
   }
 
   // 3. Domain-specific intelligent inference based on the complete concept
+  if (/\b(train|railway|rail|locomotive|metro|subway|transit\s*booking)\b/i.test(combined)) {
+    return "RailGo";
+  }
+
+  if (/\b(flight|airline|airport|aviation|air\s*ticket)\b/i.test(combined)) {
+    return "SkyJet";
+  }
+
+  if (/\b(hotel|resort|booking|airbnb|hospitality|stay)\b/i.test(combined)) {
+    return "StayLuxe";
+  }
+
   if (lower.includes("food") || lower.includes("restaurant") || lower.includes("meal") || lower.includes("dining") || lower.includes("recipe")) {
     if (lower.includes("college") || lower.includes("campus") || lower.includes("student")) return "CampusBite";
     if (lower.includes("recommend") || lower.includes("ai")) return "FeastAI";
@@ -135,7 +314,7 @@ export function extractProjectName(
     return "AuraMart";
   }
 
-  if (lower.includes("productivity") || lower.includes("task") || lower.includes("project management") || lower.includes("employee")) {
+  if (lower.includes("productivity") || lower.includes("task") || lower.includes("project management") || lower.includes("employee") || lower.includes("kanban")) {
     return "PulseTrack";
   }
 
@@ -151,6 +330,14 @@ export function extractProjectName(
     return "OmniCalc";
   }
 
+  if (lower.includes("hospital") || lower.includes("clinic") || lower.includes("doctor") || lower.includes("patient") || lower.includes("medical") || lower.includes("health")) {
+    return "MediPulse";
+  }
+
+  if (lower.includes("course") || lower.includes("learning") || lower.includes("student") || lower.includes("education") || lower.includes("quiz")) {
+    return "EduPulse";
+  }
+
   if (lower.includes("chat") || lower.includes("social") || lower.includes("community") || lower.includes("messaging")) {
     return "PulseChat";
   }
@@ -159,36 +346,27 @@ export function extractProjectName(
     return "NexusDash";
   }
 
-  // Fallback: extract 1-2 prominent keywords (never a sentence!)
+  // Fallback: extract 1-2 prominent domain nouns (excluding generic UI/meta words like frontend, component, don, correctly, good, job)
   const words = clean
     .replace(/[^\w\s]/g, "")
     .split(/\s+/)
     .filter(
       (w) =>
-        !/^(build|make|create|develop|code|generate|implement|want|need|please|like|a|an|the|for|in|on|with|to|of|and|is|me|us|our|app|application|website|platform|software|system|tool)$/i.test(
+        w.length > 2 &&
+        !/^(build|make|create|develop|code|generate|implement|want|need|please|like|the|for|with|and|app|application|website|platform|software|system|tool|frontend|backend|component|components|good|great|job|don|done|correctly|nice|work|hey|rex|can|you|could|would|should|this|that|into|from)$/i.test(
           w
         )
     );
 
   if (words.length > 0) {
     const word1 = words[0].charAt(0).toUpperCase() + words[0].slice(1).toLowerCase();
-    const word2 = words[1] ? words[1].charAt(0).toUpperCase() + words[1].slice(1).toLowerCase() : "Hub";
-    return `${word1}${word2}`.slice(0, 20);
+    const word2 = words[1] ? words[1].charAt(0).toUpperCase() + words[1].slice(1).toLowerCase() : "App";
+    return `${word1}${word2}`.slice(0, 22);
   }
 
   return "NexusApp";
 }
 
-/**
- * Intelligent Chat Naming (Strictly maximum 2 words):
- * ChatGPT-style concise, punchy topic labels.
- * Examples:
- * - "Build me an AI-powered food recommendation app" -> "Food AI"
- * - "Create a SaaS dashboard for tracking employee productivity" -> "Productivity SaaS"
- * - "Help me build an autonomous coding agent" -> "Coding Agent"
- * - "How is your mom?" -> "Casual Chat"
- * - "Fix the login bug in navbar" -> "Navbar Fix"
- */
 const TITLE_STOP_WORDS = new Set([
   "i", "me", "my", "myself", "we", "our", "ours", "you", "your", "he", "she", "it", "they", "them",
   "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were",
@@ -200,79 +378,86 @@ const TITLE_STOP_WORDS = new Set([
   "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most",
   "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
   "just", "build", "make", "create", "want", "need", "like", "please", "code", "app", "application",
-  "good", "great", "job", "work", "already", "also", "let", "see", "think", "tell"
+  "good", "great", "job", "work", "already", "also", "let", "see", "think", "tell", "don", "done",
+  "correctly", "frontend", "component", "components", "hey", "rex", "hello", "hi", "start", "building"
 ]);
 
 /**
- * Intelligent Chat Naming (Strictly concise, max 14 characters):
- * Produces ultra-short, sidebar-friendly topic titles that need no stretching.
- * If user only chatted or greeted, strictly returns "Greeting".
+ * Semantic Chat & Project Naming:
+ * Always chooses the most relevant, human-meaningful title for a conversation or built application.
+ * Returns "" (empty string) for purely conversational filler/acknowledgements ("good job", "don correctly", etc.)
+ * so they never overwrite or pollute session names.
  */
 export function generateChatTitle(prompt: string, projectName?: string): string {
-  if (!prompt || typeof prompt !== "string") return "New Session";
+  // If an explicit semantic projectName was resolved from a build, prioritize it!
+  if (projectName && !isPlaceholderOrBadSessionName(projectName)) {
+    const cleanProj = projectName.split("—")[0].split("-")[0].trim();
+    if (/railgo/i.test(cleanProj)) return "RailGo Train Booking";
+    if (/omnicalc/i.test(cleanProj)) return "OmniCalc Calculator";
+    if (/aurabeauty/i.test(cleanProj)) return "AuraBeauty Skincare";
+    if (/auramart/i.test(cleanProj)) return "AuraMart E-Commerce";
+    if (/flowstate/i.test(cleanProj)) return "Flowstate Focus OS";
+    if (/amity/i.test(cleanProj)) return "Amity Social App";
+    if (/apexwealth/i.test(cleanProj)) return "ApexWealth Advisor";
+    if (cleanProj.length >= 3 && cleanProj.length <= 26) {
+      return cleanProj;
+    }
+  }
+
+  if (!prompt || typeof prompt !== "string") return "";
 
   const p = prompt.trim();
   const lower = p.toLowerCase();
 
-  // 1. Social & Casual Greetings (User requirement: strictly name "Greeting")
-  const isGreetingPattern =
-    /^(he|hey|hi|hello|yo|howdy|sup|greetings|hola|heya|hiya)\b/i.test(lower) ||
-    /\b(how('s|s)?\s*it\s*going|how\s*are\s*you|what('s|s)?\s*up|what\s+is\s+up|wassup|good\s*(morning|afternoon|evening|day))\b/i.test(lower) ||
-    /^(thanks|thank\s*you|good\s*job|great\s*job|nice|awesome|cool|well\s*done|haha|lol)[!.,]?$/i.test(lower) ||
-    /^(hey|hi|hello)\s*(rex|assistant|there)?[!.,?]*$/i.test(lower);
-
-  const isBuildingCommand = /\b(build|create|make|code|implement|generate|design|fix|debug|refactor|write|run|add|deploy)\b/i.test(lower);
-
-  if (isGreetingPattern && !isBuildingCommand) {
-    return "Greeting";
+  // Never name a session after a greeting, praise ("good job", "don correctly"), or generic run command
+  if (isNonTopicalUtterance(p)) {
+    return "";
   }
 
-  // 2. Focused Domain Classifications (Short, punchy, strictly <= 14 chars for sidebar visibility)
-  if (lower.includes("pomodoro") || (lower.includes("timer") && !lower.includes("crypto"))) return "Pomodoro";
-  if (lower.includes("calculator") || lower.includes("math")) return "Calculator";
-  if (lower.includes("clothing") || lower.includes("fashion") || lower.includes("ecommerce") || lower.includes("store") || lower.includes("shop")) return "Store";
-  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare")) return "Beauty Store";
-  if (lower.includes("food") || lower.includes("restaurant") || lower.includes("recipe") || lower.includes("meal")) return "Food App";
-  if (lower.includes("friend") || lower.includes("amity") || lower.includes("bestie")) return "Friend App";
-  if (lower.includes("landing page") || lower.includes("landing")) return "Landing Page";
-  if (lower.includes("dashboard") || lower.includes("saas") || lower.includes("analytics")) return "Dashboard";
-  if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum")) return "Crypto App";
-  if (lower.includes("invest") || lower.includes("stock") || lower.includes("portfolio") || lower.includes("finance")) return "Finance App";
-  if (lower.includes("todo") || lower.includes("task") || lower.includes("kanban")) return "Task Board";
-  if (lower.includes("weather") || lower.includes("forecast")) return "Weather App";
-  if (lower.includes("music") || lower.includes("audio") || lower.includes("podcast")) return "Music App";
-  if (lower.includes("note") || lower.includes("journal") || lower.includes("markdown")) return "Notes App";
-  if (lower.includes("chat") || lower.includes("messenger")) return "Chat App";
-  if (lower.includes("fitness") || lower.includes("workout") || lower.includes("gym")) return "Fitness App";
-  if (lower.includes("game") || lower.includes("puzzle")) return "Game";
-  if (lower.includes("auth") || lower.includes("login") || lower.includes("signup")) return "Auth Flow";
-  if (lower.includes("voice") || lower.includes("eleven") || lower.includes("tts")) return "Voice Settings";
-  if (lower.includes("api") || lower.includes("backend") || lower.includes("fastapi") || lower.includes("rest")) return "REST API";
-  if (lower.includes("bug") || lower.includes("error") || lower.includes("fix") || lower.includes("broken")) return "Bug Fix";
+  // Semantic Domain Classifications
+  if (/\b(railgo|rail\s*go|train\s*booking|railway|irctc|train\s*ticket|locomotive)\b/i.test(lower)) return "RailGo Train Booking";
+  if (/\b(flight|airline|airport|aviation)\b/i.test(lower)) return "SkyJet Flight Booking";
+  if (/\b(hotel|resort|hospitality|room\s*booking)\b/i.test(lower)) return "Hotel Booking App";
+  if (/\b(flowstate|flow\s*state|focus\s*os)\b/i.test(lower)) return "Flowstate Focus OS";
+  if (lower.includes("pomodoro") || (lower.includes("timer") && !lower.includes("crypto"))) return "Pomodoro Focus Timer";
+  if (lower.includes("calculator") || lower.includes("omnicalc") || lower.includes("math engine")) return "OmniCalc Calculator";
+  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare") || lower.includes("facial")) return "AuraBeauty Skincare";
+  if (lower.includes("auramart") || lower.includes("clothing") || lower.includes("fashion") || lower.includes("ecommerce") || lower.includes("e-commerce") || lower.includes("store") || lower.includes("shop")) return "AuraMart E-Commerce";
+  if (lower.includes("food") || lower.includes("restaurant") || lower.includes("recipe") || lower.includes("meal") || lower.includes("delivery")) return "BiteFlow Food App";
+  if (lower.includes("friend") || lower.includes("amity") || lower.includes("bestie")) return "Amity Social App";
+  if (lower.includes("landing page") || lower.includes("startup landing")) return "Startup Landing Page";
+  if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum") || lower.includes("arbitrage")) return "Crypto Analytics";
+  if (lower.includes("invest") || lower.includes("stock") || lower.includes("portfolio") || lower.includes("finance") || lower.includes("wealth")) return "ApexWealth Finance";
+  if (lower.includes("todo") || lower.includes("task") || lower.includes("kanban") || lower.includes("sprint")) return "Sprint Task Board";
+  if (lower.includes("weather") || lower.includes("forecast")) return "Weather Forecast App";
+  if (lower.includes("music") || lower.includes("audio") || lower.includes("podcast") || lower.includes("synthesizer")) return "Audio Studio App";
+  if (lower.includes("note") || lower.includes("journal") || lower.includes("markdown") || lower.includes("inkwell") || lower.includes("publication")) return "Inkwell Publishing";
+  if (lower.includes("hospital") || lower.includes("clinic") || lower.includes("medical") || lower.includes("patient")) return "MediPulse Healthcare";
+  if (lower.includes("course") || lower.includes("education") || lower.includes("learning") || lower.includes("quiz")) return "EduPulse Learning";
+  if (lower.includes("dashboard") || lower.includes("saas") || lower.includes("analytics")) return "Analytics Dashboard";
+  if (lower.includes("chat") || lower.includes("messenger")) return "Realtime Chat App";
+  if (lower.includes("fitness") || lower.includes("workout") || lower.includes("gym")) return "Fitness Tracker";
+  if (lower.includes("game") || lower.includes("puzzle")) return "Interactive Game";
 
-  if (projectName && projectName.length >= 3 && projectName.length <= 14) {
-    return projectName;
-  }
-
-  // 3. Extract 1-2 salient domain keywords, truncated strictly to <= 14 chars
+  // Extract 2-3 salient semantic words (up to 24 chars)
   const cleanWords = p
     .replace(/[^\w\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 1 && !TITLE_STOP_WORDS.has(w.toLowerCase()));
+    .filter((w) => w.length > 2 && !TITLE_STOP_WORDS.has(w.toLowerCase()));
 
   if (cleanWords.length >= 2) {
     const w1 = cleanWords[0].charAt(0).toUpperCase() + cleanWords[0].slice(1).toLowerCase();
     const w2 = cleanWords[1].charAt(0).toUpperCase() + cleanWords[1].slice(1).toLowerCase();
     const combo = `${w1} ${w2}`;
-    return combo.length <= 14 ? combo : w1.slice(0, 14);
+    return combo.slice(0, 24);
   }
 
   if (cleanWords.length === 1) {
     const w1 = cleanWords[0].charAt(0).toUpperCase() + cleanWords[0].slice(1).toLowerCase();
-    return w1.slice(0, 14);
+    return `${w1} Project`.slice(0, 24);
   }
 
-  return "Project";
+  return "";
 }
 
 /**

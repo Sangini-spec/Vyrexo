@@ -12,6 +12,7 @@ export interface SessionProject {
   features: string[];
   techStack: string[];
   components: string[];
+  files?: Array<{ path: string; content?: string; purpose?: string }>;
   previewUrl: string;
   createdAt: number;
 }
@@ -173,16 +174,317 @@ export const PRESET_PROJECTS: Record<string, Omit<SessionProject, "id" | "create
   },
 };
 
+function getWorkspacesRoot(): string {
+  const path = require("path");
+  return process.cwd().endsWith("frontend")
+    ? path.resolve(process.cwd(), "..", "workspaces")
+    : path.resolve(process.cwd(), "workspaces");
+}
+
+function getDataRoot(): string {
+  const fs = require("fs");
+  const path = require("path");
+  const dir = process.cwd().endsWith("frontend")
+    ? path.resolve(process.cwd(), "..", ".data")
+    : path.resolve(process.cwd(), ".data");
+  if (!fs.existsSync(dir)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {}
+  }
+  return dir;
+}
+
+function cleanWorkspaceFolderName(sessionId: string): string {
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function saveSessionProjectMetadataToDisk(
+  sessionId: string,
+  project: SessionProject,
+  connected?: ConnectedProject | null
+): void {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const dataDir = getDataRoot();
+    const storePath = path.join(dataDir, "session-projects.json");
+    let map: Record<string, { project: SessionProject; connected?: ConnectedProject }> = {};
+    if (fs.existsSync(storePath)) {
+      try {
+        map = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      } catch {}
+    }
+    const existingConn = connected || connectedSessionProjects.get(sessionId) || map[sessionId]?.connected;
+    map[sessionId] = {
+      project,
+      connected: existingConn
+        ? {
+            ...existingConn,
+            files: existingConn.files,
+          }
+        : undefined,
+    };
+    fs.writeFileSync(storePath, JSON.stringify(map, null, 2), "utf-8");
+
+    const wsDir = path.join(getWorkspacesRoot(), cleanWorkspaceFolderName(sessionId));
+    if (fs.existsSync(wsDir)) {
+      fs.writeFileSync(
+        path.join(wsDir, ".vyrexo-project.json"),
+        JSON.stringify(
+          {
+            project,
+            connected: existingConn
+              ? {
+                  ...existingConn,
+                  files: existingConn.files,
+                }
+              : undefined,
+            updatedAt: Date.now(),
+          },
+          null,
+          2
+        ),
+        "utf-8"
+      );
+    }
+  } catch {}
+}
+
+function loadSessionProjectMetadataFromDisk(
+  sessionId: string
+): { project?: SessionProject; connected?: ConnectedProject } | null {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const wsDir = path.join(getWorkspacesRoot(), cleanWorkspaceFolderName(sessionId));
+    const metaFile = path.join(wsDir, ".vyrexo-project.json");
+    if (fs.existsSync(metaFile)) {
+      const parsed = JSON.parse(fs.readFileSync(metaFile, "utf-8"));
+      if (parsed?.project || parsed?.connected) {
+        return { project: parsed.project, connected: parsed.connected };
+      }
+    }
+
+    const storePath = path.join(getDataRoot(), "session-projects.json");
+    if (fs.existsSync(storePath)) {
+      const map = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      if (map?.[sessionId]) return map[sessionId];
+    }
+
+    const legacyMeta = path.join(wsDir, "project-meta.json");
+    if (fs.existsSync(legacyMeta)) {
+      const parsed = JSON.parse(fs.readFileSync(legacyMeta, "utf-8"));
+      if (parsed?.title) {
+        return {
+          project: {
+            id: `proj_${sessionId}`,
+            type: "custom",
+            title: parsed.title,
+            summary: `${parsed.title} sandbox application.`,
+            features: ["Interactive React UI", "TypeScript Domain Models", "Automated Unit Tests"],
+            techStack: ["React 19", "TypeScript", "Tailwind CSS", "Vite", "Bun Test"],
+            components: ["src/components/App.tsx", "src/types/index.ts", "package.json", "tests/app.test.ts"],
+            previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
+            createdAt: parsed.updatedAt || Date.now(),
+          },
+        };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Ensures a complete 10-file runnable project structure exists inside workspaces/<sessionId>
+ * when a project is built or restored after restart.
+ */
+export function materializeCompleteWorkspaceOnDisk(
+  sessionId: string,
+  title: string,
+  coreFiles: Array<{ path: string; content: string }>
+): ProjectFile[] {
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const cleanId = cleanWorkspaceFolderName(sessionId);
+    const wsDir = path.join(getWorkspacesRoot(), cleanId);
+    fs.mkdirSync(wsDir, { recursive: true });
+
+    const slug =
+      (title || "railgo-app")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 45) || "vyrexo-app";
+
+    const fileMap = new Map<string, string>();
+    for (const f of coreFiles) {
+      if (f?.path && typeof f.content === "string") {
+        fileMap.set(f.path.replace(/^\/+/, ""), f.content);
+      }
+    }
+
+    if (!fileMap.has("index.html")) {
+      fileMap.set(
+        "index.html",
+        `<!DOCTYPE html>\n<html lang="en" class="dark">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>${title}</title>\n    <script src="https://cdn.tailwindcss.com"></script>\n    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />\n  </head>\n  <body class="bg-slate-950 text-slate-100 antialiased">\n    <div id="root"></div>\n    <script type="module" src="/src/main.tsx"></script>\n  </body>\n</html>\n`
+      );
+    }
+
+    if (!fileMap.has("src/main.tsx")) {
+      fileMap.set(
+        "src/main.tsx",
+        `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport App from "./components/App";\nimport "./styles/globals.css";\n\nconst container = document.getElementById("root");\nif (container) {\n  createRoot(container).render(\n    <React.StrictMode>\n      <App />\n    </React.StrictMode>\n  );\n}\n`
+      );
+    }
+
+    if (!fileMap.has("src/styles/globals.css")) {
+      fileMap.set(
+        "src/styles/globals.css",
+        `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\nbody {\n  margin: 0;\n  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;\n}\n`
+      );
+    }
+
+    if (!fileMap.has("tsconfig.json")) {
+      fileMap.set(
+        "tsconfig.json",
+        JSON.stringify(
+          {
+            compilerOptions: {
+              target: "ES2022",
+              lib: ["DOM", "DOM.Iterable", "ESNext"],
+              module: "ESNext",
+              moduleResolution: "bundler",
+              jsx: "react-jsx",
+              strict: true,
+              esModuleInterop: true,
+              skipLibCheck: true,
+              noEmit: true,
+            },
+            include: ["src", "tests"],
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    if (!fileMap.has("vite.config.ts")) {
+      fileMap.set(
+        "vite.config.ts",
+        `import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n\nexport default defineConfig({\n  plugins: [react()],\n  server: { port: 5173, open: true },\n});\n`
+      );
+    }
+
+    const workspaceSpecName = `${slug}.code-workspace`;
+    if (!fileMap.has(workspaceSpecName)) {
+      fileMap.set(
+        workspaceSpecName,
+        JSON.stringify(
+          {
+            folders: [{ path: ".", name: `${title} (${cleanId})` }],
+            settings: {
+              "editor.formatOnSave": true,
+              "files.exclude": {
+                "**/node_modules": true,
+                "**/.git": true,
+                "**/.vyrexo-project.json": true,
+              },
+            },
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    try {
+      const existingEntries = fs.readdirSync(wsDir);
+      for (const entry of existingEntries) {
+        if (entry.endsWith(".code-workspace") && entry !== workspaceSpecName) {
+          try {
+            fs.unlinkSync(path.join(wsDir, entry));
+          } catch {}
+        }
+      }
+    } catch {}
+
+    const writtenFiles: ProjectFile[] = [];
+    for (const [relPath, content] of Array.from(fileMap.entries())) {
+      const fullPath = path.join(wsDir, relPath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, content, "utf-8");
+      writtenFiles.push({
+        path: relPath,
+        content,
+        size: Buffer.byteLength(content, "utf-8"),
+        lastModified: Date.now(),
+      });
+    }
+
+    return writtenFiles;
+  } catch {
+    return coreFiles.map((f) => ({
+      path: f.path,
+      content: f.content,
+      size: f.content.length,
+      lastModified: Date.now(),
+    }));
+  }
+}
+
 export function setSessionProject(sessionId: string, project: SessionProject): void {
   sessionProjects.set(sessionId, project);
+  saveSessionProjectMetadataToDisk(sessionId, project);
 }
 
 export function getSessionProject(sessionId: string): SessionProject | null {
   const existing = sessionProjects.get(sessionId);
   if (existing) return existing;
 
-  // Strict session truth: If no project has been built or scaffolded in this session yet,
-  // return null so Rex never hallucinates a pre-existing project like ApexWealth.
+  const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
+  if (diskMeta?.project) {
+    sessionProjects.set(sessionId, diskMeta.project);
+    return diskMeta.project;
+  }
+
+  const wsFiles = getSessionWorkspaceFiles(sessionId);
+  if (wsFiles.length > 0) {
+    let detectedTitle = "Sandbox Web Application";
+    const readme = wsFiles.find((f) => f.path.toLowerCase() === "readme.md");
+    if (readme) {
+      const m = readme.content.match(/^#\s+(.+)$/m);
+      if (m && m[1]) detectedTitle = m[1].trim();
+    }
+    const pkg = wsFiles.find((f) => f.path === "package.json");
+    if (detectedTitle === "Sandbox Web Application" && pkg) {
+      try {
+        const parsed = JSON.parse(pkg.content);
+        if (parsed.name) detectedTitle = parsed.name;
+      } catch {}
+    }
+
+    const reconstructed: SessionProject = {
+      id: sessionId,
+      type: "custom",
+      title: detectedTitle,
+      summary: `Interactive software application for ${detectedTitle}.`,
+      features: [
+        `Dedicated isolated sandbox workspace (${wsFiles.length} files)`,
+        "Interactive components and state management",
+        "Automated build and unit test verification",
+      ],
+      techStack: ["React 19", "TypeScript", "Tailwind CSS", "Vite", "Bun Test"],
+      components: wsFiles.map((f) => f.path),
+      previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
+      createdAt: Date.now(),
+    };
+    sessionProjects.set(sessionId, reconstructed);
+    saveSessionProjectMetadataToDisk(sessionId, reconstructed);
+    return reconstructed;
+  }
+
   return null;
 }
 
@@ -197,9 +499,11 @@ export function updateSessionProjectType(
     const proj: SessionProject = {
       ...preset,
       id: sessionId,
+      previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
       createdAt: Date.now(),
     };
     sessionProjects.set(sessionId, proj);
+    saveSessionProjectMetadataToDisk(sessionId, proj);
     return proj;
   }
 
@@ -214,12 +518,24 @@ export function updateSessionProjectType(
       "Interactive state management and responsive UI layout",
       "Multi-agent architecture and type-safe components",
     ],
-    techStack: ["Next.js", "TypeScript", "Tailwind CSS"],
-    components: ["src/components/App.tsx", "src/styles/globals.css"],
+    techStack: ["React 19", "TypeScript", "Tailwind CSS", "Vite"],
+    components: [
+      "src/components/App.tsx",
+      "src/types/index.ts",
+      "src/main.tsx",
+      "src/styles/globals.css",
+      "tests/app.test.ts",
+      "package.json",
+      "vite.config.ts",
+      "tsconfig.json",
+      "index.html",
+      "README.md",
+    ],
     previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
     createdAt: Date.now(),
   };
   sessionProjects.set(sessionId, customProj);
+  saveSessionProjectMetadataToDisk(sessionId, customProj);
   return customProj;
 }
 
@@ -228,16 +544,15 @@ export function updateSessionProjectType(
 export function setSessionConnectedProject(sessionId: string, project: ConnectedProject): void {
   connectedSessionProjects.set(sessionId, project);
 
-  // Synchronize high-level cognitive context so Gemini & fallbacks know the exact project
   const cognitiveProj: SessionProject = {
     id: sessionId,
     type: "custom",
     title: project.name,
     summary: project.summary,
     features: [
-      `Local Connected Workspace: ${project.name} (${project.filesCount} files)`,
+      `Workspace: ${project.name} (${project.filesCount} files)`,
       `Tech Stack: ${project.techStack.join(", ")}`,
-      "Direct folder access, multi-file inspection, and in-place code editing enabled",
+      "Direct folder access, multi-file inspection, and iterative AI code evolution enabled",
     ],
     techStack: project.techStack,
     components: project.files.slice(0, 15).map((f) => f.path),
@@ -245,10 +560,48 @@ export function setSessionConnectedProject(sessionId: string, project: Connected
     createdAt: project.connectedAt,
   };
   sessionProjects.set(sessionId, cognitiveProj);
+  saveSessionProjectMetadataToDisk(sessionId, cognitiveProj, project);
 }
 
 export function getSessionConnectedProject(sessionId: string): ConnectedProject | null {
-  return connectedSessionProjects.get(sessionId) || null;
+  const existing = connectedSessionProjects.get(sessionId);
+  if (existing && existing.files && existing.files.length > 0) return existing;
+
+  const wsFiles = getSessionWorkspaceFiles(sessionId);
+  if (wsFiles.length > 0) {
+    const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
+    let projectName = diskMeta?.project?.title || diskMeta?.connected?.name || "";
+    if (!projectName) {
+      const readme = wsFiles.find((f) => f.path.toLowerCase() === "readme.md");
+      if (readme) {
+        const m = readme.content.match(/^#\s+(.+)$/m);
+        if (m && m[1]) projectName = m[1].trim();
+      }
+    }
+    if (!projectName) projectName = `Workspace (${sessionId})`;
+
+    const path = require("path");
+    const cleanId = cleanWorkspaceFolderName(sessionId);
+    const absWorkspacePath = path.join(getWorkspacesRoot(), cleanId);
+
+    const conn: ConnectedProject = {
+      id: `ws-${cleanId}`,
+      sessionId,
+      name: projectName,
+      path: absWorkspacePath,
+      source: diskMeta?.connected?.source || "workspace",
+      summary: diskMeta?.project?.summary || `${projectName} sandbox workspace (${wsFiles.length} files)`,
+      techStack: diskMeta?.project?.techStack || ["React", "TypeScript", "Tailwind CSS", "Vite"],
+      filesCount: wsFiles.length,
+      files: wsFiles,
+      connectedAt: diskMeta?.project?.createdAt || Date.now(),
+      lastUpdatedAt: Date.now(),
+    };
+    connectedSessionProjects.set(sessionId, conn);
+    return conn;
+  }
+
+  return null;
 }
 
 export function removeSessionConnectedProject(sessionId: string): boolean {
@@ -256,10 +609,23 @@ export function removeSessionConnectedProject(sessionId: string): boolean {
 }
 
 export function updateProjectFile(sessionId: string, filePath: string, content: string): boolean {
-  const proj = connectedSessionProjects.get(sessionId);
+  const cleanPath = filePath.replace(/^\/+/, "");
+
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const cleanId = cleanWorkspaceFolderName(sessionId);
+    const wsDir = path.join(getWorkspacesRoot(), cleanId);
+    if (fs.existsSync(wsDir)) {
+      const fullPath = path.join(wsDir, cleanPath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, content, "utf-8");
+    }
+  } catch {}
+
+  const proj = getSessionConnectedProject(sessionId);
   if (!proj) return false;
 
-  const cleanPath = filePath.replace(/^\/+/, "");
   const existing = proj.files.find(
     (f) => f.path.replace(/^\/+/, "") === cleanPath || f.path.endsWith(cleanPath)
   );
@@ -267,12 +633,12 @@ export function updateProjectFile(sessionId: string, filePath: string, content: 
   if (existing) {
     existing.content = content;
     existing.lastModified = Date.now();
-    existing.size = new Blob([content]).size;
+    existing.size = Buffer.byteLength(content, "utf-8");
   } else {
     proj.files.push({
       path: cleanPath,
       content,
-      size: new Blob([content]).size,
+      size: Buffer.byteLength(content, "utf-8"),
       lastModified: Date.now(),
     });
     proj.filesCount = proj.files.length;
@@ -283,11 +649,18 @@ export function updateProjectFile(sessionId: string, filePath: string, content: 
 }
 
 export function getProjectFile(sessionId: string, filePath: string): ProjectFile | null {
-  const proj = connectedSessionProjects.get(sessionId);
-  if (!proj) return null;
   const cleanPath = filePath.replace(/^\/+/, "");
+  const proj = getSessionConnectedProject(sessionId);
+  if (proj) {
+    const found = proj.files.find(
+      (f) => f.path.replace(/^\/+/, "") === cleanPath || f.path.endsWith(cleanPath)
+    );
+    if (found) return found;
+  }
+
+  const wsFiles = getSessionWorkspaceFiles(sessionId);
   return (
-    proj.files.find(
+    wsFiles.find(
       (f) => f.path.replace(/^\/+/, "") === cleanPath || f.path.endsWith(cleanPath)
     ) || null
   );
@@ -297,7 +670,15 @@ export function buildFileTree(files: ProjectFile[]): any[] {
   const root: Record<string, any> = {};
 
   for (const f of files) {
-    const parts = f.path.replace(/^\/+/, "").split("/");
+    const cleanRel = f.path.replace(/^\/+/, "");
+    if (
+      cleanRel === ".vyrexo-project.json" ||
+      cleanRel === "project-meta.json" ||
+      cleanRel.endsWith(".code-workspace")
+    ) {
+      continue;
+    }
+    const parts = cleanRel.split("/");
     let current = root;
     let currentPath = "";
 
@@ -349,7 +730,6 @@ export function analyzeCodebase(
   const keyFiles: string[] = [];
   let detectedDescription = "";
 
-  // 1. Inspect package.json
   const pkgFile = files.find(
     (f) => f.path === "package.json" || f.path.endsWith("/package.json")
   );
@@ -372,7 +752,6 @@ export function analyzeCodebase(
     } catch {}
   }
 
-  // 2. Inspect Python requirements / pyproject
   const pyProject = files.find(
     (f) =>
       f.path === "pyproject.toml" ||
@@ -389,7 +768,6 @@ export function analyzeCodebase(
     if (lower.includes("flask")) techStackSet.add("Flask");
   }
 
-  // 3. Inspect README.md
   const readme = files.find(
     (f) => f.path.toLowerCase() === "readme.md" || f.path.toLowerCase().endsWith("/readme.md")
   );
@@ -406,7 +784,6 @@ export function analyzeCodebase(
     }
   }
 
-  // 4. File extension heuristics
   for (const f of files) {
     if (f.path.endsWith(".ts") || f.path.endsWith(".tsx")) techStackSet.add("TypeScript");
     if (f.path.endsWith(".jsx") || f.path.endsWith(".js")) techStackSet.add("JavaScript");
@@ -422,6 +799,7 @@ export function analyzeCodebase(
         "src/index.ts",
         "src/index.js",
         "src/App.tsx",
+        "src/components/App.tsx",
         "src/App.jsx",
         "src/main.tsx",
         "src/main.py",
@@ -457,9 +835,7 @@ export interface SessionChatTurn {
   timestamp: number;
 }
 
-// Map sessionId -> array of turns
 const sessionChatHistories = new Map<string, SessionChatTurn[]>();
-// Map sessionId -> last uploaded images (for cross-turn multimodal persistence)
 const sessionLastImages = new Map<string, string[]>();
 
 export function setSessionLastImages(sessionId: string, images: string[]): void {
@@ -472,8 +848,7 @@ export function getSessionLastImages(sessionId: string): string[] {
   if (sessionLastImages.has(sessionId)) {
     return sessionLastImages.get(sessionId)!;
   }
-  // Fallback: search backwards through turns in sessionChatHistories
-  const turns = sessionChatHistories.get(sessionId) || [];
+  const turns = getSessionChatHistory(sessionId);
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].images && turns[i].images!.length > 0) {
       return turns[i].images!;
@@ -483,20 +858,16 @@ export function getSessionLastImages(sessionId: string): string[] {
 }
 
 export function getSessionWorkspaceFiles(sessionId: string): ProjectFile[] {
-  // 1. Check connectedSessionProjects
-  const connected = getSessionConnectedProject(sessionId);
+  const connected = connectedSessionProjects.get(sessionId);
   if (connected && connected.files && connected.files.length > 0) {
     return connected.files;
   }
 
-  // 2. Read from disk if available
   try {
     const fs = require("fs");
     const path = require("path");
-    const wsBase = process.cwd().endsWith("frontend")
-      ? path.resolve(process.cwd(), "..", "workspaces")
-      : path.resolve(process.cwd(), "workspaces");
-    const cleanId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const wsBase = getWorkspacesRoot();
+    const cleanId = cleanWorkspaceFolderName(sessionId);
     const wsDir = path.join(wsBase, cleanId);
 
     if (fs.existsSync(wsDir)) {
@@ -504,19 +875,34 @@ export function getSessionWorkspaceFiles(sessionId: string): ProjectFile[] {
       function walk(dir: string, prefix = "") {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
-          if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist") continue;
+          if (
+            entry.name === "node_modules" ||
+            entry.name === ".git" ||
+            entry.name === ".next" ||
+            entry.name === "dist" ||
+            entry.name === ".vscode" ||
+            entry.name === ".vyrexo-project.json" ||
+            entry.name === "project-meta.json" ||
+            entry.name.endsWith(".code-workspace")
+          ) {
+            continue;
+          }
           const fullPath = path.join(dir, entry.name);
           const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
           if (entry.isDirectory()) {
             walk(fullPath, relPath);
           } else if (entry.isFile()) {
-            if (/\.(tsx|ts|jsx|js|json|css|html|md)$/i.test(entry.name)) {
+            if (
+              /\.(tsx|ts|jsx|js|py|json|css|html|md|yml|yaml|toml|sql|sh)$/i.test(entry.name) ||
+              entry.name === "Dockerfile" ||
+              entry.name === ".gitignore"
+            ) {
               try {
                 const content = fs.readFileSync(fullPath, "utf-8");
                 results.push({
                   path: relPath,
                   content,
-                  size: content.length,
+                  size: Buffer.byteLength(content, "utf-8"),
                   lastModified: fs.statSync(fullPath).mtimeMs,
                 });
               } catch {}
@@ -525,24 +911,78 @@ export function getSessionWorkspaceFiles(sessionId: string): ProjectFile[] {
         }
       }
       walk(wsDir);
-      if (results.length > 0) return results;
+      if (results.length > 0) {
+        return results;
+      }
+    }
+
+    // If workspace directory is missing on disk, check saved session-projects.json metadata and restore exact files
+    const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
+    if (diskMeta?.connected?.files && diskMeta.connected.files.length > 0) {
+      fs.mkdirSync(wsDir, { recursive: true });
+      for (const f of diskMeta.connected.files) {
+        if (!f?.path || typeof f.content !== "string") continue;
+        const cleanRel = f.path.replace(/^\/+/, "");
+        const fullPath = path.join(wsDir, cleanRel);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, f.content, "utf-8");
+      }
+      return diskMeta.connected.files;
     }
   } catch {}
 
   return [];
 }
 
+/**
+ * Restores an already-built project workspace from disk for a session without EVER
+ * mutating, overwriting, or fabricating fake templates from the chat/session name.
+ */
+export function ensureSessionWorkspaceMaterialized(
+  sessionId: string,
+  _sessionTitle?: string,
+  _chatTurns?: Array<{ role: string; text: string }>
+): ConnectedProject | null {
+  if (!sessionId || sessionId === "default") return null;
+
+  const existingConn = getSessionConnectedProject(sessionId);
+  if (existingConn && existingConn.files && existingConn.files.length > 0) {
+    return existingConn;
+  }
+
+  return null;
+}
+
 export function getSessionChatHistory(sessionId: string): SessionChatTurn[] {
-  return sessionChatHistories.get(sessionId) || [];
+  const mem = sessionChatHistories.get(sessionId);
+  if (mem && mem.length > 0) return mem;
+
+  try {
+    const { readPersistedHistories } = require("./session-persistent-storage");
+    const all = readPersistedHistories();
+    if (Array.isArray(all[sessionId]) && all[sessionId].length > 0) {
+      sessionChatHistories.set(sessionId, all[sessionId]);
+      return all[sessionId];
+    }
+  } catch {}
+
+  return [];
 }
 
 export function saveSessionChatHistory(sessionId: string, turns: SessionChatTurn[]): void {
   sessionChatHistories.set(sessionId, turns);
+  try {
+    const { writePersistedHistory } = require("./session-persistent-storage");
+    writePersistedHistory(sessionId, turns);
+  } catch {}
 }
 
-export function appendSessionChatTurn(sessionId: string, turn: Omit<SessionChatTurn, "timestamp"> & { timestamp?: number }): void {
-  const current = sessionChatHistories.get(sessionId) || [];
-  sessionChatHistories.set(sessionId, [
+export function appendSessionChatTurn(
+  sessionId: string,
+  turn: Omit<SessionChatTurn, "timestamp"> & { timestamp?: number }
+): void {
+  const current = getSessionChatHistory(sessionId);
+  const updated: SessionChatTurn[] = [
     ...current,
     {
       role: turn.role,
@@ -551,14 +991,26 @@ export function appendSessionChatTurn(sessionId: string, turn: Omit<SessionChatT
       docs: turn.docs,
       timestamp: turn.timestamp || Date.now(),
     },
-  ]);
+  ];
+  sessionChatHistories.set(sessionId, updated);
+  try {
+    const { writePersistedHistory } = require("./session-persistent-storage");
+    writePersistedHistory(sessionId, updated);
+  } catch {}
 }
 
 export function clearSessionChatHistory(sessionId: string): void {
   sessionChatHistories.delete(sessionId);
+  try {
+    const { deletePersistedHistory } = require("./session-persistent-storage");
+    deletePersistedHistory(sessionId);
+  } catch {}
 }
 
-export function clearSessionChatsOlderThan(cutoffTimestamp: number): { deletedSessions: string[]; remainingSessions: string[] } {
+export function clearSessionChatsOlderThan(cutoffTimestamp: number): {
+  deletedSessions: string[];
+  remainingSessions: string[];
+} {
   const deletedSessions: string[] = [];
   const remainingSessions: string[] = [];
 
@@ -577,6 +1029,11 @@ export function clearSessionChatsOlderThan(cutoffTimestamp: number): { deletedSe
 
 export function clearAllSessionChatHistories(): void {
   sessionChatHistories.clear();
+  try {
+    const { clearAllPersistedHistories } = require("./session-persistent-storage");
+    clearAllPersistedHistories();
+  } catch {}
 }
+
 
 

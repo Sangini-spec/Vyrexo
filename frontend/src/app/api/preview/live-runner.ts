@@ -12,12 +12,12 @@ export function generateLiveAppHtml(appCode: string, title: string, compiledJs?:
   let executableScript = "";
   if (compiledJs) {
     const cleanedJs = compiledJs
-      .replace(/import\s*\{[^}]*\}\s*from\s*["\x27]react[^"'\x27]*["\x27];?/g, "")
-      .replace(/import\s*\{[^}]*\}\s*from\s*["\x27]react\/jsx-dev-runtime["\x27];?/g, "")
-      .replace(/import\s*\{[^}]*\}\s*from\s*["\x27]react\/jsx-runtime["\x27];?/g, "")
+      .replace(/^\s*import\s+[\s\S]*?from\s*["\x27][^"'\x27]+["\x27];?\s*$/gm, "")
+      .replace(/^\s*import\s*["\x27][^"'\x27]+["\x27];?\s*$/gm, "")
       .replace(/export\s*\{[^}]*\};?/g, "")
       .replace(/export\s+default\s+/g, "")
-      .replace(/export\s+(function|const|class)/g, "$1");
+      .replace(/export\s+(function|const|class|let|var)/g, "$1")
+      .replace(/<\/script/gi, "<\\/script");
 
     executableScript = `
       <script>
@@ -194,6 +194,12 @@ export function getWorkspaceAppCode(sessionId: string): { code: string; title: s
       const tsxFile = files.find((f) => f.endsWith(".tsx"));
       if (tsxFile) {
         appPath = path.join(compDir, tsxFile);
+      }
+    }
+    if (!fs.existsSync(appPath)) {
+      const rootApp = path.join(wsDir, "src", "App.tsx");
+      if (fs.existsSync(rootApp)) {
+        appPath = rootApp;
       }
     }
 

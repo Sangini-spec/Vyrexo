@@ -1,0 +1,23 @@
+{
+  "name": "@vyrexo/local-agent",
+  "version": "0.2.0",
+  "description": "Secure Local Execution Agent for Vyrexo Autonomous Engineering & IDE Control",
+  "main": "dist/index.js",
+  "bin": {
+    "vyrexo-agent": "bin/agent.cjs"
+  },
+  "scripts": {
+    "start": "node bin/agent.cjs",
+    "dev": "node bin/agent.cjs",
+    "test": "node bin/agent.cjs --test"
+  },
+  "keywords": [
+    "vyrexo",
+    "coding-agent",
+    "local-terminal",
+    "vscode",
+    "autonomous-development"
+  ],
+  "author": "Vyrexo Team",
+  "license": "MIT"
+}

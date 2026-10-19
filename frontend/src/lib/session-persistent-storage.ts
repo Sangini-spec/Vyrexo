@@ -47,20 +47,12 @@ function getChatsDir(): string {
 
 const DEFAULT_SESSIONS: SessionRecord[] = [
   {
-    id: "session-default-1",
+    id: "session-1790005321834",
     user_id: "dev-local-user",
-    name: "API Service Architecture",
-    icon: "🚀",
-    createdAt: Date.now() - 1000 * 60 * 45,
-    updatedAt: Date.now() - 1000 * 60 * 45,
-  },
-  {
-    id: "session-default-2",
-    user_id: "dev-local-user",
-    name: "Frontend Components & Orb",
-    icon: "⚡",
-    createdAt: Date.now() - 1000 * 60 * 60 * 24,
-    updatedAt: Date.now() - 1000 * 60 * 60 * 24,
+    name: "RailGo Train Booking",
+    icon: "🚆",
+    createdAt: Date.now() - 1000 * 60 * 15,
+    updatedAt: Date.now() - 1000 * 60 * 15,
   },
 ];
 
@@ -410,3 +402,84 @@ export function deleteChatHistory(sessionId: string): void {
     }
   } catch {}
 }
+
+// ── Compatibility Exports for Session & Chat Persistence ─────────────────────
+
+export function readPersistedSessions(userId: string = "dev-local-user"): SessionRecord[] {
+  const diskData = readDiskSessions();
+  if (diskData[userId] && Array.isArray(diskData[userId]) && diskData[userId].length > 0) {
+    return diskData[userId];
+  }
+  return [];
+}
+
+export function writePersistedSessions(userId: string = "dev-local-user", sessions: SessionRecord[]): void {
+  memorySessions.set(userId, sessions);
+  const diskData = readDiskSessions();
+  diskData[userId] = sessions;
+  writeDiskSessions(diskData);
+}
+
+export function findPersistedSessionById(sessionId: string): SessionRecord | null {
+  if (!sessionId) return null;
+  const diskData = readDiskSessions();
+  for (const list of Object.values(diskData)) {
+    if (Array.isArray(list)) {
+      const found = list.find((s) => s.id === sessionId);
+      if (found) return found;
+    }
+  }
+  for (const list of Array.from(memorySessions.values())) {
+    const found = list.find((s) => s.id === sessionId);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function readPersistedHistories(): Record<string, SessionChatTurn[]> {
+  const result: Record<string, SessionChatTurn[]> = {};
+  try {
+    const dir = getChatsDir();
+    if (fs.existsSync(dir)) {
+      const entries = fs.readdirSync(dir);
+      for (const entry of entries) {
+        if (entry.endsWith(".json")) {
+          const sid = entry.slice(0, -5);
+          try {
+            const raw = fs.readFileSync(path.join(dir, entry), "utf-8");
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              result[sid] = parsed;
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+  return result;
+}
+
+export function writePersistedHistory(sessionId: string, turns: SessionChatTurn[]): void {
+  saveChatHistory(sessionId, turns);
+}
+
+export function deletePersistedHistory(sessionId: string): void {
+  deleteChatHistory(sessionId);
+}
+
+export function clearAllPersistedHistories(): void {
+  memoryChats.clear();
+  try {
+    const dir = getChatsDir();
+    if (fs.existsSync(dir)) {
+      for (const entry of fs.readdirSync(dir)) {
+        if (entry.endsWith(".json")) {
+          try {
+            fs.unlinkSync(path.join(dir, entry));
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+

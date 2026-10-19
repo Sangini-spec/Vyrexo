@@ -45,7 +45,7 @@ def _build_llm(provider: str, model_name: str, settings: LLMSettings, temperatur
         provider_keys = {
             "groq": settings.groq_api_key,
             "openrouter": settings.openrouter_api_key,
-            "openai": settings.api_key,
+            "openai": settings.openai_api_key or settings.api_key,
             "ollama": "ollama",  # Ollama ignores the key, but the client requires one
         }
         base_url = settings.base_url or default_base_urls[provider]
@@ -62,7 +62,10 @@ def _build_llm(provider: str, model_name: str, settings: LLMSettings, temperatur
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=model_name)
+        anthropic_kwargs: dict = {"model": model_name, "temperature": temperature}
+        if settings.anthropic_api_key:
+            anthropic_kwargs["api_key"] = settings.anthropic_api_key
+        return ChatAnthropic(**anthropic_kwargs)
 
     raise ValueError(f"Unknown LLM provider: {provider}")
 

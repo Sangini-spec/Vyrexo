@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar, type Session } from "@/components/shared/Sidebar";
@@ -16,6 +18,10 @@ import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
 import { primeSpeechSynthesis, speakHumanizedText } from "@/lib/voice-synthesizer";
 import { detectEmotionFromContext, getEmotionStateMeta, type EmotionTone } from "@/lib/emotion-detector";
+import {
+  isPlaceholderOrBadSessionName,
+  resolveSemanticSessionName,
+} from "@/lib/project-spec";
 
 // A persisted, renamable chat session. Stored in localStorage so they survive
 // reloads; grouped/labelled for the Sidebar at render time.
@@ -401,8 +407,25 @@ export default function App() {
     vscodeUri?: string;
     cursorUri?: string;
     windsurfUri?: string;
+    vscodeInsidersUri?: string;
+    workspaceUri?: string;
+    cursorWorkspaceUri?: string;
+    windsurfWorkspaceUri?: string;
     copied?: boolean;
+    source?: string;
+    message?: string;
+    projectName?: string;
+    filesCount?: number;
+    files?: Array<{ path: string; content: string; size?: number }>;
+    requiresLocalSync?: boolean;
+    syncPackageUrl?: string;
+    downloadUrl?: string;
+    vscodeServerUrl?: string;
+    savedLocally?: string;
   }>({});
+  const [launchingIde, setLaunchingIde] = useState<string | null>(null);
+  const [savingLocalFolder, setSavingLocalFolder] = useState(false);
+  const [ideTargetPathInput, setIdeTargetPathInput] = useState<string>("");
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const docInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
@@ -425,22 +448,52 @@ export default function App() {
         return Array.isArray(p) ? p : [];
       } catch { return []; }
     };
-    (async () => {
-      const local = readLocal().map((s) => ({
-        ...s,
+    const healSessionRecord = (s: { id: string; name?: string; icon?: string; createdAt?: number }): StoredSession => {
+      let localProjTitle: string | undefined;
+      let localTurns: Array<{ role?: string; text?: string; content?: string }> = [];
+      try {
+        const projMap = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+        if (projMap[s.id]?.name && projMap[s.id].name !== "vyrexo-workspace") {
+          localProjTitle = projMap[s.id].name;
+        }
+      } catch {}
+      try {
+        const rawTurns = localStorage.getItem(`vyrexo_chat_history_${s.id}`);
+        if (rawTurns) {
+          const parsed = JSON.parse(rawTurns);
+          if (Array.isArray(parsed)) localTurns = parsed;
+        }
+      } catch {}
+
+      const rawName = s.name || "New Session";
+      const semanticName =
+        rawName === "New Session" && !localProjTitle && localTurns.length <= 1
+          ? "New Session"
+          : resolveSemanticSessionName(rawName, s.id, localProjTitle, localTurns);
+      const icon =
+        /rail|train/i.test(semanticName) && (!s.icon || s.icon === SESSION_ICONS[0])
+          ? "🚆"
+          : s.icon || SESSION_ICONS[0];
+      return {
+        id: s.id,
+        name: semanticName,
+        icon,
         createdAt: getSessionTimestamp(s),
-      }));
+      };
+    };
+
+    (async () => {
+      const local = readLocal()
+        .filter((s) => s?.id && s.id !== "session-default-1" && s.id !== "session-default-2")
+        .map((s) => healSessionRecord(s));
       let dbList: StoredSession[] | null = null;
       try {
         const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(user.id)}`);
         const d = await r.json();
         if (d?.ok && Array.isArray(d.sessions)) {
-          dbList = d.sessions.map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => ({
-            id: s.id,
-            name: s.name || "New Session",
-            icon: s.icon || SESSION_ICONS[0],
-            createdAt: getSessionTimestamp(s),
-          }));
+          dbList = d.sessions
+            .filter((s: { id: string }) => s?.id && s.id !== "session-default-1" && s.id !== "session-default-2")
+            .map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => healSessionRecord(s));
         }
       } catch { /* DB down — fall back below */ }
       if (cancelled) return;
@@ -453,18 +506,34 @@ export default function App() {
         return;
       }
 
-      // Migrate any localStorage-only sessions into the DB.
-      const dbIds = new Set(dbList.map((s) => s.id));
-      const toMigrate = local.filter((s) => s?.id && !dbIds.has(s.id));
-      for (const s of toMigrate) {
-        try {
-          await fetch("/api/sessions", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt }),
-          });
-        } catch {}
+      // Migrate any localStorage-only sessions into the DB and heal any bad names in DB
+      const dbMap = new Map(dbList.map((s) => [s.id, s]));
+      const toMigrate: StoredSession[] = [];
+      for (const s of local) {
+        const existingDb = dbMap.get(s.id);
+        if (!existingDb) {
+          toMigrate.push(s);
+          try {
+            await fetch("/api/sessions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+            });
+          } catch {}
+        } else if (isPlaceholderOrBadSessionName(existingDb.name) && !isPlaceholderOrBadSessionName(s.name)) {
+          dbMap.set(s.id, { ...existingDb, name: s.name, icon: s.icon });
+          try {
+            await fetch("/api/sessions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+            });
+          } catch {}
+        }
       }
-      let merged = [...toMigrate, ...dbList].sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
+      let merged = [...toMigrate, ...Array.from(dbMap.values())].sort(
+        (a, b) => getSessionTimestamp(b) - getSessionTimestamp(a)
+      );
       if (!merged.length) {
         // Brand-new account: seed a first session.
         const now = Date.now();
@@ -770,14 +839,14 @@ export default function App() {
       }
 
       case "session.renamed": {
-        const newName = msg.payload.name as string;
+        const newName = (msg.payload.name as string)?.trim();
         const targetId = (msg.payload.id as string) || activeSession;
-        if (newName && targetId) {
+        if (newName && targetId && !isPlaceholderOrBadSessionName(newName)) {
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id === targetId) {
-                // The name needs to be decided only once!
-                if (s.name && s.name !== "New Session") {
+                // Only keep existing name if it is already a valid semantic name
+                if (s.name && !isPlaceholderOrBadSessionName(s.name)) {
                   return s;
                 }
                 return { ...s, name: newName };
@@ -849,10 +918,11 @@ export default function App() {
       }
 
       case "project.loaded": {
-        if (msg.payload.ok) {
+        if (msg.payload.ok !== false) {
           const name = (msg.payload.name as string) || "project";
-          const path = (msg.payload.path as string) || "";
-          const files = (msg.payload.files_indexed as number) ?? 0;
+          const rawPath = (msg.payload.path as string) || "";
+          const path = rawPath === "." ? `/workspaces/${activeSession || "default"}` : rawPath;
+          const files = (msg.payload.files_indexed as number) ?? (msg.payload.files_count as number) ?? 0;
           const proj = { path, name, filesCount: files };
           setActiveProject(proj);
           setProjectBound(true);
@@ -1216,8 +1286,11 @@ export default function App() {
 
   const handleSessionClick = useCallback(
     (id: string) => {
-      if (activeSession) disconnect();
+      if (activeSession && activeSession !== id) disconnect();
       setActiveSession(id);
+      try {
+        localStorage.setItem("vyrexo_active_session", id);
+      } catch {}
       setSteps([]);
       setNarration("Say 'Rex' to start, or click the orb");
 
@@ -1240,10 +1313,15 @@ export default function App() {
 
       // Strict session isolation: restore THIS session's connected project (or null if none)
       let sessProj = sessionProjectsRef.current[id] || null;
+      if (sessProj && (sessProj.path === "." || sessProj.name === "vyrexo-workspace")) {
+        sessProj = null;
+      }
       if (!sessProj) {
         try {
           const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-          if (map[id]) sessProj = map[id];
+          if (map[id] && map[id].path !== "." && map[id].name !== "vyrexo-workspace") {
+            sessProj = map[id];
+          }
         } catch {}
       }
       setActiveProject(sessProj);
@@ -1267,6 +1345,21 @@ export default function App() {
             setActiveProject(p);
             activeProjectRef.current = p;
             sessionProjectsRef.current[id] = p;
+            if (!sessionPreviewsRef.current[id]) {
+              const restoredPreviewUrl = `/api/preview?session=${encodeURIComponent(id)}`;
+              sessionPreviewsRef.current[id] = restoredPreviewUrl;
+              setPreviewUrl(restoredPreviewUrl);
+            }
+            if (p.name && !isPlaceholderOrBadSessionName(p.name)) {
+              const cleanTitle = p.name.split(/\s*[—–-]\s*/)[0].trim().slice(0, 38) || p.name;
+              setSessions((prev) =>
+                prev.map((s) =>
+                  s.id === id && isPlaceholderOrBadSessionName(s.name)
+                    ? { ...s, name: cleanTitle }
+                    : s
+                )
+              );
+            }
             try {
               const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
               map[id] = p;
@@ -1475,12 +1568,36 @@ export default function App() {
     }
   }, [wsStatus, sendMessage]);
 
+  // Auto-restore active session on startup once sessions are loaded
+  useEffect(() => {
+    if (!sessionsLoaded || sessions.length === 0 || activeSession) return;
+    let targetId = "";
+    try {
+      const savedId = localStorage.getItem("vyrexo_active_session");
+      if (savedId && sessions.some((s) => s.id === savedId)) {
+        targetId = savedId;
+      }
+    } catch {}
+    if (!targetId) {
+      const namedSession = sessions.find((s) => s.name && s.name !== "New Session");
+      targetId = namedSession ? namedSession.id : sessions[0].id;
+    }
+    if (targetId) {
+      handleSessionClick(targetId);
+    }
+  }, [sessionsLoaded, sessions, activeSession, handleSessionClick]);
+
   // Restore session-isolated projects map on initial load
   useEffect(() => {
     try {
       const saved = localStorage.getItem("vyrexo_session_projects");
       if (saved) {
         const map = JSON.parse(saved);
+        for (const k of Object.keys(map)) {
+          if (map[k]?.path === "." || map[k]?.name === "vyrexo-workspace") {
+            delete map[k];
+          }
+        }
         sessionProjectsRef.current = map;
         if (activeSession && map[activeSession]) {
           setActiveProject(map[activeSession]);
@@ -1585,10 +1702,26 @@ export default function App() {
 
   const handleOpenVSCode = useCallback(async () => {
     try {
+      const currentFiles = codeEvents
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .map((e) => ({ path: e.path!, content: e.content! }));
+      const safeProjectPath =
+        activeProject?.path && activeProject.path !== "." ? activeProject.path : undefined;
+      const sessionTitle =
+        activeProject?.name ||
+        sessions.find((s) => s.id === activeSession)?.name ||
+        undefined;
+
       const res = await fetch("/api/projects/vscode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: activeProject?.path || "." }),
+        body: JSON.stringify({
+          path: safeProjectPath,
+          sessionId: activeSession || "default",
+          title: sessionTitle && sessionTitle !== "New Session" ? sessionTitle : undefined,
+          files: currentFiles.length > 0 ? currentFiles : undefined,
+          localAgentUrl: "http://127.0.0.1:4040",
+        }),
       });
       const data = await res.json();
       if (data?.ok) {
@@ -1597,17 +1730,252 @@ export default function App() {
           vscodeUri: data.vscodeUri,
           cursorUri: data.cursorUri,
           windsurfUri: data.windsurfUri,
+          vscodeInsidersUri: data.vscodeInsidersUri,
+          workspaceUri: data.workspaceUri,
+          cursorWorkspaceUri: data.cursorWorkspaceUri,
+          windsurfWorkspaceUri: data.windsurfWorkspaceUri,
+          source: data.source,
+          message: data.message,
+          projectName: data.projectName,
+          filesCount: data.filesCount,
+          files: data.files || [],
+          requiresLocalSync: data.requiresLocalSync,
+          syncPackageUrl: data.syncPackageUrl,
+          downloadUrl: data.downloadUrl,
+          vscodeServerUrl:
+            data.vscodeServerUrl ||
+            `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`,
         });
+        setIdeTargetPathInput(data.targetPath || safeProjectPath || "");
         setVsCodeModalOpen(true);
-        // Attempt browser deep-link trigger to open VS Code app directly
-        if (data.vscodeUri && typeof window !== "undefined") {
-          window.location.href = data.vscodeUri;
-        }
       }
     } catch (err) {
-      console.error("Failed to open VS Code:", err);
+      console.error("Failed to prepare IDE workspace launch:", err);
+      setVsCodeModalOpen(true);
     }
-  }, [activeProject]);
+  }, [activeProject, activeSession, codeEvents, sessions]);
+
+  const handleSaveToLocalFolder = useCallback(async () => {
+    setSavingLocalFolder(true);
+    try {
+      const currentFiles = codeEvents
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .map((e) => ({ path: e.path!, content: e.content! }));
+      const sessionTitle =
+        activeProject?.name ||
+        vsCodeDetails.projectName ||
+        sessions.find((s) => s.id === activeSession)?.name ||
+        "vyrexo-project";
+
+      const res = await fetch("/api/projects/vscode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: activeSession || "default",
+          title: sessionTitle !== "New Session" ? sessionTitle : undefined,
+          files: currentFiles.length > 0 ? currentFiles : undefined,
+        }),
+      });
+      const data = await res.json();
+      const filesToSave: Array<{ path: string; content: string }> =
+        data?.files || vsCodeDetails.files || currentFiles || [];
+
+      if (typeof window !== "undefined" && "showDirectoryPicker" in window) {
+        const rootHandle = await (window as any).showDirectoryPicker({
+          mode: "readwrite",
+        });
+        for (const file of filesToSave) {
+          const cleanRel = String(file.path || "")
+            .replace(/\\/g, "/")
+            .replace(/^\/+/, "");
+          if (!cleanRel || cleanRel.includes("..")) continue;
+          const parts = cleanRel.split("/").filter(Boolean);
+          const fileName = parts.pop()!;
+          let dirHandle = rootHandle;
+          for (const part of parts) {
+            dirHandle = await dirHandle.getDirectoryHandle(part, { create: true });
+          }
+          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(file.content ?? "");
+          await writable.close();
+        }
+        // Also write .code-workspace file at the root of the chosen folder
+        const slug =
+          String(data?.projectName || sessionTitle)
+            .toLowerCase()
+            .replace(/[^a-z0-9-_]+/g, "-")
+            .replace(/^-+|-+$/g, "") || "vyrexo-project";
+        const wsHandle = await rootHandle.getFileHandle(`${slug}.code-workspace`, {
+          create: true,
+        });
+        const wsWritable = await wsHandle.createWritable();
+        await wsWritable.write(
+          JSON.stringify(
+            {
+              folders: [{ path: ".", name: data?.projectName || sessionTitle }],
+              settings: { "files.exclude": { "**/.git": true, "**/node_modules": true } },
+            },
+            null,
+            2
+          )
+        );
+        await wsWritable.close();
+
+        setVsCodeDetails((prev) => ({
+          ...prev,
+          savedLocally: `Saved ${filesToSave.length} files to local folder "${rootHandle.name}"! Open that folder in VS Code.`,
+        }));
+        setNarration(
+          `Saved all ${filesToSave.length} project files into your local folder "${rootHandle.name}".`
+        );
+      } else {
+        // Fallback: trigger ZIP download
+        const downloadUrl =
+          data?.downloadUrl ||
+          vsCodeDetails.downloadUrl ||
+          `/api/projects/export?sessionId=${encodeURIComponent(activeSession || "default")}`;
+        window.location.href = downloadUrl;
+      }
+    } catch (err: any) {
+      if (err?.name !== "AbortError") {
+        console.warn("Local folder save cancelled or failed:", err);
+      }
+    } finally {
+      setSavingLocalFolder(false);
+    }
+  }, [activeProject, activeSession, codeEvents, sessions, vsCodeDetails]);
+
+  const handleLaunchIDE = useCallback(
+    async (ide: "vscode" | "cursor" | "windsurf" | "vscode-insiders") => {
+      setLaunchingIde(ide);
+      const ideDisplayName =
+        ide === "cursor"
+          ? "Cursor"
+          : ide === "windsurf"
+          ? "Windsurf"
+          : ide === "vscode-insiders"
+          ? "VS Code Insiders"
+          : "VS Code";
+      const rawTarget = ideTargetPathInput || vsCodeDetails.targetPath || activeProject?.path || "";
+      const targetPath = rawTarget === "." ? "" : rawTarget;
+      const currentFiles = codeEvents
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .map((e) => ({ path: e.path!, content: e.content! }));
+      const sessionTitle =
+        activeProject?.name ||
+        vsCodeDetails.projectName ||
+        sessions.find((s) => s.id === activeSession)?.name ||
+        undefined;
+
+      try {
+        // 1. First trigger backend to assemble and ensure all code files for this session are written cleanly
+        const res = await fetch("/api/projects/vscode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: targetPath || undefined,
+            sessionId: activeSession || "default",
+            title: sessionTitle && sessionTitle !== "New Session" ? sessionTitle : undefined,
+            files: currentFiles.length > 0 ? currentFiles : undefined,
+            ide,
+            localAgentUrl: "http://127.0.0.1:4040",
+          }),
+        });
+        const data = await res.json();
+        const filesToSync = data?.files || vsCodeDetails.files || currentFiles || [];
+        const projectName = data?.projectName || vsCodeDetails.projectName || `session-${activeSession}`;
+        const resolvedWorkspacePath = data?.targetPath || targetPath;
+        const vscodeServerUrl =
+          data?.vscodeServerUrl ||
+          vsCodeDetails.vscodeServerUrl ||
+          `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`;
+
+        // 2. Client-side desktop bridge: if user has local agent on their machine (127.0.0.1:4040)
+        let openedViaClientAgent = false;
+        try {
+          const agentRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: targetPath && !targetPath.startsWith("/app/applet") ? targetPath : undefined,
+              sessionId: activeSession || "default",
+              ide,
+              projectName,
+              files: filesToSync,
+              reuseWindow: false,
+            }),
+            signal: AbortSignal.timeout(2500),
+          });
+          if (agentRes.ok) {
+            const agentData = await agentRes.json().catch(() => null);
+            if (agentData?.ok) {
+              openedViaClientAgent = true;
+              const syncedLocalPath = agentData.targetPath || agentData.path;
+              if (syncedLocalPath) {
+                setIdeTargetPathInput(syncedLocalPath);
+              }
+              if (agentData.cliLaunched === false && agentData.vscodeUri && typeof window !== "undefined") {
+                window.location.href = agentData.vscodeUri;
+              }
+              setNarration(
+                `Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${syncedLocalPath || "local workspace"}.`
+              );
+            }
+          }
+        } catch {
+          // Local agent not active on 127.0.0.1:4040, continue with URI scheme or VS Code Server
+        }
+
+        if (!openedViaClientAgent) {
+          if (data?.source === "host_cli") {
+            setNarration(`Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName}.`);
+          } else {
+            const isRemoteBrowser =
+              typeof window !== "undefined" &&
+              window.location.hostname !== "localhost" &&
+              window.location.hostname !== "127.0.0.1";
+            const isContainerOnlyPath =
+              !targetPath ||
+              targetPath.startsWith("/app/applet") ||
+              targetPath.startsWith("~/vyrexo-projects");
+
+            // If user is on a remote cloud URL and hasn't specified a custom local OS path,
+            // open the built-in VS Code Server workbench where the full file tree is mounted on disk!
+            if (isRemoteBrowser && isContainerOnlyPath && ide === "vscode") {
+              window.location.href = vscodeServerUrl;
+              setNarration(
+                `Opening full directory structure of ${projectName} (${filesToSync.length} files) in VS Code Server...`
+              );
+              return;
+            }
+
+            // Otherwise trigger directory protocol deep-link (always folder URI, never .code-workspace file)
+            const uri =
+              ide === "cursor"
+                ? data?.cursorUri || vsCodeDetails.cursorUri
+                : ide === "windsurf"
+                ? data?.windsurfUri || vsCodeDetails.windsurfUri
+                : ide === "vscode-insiders"
+                ? data?.vscodeInsidersUri || vsCodeDetails.vscodeInsidersUri
+                : data?.vscodeUri || vsCodeDetails.vscodeUri;
+
+            if (uri && typeof window !== "undefined") {
+              window.location.href = uri;
+              setNarration(
+                `Opening ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${resolvedWorkspacePath}...`
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Failed to launch IDE:", err);
+      } finally {
+        setTimeout(() => setLaunchingIde(null), 1200);
+      }
+    },
+    [ideTargetPathInput, vsCodeDetails, activeProject, activeSession, codeEvents, sessions]
+  );
 
   // Run a home-screen quick action: queue its real command, then make sure we
   // have a session and (for project-scoped work) a connected project. The
@@ -2179,7 +2547,7 @@ export default function App() {
       <RightPanel
         collapsed={rightPanelCollapsed}
         width={rightPanelWidth}
-        projectPath={activeProject?.path || ""}
+        projectPath={activeProject?.path && activeProject.path !== "." ? activeProject.path : ""}
         activeTab={activeRightTab}
         onTabChange={setActiveRightTab}
         narration={narration}
@@ -2199,6 +2567,19 @@ export default function App() {
         onConnectProject={handleConnectProject}
         sessionId={activeSession || "default"}
         onClearChat={handleClearCurrentChat}
+        hasProjectFiles={
+          Boolean(activeProject) ||
+          codeEvents.some((e) => e.kind === "action" && e.path) ||
+          Boolean(
+            activeSession &&
+              sessions.find((s) => s.id === activeSession)?.name &&
+              sessions.find((s) => s.id === activeSession)?.name !== "New Session"
+          )
+        }
+        projectTitle={
+          activeProject?.name ||
+          (activeSession ? sessions.find((s) => s.id === activeSession)?.name : undefined)
+        }
       />
 
       {/* VS Code & Desktop IDE Bridge Dialog */}
@@ -2208,19 +2589,26 @@ export default function App() {
           onClick={() => setVsCodeModalOpen(false)}
         >
           <div
-            className="w-[460px] max-w-[95vw] rounded-2xl border border-[var(--border2)] bg-[var(--surface)] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+            className="w-[520px] max-w-[95vw] rounded-2xl border border-[var(--border2)] bg-[var(--surface)] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between pb-3 border-b border-[var(--border2)]">
               <div className="flex items-center gap-2.5">
-                <span className="p-2 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/20">
-                  <svg width="20" height="20" viewBox="0 0 100 100" fill="none">
+                <span className="p-2 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/20 text-[#007ACC]">
+                  <svg width="22" height="22" viewBox="0 0 100 100" fill="none">
                     <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
                   </svg>
                 </span>
                 <div>
-                  <h3 className="text-sm font-semibold text-[var(--text)]">IDE & Local Editor Sync</h3>
-                  <p className="text-[11px] text-[var(--muted2)]">Rex code changes are reflected in real time</p>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-[var(--text)]">IDE & Local Workspace Sync</h3>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1e6fff18] text-[#1e6fff] border border-[#1e6fff30] font-medium">
+                      {vsCodeDetails.filesCount || (vsCodeDetails.files?.length || 0)} files in session
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[var(--muted2)]">
+                    Session: <span className="text-[var(--text2)] font-mono">{sessions.find(s => s.id === activeSession)?.name || activeSession || "Current"}</span>
+                  </p>
                 </div>
               </div>
               <button
@@ -2233,16 +2621,25 @@ export default function App() {
 
             <div className="mt-4 space-y-4">
               <div>
-                <label className="text-[11px] font-medium text-[var(--muted2)]">Workspace Path</label>
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-medium text-[var(--muted2)]">Workspace Directory Path</label>
+                  <span className="text-[10px] text-[var(--muted)]">Opens full folder structure</span>
+                </div>
                 <div className="mt-1 flex items-center gap-2 p-2 rounded-lg bg-[var(--input)] border border-[var(--border2)] font-mono text-[11px] text-[var(--text)]">
-                  <span className="truncate flex-1">{vsCodeDetails.targetPath || activeProject?.path || "Current Workspace"}</span>
+                  <input
+                    type="text"
+                    value={ideTargetPathInput}
+                    onChange={(e) => setIdeTargetPathInput(e.target.value)}
+                    placeholder="/path/to/project"
+                    className="flex-1 bg-transparent border-none outline-none text-[11px] font-mono text-[var(--text)]"
+                  />
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(vsCodeDetails.targetPath || activeProject?.path || "");
+                      navigator.clipboard.writeText(ideTargetPathInput || vsCodeDetails.targetPath || activeProject?.path || "");
                       setVsCodeDetails((prev) => ({ ...prev, copied: true }));
                       setTimeout(() => setVsCodeDetails((prev) => ({ ...prev, copied: false })), 2000);
                     }}
-                    className="px-2 py-1 bg-[var(--surface2)] hover:bg-[var(--border2)] text-[10px] rounded border border-[var(--border2)] text-[var(--text3)] flex-shrink-0"
+                    className="px-2 py-1 bg-[var(--surface2)] hover:bg-[var(--border2)] text-[10px] rounded border border-[var(--border2)] text-[var(--text3)] flex-shrink-0 cursor-pointer"
                   >
                     {vsCodeDetails.copied ? "Copied!" : "Copy"}
                   </button>
@@ -2250,46 +2647,134 @@ export default function App() {
               </div>
 
               <div>
-                <label className="text-[11px] font-medium text-[var(--muted2)]">Launch Directly in Your Editor</label>
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <a
-                    href={vsCodeDetails.vscodeUri || `vscode://file/${activeProject?.path || ""}`}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#007ACC] hover:bg-[#007ACC]/10 transition-all text-center group"
+                <label className="text-[11px] font-medium text-[var(--muted2)]">
+                  Launch Entire Directory in Chosen IDE (1-Click)
+                </label>
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {/* VS Code */}
+                  <button
+                    type="button"
+                    onClick={() => handleLaunchIDE("vscode")}
+                    disabled={launchingIde !== null}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#007ACC] hover:bg-[#007ACC]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
-                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#007ACC]">VS Code</span>
-                    <span className="text-[9px] text-[var(--muted)] mt-0.5">Desktop app</span>
-                  </a>
-                  <a
-                    href={vsCodeDetails.cursorUri || `cursor://file/${activeProject?.path || ""}`}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#7c3aed] hover:bg-[#7c3aed]/10 transition-all text-center group"
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#007ACC] flex items-center gap-1">
+                      {launchingIde === "vscode" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#007ACC] border-t-transparent rounded-full" />}
+                      VS Code
+                    </span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">
+                      {launchingIde === "vscode" ? "Opening..." : "Full Workspace"}
+                    </span>
+                  </button>
+
+                  {/* Cursor */}
+                  <button
+                    type="button"
+                    onClick={() => handleLaunchIDE("cursor")}
+                    disabled={launchingIde !== null}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#7c3aed] hover:bg-[#7c3aed]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
-                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#a78bfa]">Cursor</span>
-                    <span className="text-[9px] text-[var(--muted)] mt-0.5">AI Editor</span>
-                  </a>
-                  <a
-                    href={vsCodeDetails.windsurfUri || `windsurf://file/${activeProject?.path || ""}`}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#06b6d4] hover:bg-[#06b6d4]/10 transition-all text-center group"
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#a78bfa] flex items-center gap-1">
+                      {launchingIde === "cursor" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#a78bfa] border-t-transparent rounded-full" />}
+                      Cursor
+                    </span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">
+                      {launchingIde === "cursor" ? "Opening..." : "AI Editor"}
+                    </span>
+                  </button>
+
+                  {/* Windsurf */}
+                  <button
+                    type="button"
+                    onClick={() => handleLaunchIDE("windsurf")}
+                    disabled={launchingIde !== null}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#06b6d4] hover:bg-[#06b6d4]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
-                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#22d3ee]">Windsurf</span>
-                    <span className="text-[9px] text-[var(--muted)] mt-0.5">Codeium</span>
-                  </a>
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#22d3ee] flex items-center gap-1">
+                      {launchingIde === "windsurf" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#22d3ee] border-t-transparent rounded-full" />}
+                      Windsurf
+                    </span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">
+                      {launchingIde === "windsurf" ? "Opening..." : "Codeium"}
+                    </span>
+                  </button>
+
+                  {/* VS Code Insiders */}
+                  <button
+                    type="button"
+                    onClick={() => handleLaunchIDE("vscode-insiders")}
+                    disabled={launchingIde !== null}
+                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#10b981] hover:bg-[#10b981]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
+                  >
+                    <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#10b981] flex items-center gap-1">
+                      {launchingIde === "vscode-insiders" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#10b981] border-t-transparent rounded-full" />}
+                      Insiders
+                    </span>
+                    <span className="text-[9px] text-[var(--muted)] mt-0.5">
+                      {launchingIde === "vscode-insiders" ? "Opening..." : "Pre-release"}
+                    </span>
+                  </button>
                 </div>
               </div>
+
+              {/* Direct Workspace Utilities */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleSaveToLocalFolder}
+                  disabled={savingLocalFolder}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/40 bg-[#007ACC]/15 hover:bg-[#007ACC]/25 text-xs text-[var(--ice)] font-semibold transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    <line x1="12" y1="11" x2="12" y2="17" />
+                    <polyline points="9 14 12 17 15 14" />
+                  </svg>
+                  {savingLocalFolder ? "Saving Folder..." : "Save Folder to Disk"}
+                </button>
+                <a
+                  href={vsCodeDetails.downloadUrl || `/api/projects/export?sessionId=${encodeURIComponent(activeSession || "default")}`}
+                  download
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:bg-[var(--border)] text-xs text-[var(--text)] font-medium transition-all"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  Download (.zip)
+                </a>
+                <a
+                  href={
+                    vsCodeDetails.vscodeServerUrl ||
+                    `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`
+                  }
+                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC]/20 hover:bg-[#007ACC]/30 text-xs text-[#38bdf8] font-semibold transition-all"
+                >
+                  VS Code Server
+                </a>
+              </div>
+
+              {vsCodeDetails.savedLocally && (
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium">
+                  ✓ {vsCodeDetails.savedLocally}
+                </div>
+              )}
 
               <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--border2)] text-[11px] text-[var(--muted2)] space-y-1.5 leading-relaxed">
                 <div className="flex items-center gap-1.5 font-medium text-[var(--text)]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
-                  Two-Way Real-Time Synchronization
+                  Full Directory Structure & Local Persistence
                 </div>
                 <p>
-                  Any files created or edited by Rex in this session are written directly to your connected project files. When opened in VS Code, file changes reload automatically.
+                  Every generated file for <strong className="text-[var(--text)]">{vsCodeDetails.projectName || activeProject?.name || "this session"}</strong> (components, types, tests, package.json, and <span className="font-mono text-[10px]">.code-workspace</span>) is isolated in its own project workspace—never mixed with Vyrexo&apos;s own files.
                 </p>
               </div>
 
               <div className="pt-2 flex justify-end">
                 <button
                   onClick={() => setVsCodeModalOpen(false)}
-                  className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all"
+                  className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all cursor-pointer"
                 >
                   Done
                 </button>

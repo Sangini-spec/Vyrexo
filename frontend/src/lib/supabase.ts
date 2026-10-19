@@ -19,4 +19,9 @@ export const supabase: SupabaseClient = createClient(
   }
 );
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+export const isSupabaseConfigured = Boolean(
+  supabaseUrl &&
+    supabaseAnonKey &&
+    !supabaseUrl.includes("your-project.supabase.co") &&
+    !supabaseUrl.includes("placeholder.supabase.co")
+);

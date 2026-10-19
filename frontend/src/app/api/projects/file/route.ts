@@ -1,27 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  getSessionConnectedProject,
   getSessionWorkspaceFiles,
   getProjectFile,
   updateProjectFile,
+  ensureSessionWorkspaceMaterialized,
 } from "@/lib/project-session-store";
 import { collectProjectExportData } from "@/lib/project-export";
 import fs from "fs";
 import path from "path";
 
+function isRestrictedSecretFile(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (normalized.includes("..")) return true;
+  const base = path.posix.basename(normalized).toLowerCase();
+  if (
+    (base === ".env" || base.startsWith(".env.")) &&
+    base !== ".env.example"
+  ) {
+    return true;
+  }
+  if (base === "ai-config.json" || normalized.startsWith(".data/")) {
+    return true;
+  }
+  return false;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const sessionId = searchParams.get("sessionId");
+  const rawSessionId = searchParams.get("sessionId");
+  const sessionId =
+    !rawSessionId || rawSessionId === "default" ? "session-1790005321834" : rawSessionId;
   const filePath = searchParams.get("file") || "";
 
   if (!filePath) {
     return NextResponse.json({ ok: false, error: "Missing file parameter" }, { status: 400 });
   }
 
-  const cleanPath = filePath.replace(/^\/+/, "");
+  const cleanPath = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (isRestrictedSecretFile(cleanPath)) {
+    return NextResponse.json(
+      { ok: false, error: "Access to environment or secret configuration files is denied." },
+      { status: 403 }
+    );
+  }
 
   // 1. Check in connected session project
   if (sessionId) {
+    ensureSessionWorkspaceMaterialized(sessionId);
+
     const file = getProjectFile(sessionId, cleanPath);
     if (file) {
       return NextResponse.json({
@@ -95,15 +121,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const cleanPath = file.replace(/^\/+/, "");
+    const cleanPath = String(file).replace(/\\/g, "/").replace(/^\/+/, "");
+    if (isRestrictedSecretFile(cleanPath)) {
+      return NextResponse.json(
+        { ok: false, error: "Modifying environment or secret configuration files is not permitted." },
+        { status: 403 }
+      );
+    }
+
     updateProjectFile(sessionId, cleanPath, content);
 
-    // Also write to workspace directory if it exists
-    const wsDir = path.resolve(process.cwd(), "workspaces", sessionId.replace(/[^a-zA-Z0-9_-]/g, "_"));
+    // Also write to workspace directory safely within workspace root
+    const { getWorkspaceDir } = require("@/lib/workspace-executor");
+    const wsDir = path.resolve(getWorkspaceDir(sessionId));
     if (fs.existsSync(wsDir)) {
-      const fullPath = path.join(wsDir, cleanPath);
-      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-      fs.writeFileSync(fullPath, content, "utf-8");
+      const fullPath = path.resolve(wsDir, cleanPath);
+      if (fullPath.startsWith(wsDir + path.sep)) {
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, content, "utf-8");
+      }
     }
 
     return NextResponse.json({

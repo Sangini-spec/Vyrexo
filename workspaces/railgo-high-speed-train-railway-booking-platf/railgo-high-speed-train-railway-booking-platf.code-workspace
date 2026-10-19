@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "name": "RailGo — High-Speed Train & Railway Booking Platform",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "workbench.startupEditor": "readme",
+    "explorer.autoReveal": true,
+    "explorer.compactFolders": false
+  }
+}

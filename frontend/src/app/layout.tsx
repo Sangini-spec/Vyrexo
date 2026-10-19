@@ -21,11 +21,15 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Apply the saved theme before first paint to avoid a flash. */}
+        {/* Apply the saved theme before first paint and auto-recover from transient dev ChunkLoadErrors */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "(function(){try{var t=localStorage.getItem('vyrexo_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();",
+              "(function(){try{var t=localStorage.getItem('vyrexo_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}" +
+              "function handleChunkErr(msg){if(!msg)return false;var s=String(msg);if(s.indexOf('ChunkLoadError')!==-1||s.indexOf('Loading chunk')!==-1||s.indexOf('failed to fetch dynamically imported module')!==-1){try{var k='vyrexo_chunk_reload_ts';var last=Number(sessionStorage.getItem(k)||'0');var now=Date.now();if(now-last>6000){sessionStorage.setItem(k,String(now));setTimeout(function(){window.location.reload();},250);}}catch(e){}return true;}return false;}" +
+              "window.addEventListener('error',function(ev){if(handleChunkErr(ev&&(ev.message||(ev.error&&ev.error.message)||(ev.error&&ev.error.name)))){ev.preventDefault();if(ev.stopImmediatePropagation)ev.stopImmediatePropagation();}},true);" +
+              "window.addEventListener('unhandledrejection',function(ev){var r=ev&&ev.reason;if(handleChunkErr(r&&(r.message||r.name||String(r)))){ev.preventDefault();if(ev.stopImmediatePropagation)ev.stopImmediatePropagation();}},true);" +
+              "})();",
           }}
         />
       </head>

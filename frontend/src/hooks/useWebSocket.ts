@@ -26,7 +26,12 @@ import {
   CALCULATOR_TEST_PY,
   CALCULATOR_README_MD,
 } from "@/app/api/chat/calculator-files";
-import { extractProjectName, generateChatTitle, extractProjectSpecification } from "@/lib/project-spec";
+import {
+  extractProjectName,
+  generateChatTitle,
+  extractProjectSpecification,
+  isPlaceholderOrBadSessionName,
+} from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
 
@@ -411,7 +416,7 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
 
         let chatData: any = null;
         const abortCtrl = new AbortController();
-        const abortTimeout = setTimeout(() => abortCtrl.abort(), 120000);
+        const abortTimeout = setTimeout(() => abortCtrl.abort(), 240000);
 
         try {
           // Check intent and generate cognitive response via /api/chat
@@ -462,8 +467,12 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
               emit("preview.ready", { url: previewUrl });
             }
 
-            // Name session strictly once per user requirement!
-            if (data.chatTitle && !namedSessionsRef.current.has(sessionId)) {
+            // Name session strictly once when a valid semantic title is available
+            if (
+              data.chatTitle &&
+              !isPlaceholderOrBadSessionName(data.chatTitle) &&
+              !namedSessionsRef.current.has(sessionId)
+            ) {
               namedSessionsRef.current.add(sessionId);
               emit("session.renamed", { id: sessionId, name: data.chatTitle });
               fetch("/api/sessions", {
@@ -552,32 +561,38 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
         }
 
         // 2. ADAPTIVE MULTI-AGENT ROUTING (Tier 1: Direct Tweak, Tier 2: Feature Sprint, Tier 3: Full System Build)
-        const isDirectTweak = (
-          lower.startsWith("change") ||
-          lower.startsWith("fix") ||
-          lower.startsWith("update") ||
-          lower.startsWith("tweak") ||
-          lower.startsWith("make the") ||
-          lower.startsWith("set the") ||
-          lower.startsWith("color") ||
-          lower.startsWith("padding") ||
-          lower.startsWith("font") ||
-          lower.startsWith("style") ||
-          lower.includes("typo") ||
-          lower.includes("rename") ||
-          lower.includes("bg-") ||
-          lower.includes("text-")
-        ) && !lower.includes("build") && !lower.includes("create") && !lower.includes("architecture");
+        const hasRealChatFiles = Array.isArray(chatData?.files) && chatData.files.length > 0;
 
-        const isFeatureSprint = (
-          lower.includes("add ") ||
-          lower.includes("implement ") ||
-          lower.includes("integrate ") ||
-          lower.includes("support ") ||
-          lower.includes("filter") ||
-          lower.includes("discount") ||
-          lower.includes("coupon")
-        ) && !lower.includes("from scratch") && !lower.includes("complete application") && !lower.includes("full stack");
+        const isDirectTweak =
+          !hasRealChatFiles &&
+          (
+            lower.startsWith("change") ||
+            lower.startsWith("fix") ||
+            lower.startsWith("update") ||
+            lower.startsWith("tweak") ||
+            lower.startsWith("make the") ||
+            lower.startsWith("set the") ||
+            lower.startsWith("color") ||
+            lower.startsWith("padding") ||
+            lower.startsWith("font") ||
+            lower.startsWith("style") ||
+            lower.includes("typo") ||
+            lower.includes("rename") ||
+            lower.includes("bg-") ||
+            lower.includes("text-")
+          ) && !lower.includes("build") && !lower.includes("create") && !lower.includes("architecture");
+
+        const isFeatureSprint =
+          !hasRealChatFiles &&
+          (
+            lower.includes("add ") ||
+            lower.includes("implement ") ||
+            lower.includes("integrate ") ||
+            lower.includes("support ") ||
+            lower.includes("filter") ||
+            lower.includes("discount") ||
+            lower.includes("coupon")
+          ) && !lower.includes("from scratch") && !lower.includes("complete application") && !lower.includes("full stack");
 
         // ========== TIER 1: FAST SURGICAL EDIT (Coder + Executor check) ==========
         if (isDirectTweak) {
@@ -676,7 +691,10 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
             emit("agent.building.completed", {});
 
             const sprintChatTitle = generateChatTitle(text, sprintTitle);
-            if (!namedSessionsRef.current.has(sessionId)) {
+            if (
+              !isPlaceholderOrBadSessionName(sprintChatTitle) &&
+              !namedSessionsRef.current.has(sessionId)
+            ) {
               namedSessionsRef.current.add(sessionId);
               emit("session.renamed", { id: sessionId, name: sprintChatTitle });
               fetch("/api/sessions", {
@@ -1250,23 +1268,30 @@ test("Filters by status correctly", () => {
           cleanProjectTitle = chatData?.projectTitle || extractProjectName(text);
         }
 
-        if (!namedSessionsRef.current.has(sessionId)) {
+        const projectChatTitle =
+          (!isPlaceholderOrBadSessionName(chatData?.chatTitle) && chatData?.chatTitle) ||
+          generateChatTitle(text, cleanProjectTitle);
+        if (
+          !isPlaceholderOrBadSessionName(projectChatTitle) &&
+          !namedSessionsRef.current.has(sessionId)
+        ) {
           namedSessionsRef.current.add(sessionId);
-          const projectChatTitle = chatData?.chatTitle || generateChatTitle(text, cleanProjectTitle);
           emit("session.renamed", { id: sessionId, name: projectChatTitle });
           fetch("/api/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: sessionId, name: projectChatTitle }),
+            body: JSON.stringify({ id: sessionId, name: projectChatTitle, forceRename: true }),
           }).catch(() => {});
         }
 
-        // Register preview for this session
-        fetch("/api/preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, type: targetType, title: cleanProjectTitle, topic: cleanProjectTitle }),
-        }).catch(() => {});
+        // Register fallback preview only when workspace files weren't already materialized by /api/chat
+        if (!chatData?.files || chatData.files.length === 0) {
+          fetch("/api/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId, type: targetType, title: cleanProjectTitle, topic: cleanProjectTitle }),
+          }).catch(() => {});
+        }
 
         // Initialize plan in Task tab
         emit("agent.plan.created", {
@@ -1438,6 +1463,12 @@ test("Filters by status correctly", () => {
             step_index: 5,
           });
           const targetPreviewUrl = (chatData as any)?.previewUrl || `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+          emit("project.loaded", {
+            name: cleanProjectTitle || "Active Application",
+            path: `/workspaces/${sessionId}`,
+            files_count: filesToEmit?.length || 1,
+            summary: `${cleanProjectTitle || "Active Application"} (${filesToEmit?.length || 1} files)`,
+          });
           emit("preview.ready", { url: targetPreviewUrl });
           emit("agent.building.completed", {});
 

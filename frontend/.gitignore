@@ -1,0 +1,27 @@
+# Node & Next.js
+node_modules/
+.next/
+.next-dev/
+out/
+build/
+dist/
+
+# Environment & Secrets (Never commit secrets to Git/GitHub)
+.env
+.env.*
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+*.env
+!.env.example
+
+# IDE, OS & Runtime Data
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.data/
+*.log
+tsconfig.tsbuildinfo

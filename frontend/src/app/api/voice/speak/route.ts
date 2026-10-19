@@ -23,6 +23,10 @@ function setCachedAudio(key: string, buffer: Buffer, contentType: string = "audi
   }
   voiceAudioCache.set(key, { buffer, contentType, timestamp: Date.now() });
 }
+ 
+// Cooldown timestamp for ElevenLabs monthly quota or credit exhaustion (e.g. 3 minutes)
+// When active, the pipeline immediately switches to Google Gemini API TTS without delaying the response
+let elevenLabsQuotaExhaustedUntil = 0;
 
 function getWorkerScriptPath(): string {
   const p1 = path.join(process.cwd(), "frontend", "scripts", "synthesize.cjs");
@@ -67,14 +71,20 @@ function mapElevenLabsVoice(voiceId?: string): string {
   return "pNInz6obpgDQGcFmaJgB";
 }
 
-// Synthesizes speech using ElevenLabs API (highest tier emotional nuance & authentic human touch)
+interface ElevenLabsSynthResult {
+  buffer: Buffer | null;
+  quotaExceeded: boolean;
+  error?: string;
+}
+
+// Synthesizes speech using ElevenLabs API (Primary engine with emotional awareness & human touch)
 async function synthesizeWithElevenLabs(
   text: string,
   apiKey: string,
   modelId: string = "eleven_turbo_v2_5",
   voiceId?: string,
   emotion?: string
-): Promise<Buffer | null> {
+): Promise<ElevenLabsSynthResult> {
   const elevenVoiceId = mapElevenLabsVoice(voiceId);
 
   // Emotional tuning: lower stability + higher style gives deep empathy, natural vocal inflection, and genuine warmth
@@ -86,11 +96,11 @@ async function synthesizeWithElevenLabs(
     stability = 0.28; // Deep emotional nuance, gentle compassionate tone, patient warmth
     style = 0.65;
     similarityBoost = 0.88;
-  } else if (emotion === "upbeat") {
+  } else if (emotion === "upbeat" || emotion === "enthusiastic" || emotion === "celebratory") {
     stability = 0.38; // Dynamic, lively, smiling vocal energy
     style = 0.55;
     similarityBoost = 0.82;
-  } else if (emotion === "calm") {
+  } else if (emotion === "calm" || emotion === "thoughtful") {
     stability = 0.50; // Smooth, steady, focused cadence
     style = 0.25;
     similarityBoost = 0.86;
@@ -124,16 +134,36 @@ async function synthesizeWithElevenLabs(
     if (res.ok) {
       const arrayBuffer = await res.arrayBuffer();
       if (arrayBuffer.byteLength > 200) {
-        return Buffer.from(arrayBuffer);
+        // Reset any previous quota flag on verified success
+        elevenLabsQuotaExhaustedUntil = 0;
+        return { buffer: Buffer.from(arrayBuffer), quotaExceeded: false };
       }
     } else {
       const errJson = await res.json().catch(() => null);
+      const errDetail = JSON.stringify(errJson || "");
+      const isQuotaOrCredits =
+        res.status === 429 ||
+        res.status === 402 ||
+        res.status === 401 ||
+        res.status === 403 ||
+        /quota|credit|insufficient|exceeded|tier|limit/i.test(errDetail);
+
+      if (isQuotaOrCredits) {
+        // Mark quota cooldown for 3 minutes so pipeline immediately routes to Gemini TTS
+        elevenLabsQuotaExhaustedUntil = Date.now() + 180000;
+        console.warn(
+          `[TTS Pipeline] ElevenLabs monthly credits or quota exceeded (HTTP ${res.status}). Switching immediately to Google Gemini API TTS.`
+        );
+        return { buffer: null, quotaExceeded: true, error: errDetail };
+      }
       console.warn("[VoiceSpeak] ElevenLabs API error response:", res.status, errJson);
+      return { buffer: null, quotaExceeded: false, error: errDetail };
     }
   } catch (err: any) {
     console.warn("[VoiceSpeak] ElevenLabs request notice:", err?.message || err);
+    return { buffer: null, quotaExceeded: false, error: err?.message };
   }
-  return null;
+  return { buffer: null, quotaExceeded: false };
 }
 
 // Synthesizes speech using Microsoft Edge Neural TTS isolated child process (Always reliable, high-fidelity neural voices, zero-quota)
@@ -353,6 +383,93 @@ function injectHumanEmotionAndBreaths(text: string, emotion?: string): string {
   return humanized;
 }
 
+// Synthesizes speech using Google Gemini Neural TTS (Direct, seamless fallback when ElevenLabs credits exceeded)
+async function synthesizeWithGeminiTTS(
+  text: string,
+  voiceId?: string,
+  emotion?: string,
+  fallbackReason?: string
+): Promise<{ buffer: Buffer | null; modelUsed?: string }> {
+  const ai = getGeminiClient();
+  if (!ai) return { buffer: null };
+
+  const prebuiltVoice = mapVoiceName(voiceId);
+  const expressiveSpeechText = injectHumanEmotionAndBreaths(text, emotion);
+
+  // Fast model sequence for reliable, low-latency TTS fallback
+  const candidateModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+
+  for (const model of candidateModels) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: expressiveSpeechText,
+              },
+            ],
+          },
+        ] as any,
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: prebuiltVoice,
+              },
+            },
+          },
+        },
+      });
+
+      const candidate = response.candidates?.[0];
+      const parts = candidate?.content?.parts || [];
+      const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
+      if (found?.inlineData?.data) {
+        const base64Data = found.inlineData.data;
+        const rawBuffer = Buffer.from(base64Data, "base64");
+
+        const hasRiffHeader = rawBuffer.length >= 12 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
+        const finalWavBytes = hasRiffHeader
+          ? rawBuffer
+          : Buffer.from(pcm16ToWav(new Uint8Array(rawBuffer), 24000, 1));
+
+        return { buffer: finalWavBytes, modelUsed: model };
+      }
+    } catch (err: any) {
+      console.warn(`[VoiceSpeak] Gemini TTS attempt on ${model} notice:`, err?.message || err);
+      continue;
+    }
+  }
+  return { buffer: null };
+}
+
+export async function GET() {
+  const elevenConfig = getElevenLabsConfig();
+  const hasEleven = Boolean(
+    process.env.ELEVEN_LABS_API_KEY?.trim() ||
+    process.env.ELEVENLABS_API_KEY?.trim() ||
+    process.env.XI_API_KEY?.trim() ||
+    elevenConfig.elevenLabsApiKey
+  );
+  const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
+  const isCooldown = Date.now() < elevenLabsQuotaExhaustedUntil;
+
+  return NextResponse.json({
+    ok: true,
+    primaryProvider: "elevenlabs",
+    primaryStatus: hasEleven ? (isCooldown ? "monthly_credits_exhausted" : "active") : "unconfigured",
+    emotionalVoiceEngine: "attached",
+    fallbackProvider: "gemini",
+    fallbackStatus: hasGemini ? "ready" : "unconfigured",
+    cooldownActive: isCooldown,
+    cooldownRemainingSec: Math.max(0, Math.round((elevenLabsQuotaExhaustedUntil - Date.now()) / 1000)),
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -364,7 +481,6 @@ export async function POST(req: NextRequest) {
     if (!emotion || emotion === "auto") {
       emotion = detectEmotionFromContext(userPrompt || text, text);
     }
-    const explicitElevenKey = (body.elevenLabsApiKey as string) || req.headers.get("xi-api-key") || req.headers.get("x-elevenlabs-api-key") || "";
 
     if (!text.trim()) {
       return NextResponse.json({ ok: false, error: "Empty text" }, { status: 400 });
@@ -391,38 +507,70 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ── TIER 1: ElevenLabs TTS (Highest Emotional Nuance & Authentic Human Touch) ──
+    // ── TIER 1: ElevenLabs TTS (Primary, Server-Side Emotional Voice Engine) ──
     const elevenConfig = getElevenLabsConfig();
     const activeElevenKey =
       process.env.ELEVEN_LABS_API_KEY?.trim() ||
       process.env.ELEVENLABS_API_KEY?.trim() ||
       process.env.XI_API_KEY?.trim() ||
-      explicitElevenKey.trim() ||
       elevenConfig.elevenLabsApiKey;
 
+    let fallbackReason: string | undefined;
+
     if (activeElevenKey) {
-      const elevenAudio = await synthesizeWithElevenLabs(
-        cleanText,
-        activeElevenKey,
-        elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
-        voiceId,
-        emotion
-      );
-      if (elevenAudio && elevenAudio.byteLength > 200) {
-        setCachedAudio(cacheKey, elevenAudio, "audio/mpeg");
-        return new Response(elevenAudio as unknown as BodyInit, {
-          status: 200,
-          headers: {
-            "Content-Type": "audio/mpeg",
-            "Content-Length": elevenAudio.byteLength.toString(),
-            "X-TTS-Provider": "elevenlabs",
-            "Cache-Control": "no-cache",
-          },
-        });
+      if (Date.now() < elevenLabsQuotaExhaustedUntil) {
+        // Cooldown active: ElevenLabs monthly quota or credits are known to be exhausted
+        fallbackReason = "elevenlabs_monthly_quota_exceeded";
+      } else {
+        const elevenResult = await synthesizeWithElevenLabs(
+          cleanText,
+          activeElevenKey,
+          elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
+          voiceId,
+          emotion
+        );
+
+        if (elevenResult.buffer && elevenResult.buffer.byteLength > 200) {
+          setCachedAudio(cacheKey, elevenResult.buffer, "audio/mpeg");
+          return new Response(elevenResult.buffer as unknown as BodyInit, {
+            status: 200,
+            headers: {
+              "Content-Type": "audio/mpeg",
+              "Content-Length": elevenResult.buffer.byteLength.toString(),
+              "X-TTS-Provider": "elevenlabs",
+              "Cache-Control": "no-cache",
+            },
+          });
+        }
+
+        if (elevenResult.quotaExceeded) {
+          fallbackReason = "elevenlabs_monthly_quota_exceeded";
+        } else {
+          fallbackReason = "elevenlabs_error";
+        }
       }
+    } else {
+      fallbackReason = "elevenlabs_key_unattached";
     }
 
-    // ── TIER 2: Edge Neural TTS (Always reliable, high-fidelity neural voice, emotion/speed tuned) ──
+    // ── TIER 2: Google Gemini API TTS (Immediate Seamless Fallback when Credits Exceeded) ──
+    const geminiResult = await synthesizeWithGeminiTTS(cleanText, voiceId, emotion, fallbackReason);
+    if (geminiResult.buffer && geminiResult.buffer.byteLength > 200) {
+      setCachedAudio(cacheKey, geminiResult.buffer, "audio/wav");
+      return new Response(geminiResult.buffer as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/wav",
+          "Content-Length": geminiResult.buffer.byteLength.toString(),
+          "X-TTS-Provider": "gemini",
+          "X-TTS-Fallback-Reason": fallbackReason || "elevenlabs_quota_exceeded",
+          "X-TTS-Gemini-Model": geminiResult.modelUsed || "gemini-3.8-flash-lite-tts",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+
+    // ── TIER 3: Edge Neural TTS (Safety Net) ──
     const edgeAudio = await synthesizeWithEdgeTTS(cleanText, voiceId, emotion, speed);
     if (edgeAudio && edgeAudio.byteLength > 200) {
       setCachedAudio(cacheKey, edgeAudio, "audio/mpeg");
@@ -432,79 +580,13 @@ export async function POST(req: NextRequest) {
           "Content-Type": "audio/mpeg",
           "Content-Length": edgeAudio.byteLength.toString(),
           "X-TTS-Provider": "edge-neural",
+          "X-TTS-Fallback-Reason": fallbackReason || "elevenlabs_and_gemini_unavailable",
           "Cache-Control": "no-cache",
         },
       });
     }
 
-    // ── TIER 3: Google Gemini Neural TTS (Expressive Studio Neural Voice) ──
-    const ai = getGeminiClient();
-    if (ai) {
-      const prebuiltVoice = mapVoiceName(voiceId);
-      const expressiveSpeechText = injectHumanEmotionAndBreaths(cleanText, emotion);
-
-      // Fast model sequence: flash-lite-tts is responsive and avoids 429 quota traps
-      const candidateModels = ["gemini-3.8-flash-lite-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-tts"];
-
-      for (const model of candidateModels) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    text: expressiveSpeechText,
-                  },
-                ],
-              },
-            ] as any,
-            config: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: prebuiltVoice,
-                  },
-                },
-              },
-            },
-          });
-
-          const candidate = response.candidates?.[0];
-          const parts = candidate?.content?.parts || [];
-          const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
-          if (found?.inlineData?.data) {
-            const base64Data = found.inlineData.data;
-            const rawBuffer = Buffer.from(base64Data, "base64");
-
-            const hasRiffHeader = rawBuffer.length >= 12 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
-            const finalWavBytes = hasRiffHeader
-              ? rawBuffer
-              : Buffer.from(pcm16ToWav(new Uint8Array(rawBuffer), 24000, 1));
-
-            // Store in memory cache for instant future replay
-            setCachedAudio(cacheKey, finalWavBytes, "audio/wav");
-
-            return new Response(finalWavBytes as unknown as BodyInit, {
-              status: 200,
-              headers: {
-                "Content-Type": "audio/wav",
-                "Content-Length": finalWavBytes.byteLength.toString(),
-                "X-TTS-Provider": "gemini",
-                "Cache-Control": "no-cache",
-              },
-            });
-          }
-        } catch {
-          // If 429 quota or unsupported, try next model in candidate list
-          continue;
-        }
-      }
-    }
-
-    return NextResponse.json({ ok: false, fallback: "browser", reason: "tts_unavailable" });
+    return NextResponse.json({ ok: false, fallback: "browser", reason: fallbackReason || "tts_unavailable" });
   } catch (err: any) {
     return NextResponse.json(
       {
