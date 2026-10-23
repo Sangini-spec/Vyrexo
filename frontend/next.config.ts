@@ -1,16 +1,12 @@
-import path from "path";
 import type { NextConfig } from "next";
 import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 
 export default function nextConfig(phase: string): NextConfig {
   const isDev = phase === PHASE_DEVELOPMENT_SERVER;
-  const workspaceRoot = process.cwd().endsWith("/frontend")
-    ? path.resolve(process.cwd(), "..")
-    : process.cwd();
   return {
     reactStrictMode: false,
-    output: isDev ? undefined : "standalone",
-    outputFileTracingRoot: isDev ? undefined : workspaceRoot,
+    // Use Next.js's standard production output and "next start" server.
+    // This avoids relying on custom standalone packaging for the monorepo.
     distDir: isDev ? ".next-dev" : ".next",
     onDemandEntries: {
       // Keep compiled pages in memory for a long time in dev so chunks never vanish mid-session
