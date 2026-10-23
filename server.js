@@ -1,23 +1,28 @@
-const fs = require("fs");
-const path = require("path");
+const { spawn } = require("child_process");
 
-const standaloneServer = path.join(__dirname, ".next", "standalone", "server.js");
-const frontendStandaloneServer = path.join(
-  __dirname,
-  "frontend",
-  ".next",
-  "standalone",
-  "frontend",
-  "server.js"
-);
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const server = spawn(npm, ["run", "start", "--workspace=frontend"], {
+  cwd: __dirname,
+  env: process.env,
+  stdio: "inherit",
+  shell: process.platform === "win32",
+});
 
-if (fs.existsSync(standaloneServer)) {
-  require(standaloneServer);
-} else if (fs.existsSync(frontendStandaloneServer)) {
-  require(frontendStandaloneServer);
-} else {
-  console.error(
-    "Production standalone server not found. Run `npm run build` before `npm start`."
-  );
-  process.exit(1);
+server.on("error", (error) => {
+  console.error("Failed to start the Vyrexo Next.js server:", error);
+  process.exitCode = 1;
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    if (!server.killed) server.kill(signal);
+  });
 }
+
+server.on("exit", (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+  } else {
+    process.exitCode = code ?? 1;
+  }
+});
