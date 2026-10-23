@@ -310,15 +310,31 @@ export function extractProjectName(
     return "AuraBeauty";
   }
 
+  if (/\b(jewel|jewellery|jewelry|diamond|ring|necklace|bracelet|earring|gemstone|gold|silver|luxury\s*atelier)\b/i.test(combined)) {
+    return "AuraMart — Fine Jewellery Atelier";
+  }
+
   if (lower.includes("ecommerce") || lower.includes("e-commerce") || lower.includes("store") || lower.includes("shop") || lower.includes("merchandise")) {
     return "AuraMart";
+  }
+
+  if (
+    combined.includes("todo") ||
+    combined.includes("to-do") ||
+    /\bto\s+do(\s+list)?\b/i.test(combined) ||
+    combined.includes("checklist") ||
+    combined.includes("task list") ||
+    combined.includes("task manager") ||
+    combined.includes("taskflow")
+  ) {
+    return "TaskFlow";
   }
 
   if (lower.includes("productivity") || lower.includes("task") || lower.includes("project management") || lower.includes("employee") || lower.includes("kanban")) {
     return "PulseTrack";
   }
 
-  if (lower.includes("finance") || lower.includes("investment") || lower.includes("crypto") || lower.includes("portfolio") || lower.includes("stock") || lower.includes("wealth")) {
+  if (combined.includes("finance") || combined.includes("investment") || combined.includes("crypto") || combined.includes("portfolio") || combined.includes("stock") || combined.includes("wealth")) {
     return "ApexWealth";
   }
 
@@ -326,15 +342,15 @@ export function extractProjectName(
     return "DevMatrix";
   }
 
-  if (lower.includes("calculator") || lower.includes("math")) {
+  if (combined.includes("calculator") || combined.includes("math")) {
     return "OmniCalc";
   }
 
-  if (lower.includes("hospital") || lower.includes("clinic") || lower.includes("doctor") || lower.includes("patient") || lower.includes("medical") || lower.includes("health")) {
+  if (combined.includes("hospital") || combined.includes("clinic") || combined.includes("doctor") || combined.includes("patient") || combined.includes("medical") || combined.includes("health")) {
     return "MediPulse";
   }
 
-  if (lower.includes("course") || lower.includes("learning") || lower.includes("student") || lower.includes("education") || lower.includes("quiz")) {
+  if (combined.includes("course") || combined.includes("learning") || combined.includes("student") || combined.includes("education") || combined.includes("quiz")) {
     return "EduPulse";
   }
 
@@ -346,14 +362,14 @@ export function extractProjectName(
     return "NexusDash";
   }
 
-  // Fallback: extract 1-2 prominent domain nouns (excluding generic UI/meta words like frontend, component, don, correctly, good, job)
+  // Fallback: extract 1-2 prominent domain nouns (excluding generic UI/meta/change words)
   const words = clean
     .replace(/[^\w\s]/g, "")
     .split(/\s+/)
     .filter(
       (w) =>
         w.length > 2 &&
-        !/^(build|make|create|develop|code|generate|implement|want|need|please|like|the|for|with|and|app|application|website|platform|software|system|tool|frontend|backend|component|components|good|great|job|don|done|correctly|nice|work|hey|rex|can|you|could|would|should|this|that|into|from)$/i.test(
+        !/^(just|now|start|working|work|build|built|make|create|develop|code|generate|implement|want|need|please|like|dont|don|not|some|other|another|different|theme|themes|element|elements|change|changes|update|updates|modify|redesign|improve|enhance|better|color|colors|style|layout|design|the|for|with|and|app|application|website|platform|software|system|tool|project|frontend|backend|component|components|good|great|job|done|correctly|nice|hey|rex|can|you|could|would|should|this|that|into|from|use|using)$/i.test(
           w
         )
     );
@@ -365,6 +381,132 @@ export function extractProjectName(
   }
 
   return "NexusApp";
+}
+
+/**
+ * Unified Build & Implementation Intent Detector:
+ * Shared between the client WebSocket orchestrator (`useWebSocket.ts`) and `/api/chat`
+ * so both layers agree 100% on when to deploy the 6 AI agents and route to Claude Sonnet 5.5.
+ */
+export function isBuildOrImplementationIntent(
+  rawText: string,
+  history: Array<{ role: string; content: string }> = [],
+  hasExistingProject = false
+): boolean {
+  if (!rawText || typeof rawText !== "string") return false;
+
+  const cleaned = rawText
+    .trim()
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
+    .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|this|that|it|me|my|our|new)\b/gi, "build $2")
+    .replace(/\bto\s+do\s+list\b/gi, "todo list")
+    .replace(/\bto-do\s+list\b/gi, "todo list")
+    .replace(/\bto\s+do\s+app/gi, "todo app");
+
+  const trimmed = cleaned.trim().toLowerCase();
+  if (!trimmed) return false;
+
+  // 1. Exclude explicit non-build commands: IDE launch, browser search, terminal unit tests, or pure preview switch
+  if (
+    /\b(open\s+(this\s+|the\s+)?(project|workspace|folder|files)?\s*in\s+(vs\s*code|vscode|cursor|windsurf))\b/i.test(trimmed) ||
+    /\b(open\s+(my\s+|the\s+)?browser\s+(and\s+|to\s+)?(search|look|inspect|browse|find)|browse\s+the\s+web|search\s+the\s+web)\b/i.test(trimmed) ||
+    /\b(bun\s+test|run\s+(the\s+)?(unit|playwright|e2e|end\s*to\s*end|acceptance)\s+tests?|test\s+the\s+(entire\s+)?(app|application|project)\s*(end\s*to\s*end|e2e)?)\b/i.test(trimmed) ||
+    (/^(show|open|view|switch\s+to|launch|resume)\s+(that\s+|this\s+|it\s+|the\s+)?(in\s+)?(the\s+)?preview(\s+tab)?$/i.test(trimmed))
+  ) {
+    return false;
+  }
+
+  // 2. Exclude pure meta/explanation questions that do NOT contain an imperative request to build/create/start working/make changes
+  const hasBuildDirective =
+    /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|start\s+working|work\s+on|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me|my|our|new|basic|simple)|make\s+(a|an|the|this|that|it|me|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo)|develop\s+(a|an|the|this|that|it|me|my|our|new)|scaffold\s+(a|an|the|this|that|it|me|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
+      trimmed
+    );
+
+  const isPureQuestion =
+    !hasBuildDirective &&
+    (/^(check if|why\s+|how\s+(does|do|is|are|did|was)|what\s+(is|are|does|did|was|were)|can\s+you\s+explain|could\s+you\s+explain|explain\s+|clarify\s+|tell\s+me\s+about|who\s+are\s+you|what's\s+your\s+name|what\s+can\s+you\s+do)/i.test(
+      trimmed
+    ) ||
+      /\b(why\s+is\s+it\s+not\s+building|why\s+are\s+you|what\s+do\s+you\s+think|what\s+is\s+your\s+take|what's\s+your\s+opinion|are\s+you\s+stuck|did\s+you\s+freeze|look\s+at\s+the\s+screenshot)\b/i.test(
+        trimmed
+      ));
+
+  if (isPureQuestion) {
+    return false;
+  }
+
+  // 3. Direct Build, Create, Scaffold, "Start Working On", UI/Theme Redesign, or Agent Deployment commands
+  const explicitBuildPatterns = [
+    // "start working on a project", "start working on the application", "work on a project", "let's work on this project"
+    /\b(start\s+working(\s+on)?|begin\s+working(\s+on)?|get\s+to\s+work(\s+on)?|keep\s+working\s+on|continue\s+working\s+on|continue\s+building)\b/i,
+    /\b(let('s|s)?|can\s+you|could\s+you|please|i\s+want\s+(you\s+)?to|we\s+should|you\s+should|time\s+to|ready\s+to|just|now)?\s*(work\s+on)\s+(a|an|the|this|that|my|our|it|new|some|another)?\s*([a-z0-9_-]+\s+)*(project|app|application|website|platform|system|tool|store|dashboard|todo|list|calculator|game|portal|service|idea)\b/i,
+    // "start building", "start coding", "start developing", "deploy the AI agents"
+    /\b(start\s+(building|coding|developing|creating|making|implementing|scaffolding|execution|the\s+build|the\s+project|the\s+app|the\s+application|actual\s+building|the\s+actual\s+building))\b/i,
+    /\b(deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|launch\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|get\s+the\s+(app|application|project)\s+ready)\b/i,
+    /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building|we\s+should\s+start\s+building)\b/i,
+    /\b(let('s|s)\s+build|start\s+to\s+build|now\s+build|just\s+build|please\s+build|go\s+ahead\s+and\s+(build|create|make|code|start|implement|work))\b/i,
+    // "build that to do list application", "build a todo list", "create my app", "make that project", "build it"
+    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect)\s+(it|this|that|the|a|an|me|my|our|your|another|some|new|full|complete|working|modern|simple|basic|real|custom|interactive)\b/i,
+    // Verb followed within a few words by any app/software/domain noun (e.g. "just build that to do list application", "build todo list")
+    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect|work\s+on)\s+([a-z0-9_-]+\s+){0,6}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|store|shop|ecommerce|e-commerce|calculator|tracker|todo|to-do|list|checklist|board|kanban|task|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|page|landing|clone|bot|calendar|scheduler|chat|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|wallet|portfolio|blog|cms|marketplace|booking|form|quiz)\b/i,
+    // Imperative verb at start of utterance (optionally after hey rex / please / just / ok / now / can you)
+    /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|i\s+want\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|generate|construct|make|start\s+working|work\s+on)\b/i,
+    /^\s*(build|create|develop|code|scaffold|implement|generate|construct)\s+/i,
+    // Direct UI/theme/code modification & redesign commands (e.g. "I don't like the UI... can you use some other theme and elements and make the changes?")
+    /\b(make\s+(the\s+|some\s+|these\s+|those\s+)?(changes|updates|edits|improvements|modifications)|apply\s+(the\s+|these\s+|those\s+)?(changes|updates)|implement\s+(the\s+|these\s+)?(changes|updates|features))\b/i,
+    /\b(use\s+(some\s+|an?\s+)?(other|different|new|better|another|modern|light|dark|vibrant|colorful)\s+(theme|themes|color|colors|style|styles|layout|design|ui|elements?|components?))\b/i,
+    /\b(don'?t\s+like\s+the\s+(ui|design|theme|color|colors|layout|look|style|buttons|components))\b/i,
+    /\b(change|update|modify|fix|tweak|set|make|improve|enhance|upgrade|redesign|restyle|overhaul|replace)\s+(the\s+|this\s+|my\s+|our\s+|its\s+)?(color|colors|font|padding|background|bg|text|size|style|styling|layout|title|button|buttons|nav|navbar|header|footer|margin|border|theme|ui|interface|design|elements|components|cards|look|appearance|app|application|project|todo|page|dashboard|store|code)\b/i,
+    /^\s*(add|modify|update|refactor|edit|improve|expand|upgrade|redesign)\s+(a\s+|an\s+|the\s+|some\s+|more\s+)?([a-z0-9\s_-]{2,40})\s+(to|in|into|on|for)\s+(the\s+|this\s+|my\s+)?(app|application|project|code|component|page|dashboard|store|tracker|calculator|todo|list|ui|src\/)/i,
+    /\b(modify|update|edit|refactor|improve|expand|upgrade|redesign)\s+(src\/components\/App\.tsx|App\.tsx|the\s+code|the\s+application|the\s+project|the\s+component|this\s+project|this\s+app|the\s+ui)\b/i,
+    /\b(take\s+(it|this|the\s+project|the\s+app)\s+to\s+(an?\s+)?(entire\s+|full\s+)?product\s+level)\b/i,
+  ];
+
+  if (explicitBuildPatterns.some((p) => p.test(trimmed))) {
+    return true;
+  }
+
+  // 4. Incremental edits when an active project exists in the session
+  if (
+    hasExistingProject &&
+    (/^\s*(?:(?:hey\s+rex|rex|please|just|now|can\s+you|could\s+you|i\s+want\s+you\s+to|let('s|s))\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|restyle|polish|integrate|support|iterate)\b/i.test(
+      trimmed
+    ) ||
+      /\b(make\s+(the\s+|some\s+)?changes|add\s+(a\s+|some\s+|more\s+)?features?|improve\s+(the|this)\s+(project|app|application|ui|code|design)|enhance\s+(the|this)\s+(project|app|application|ui|design|quality)|other\s+theme|different\s+theme|new\s+theme)\b/i.test(
+        trimmed
+      ))
+  ) {
+    return true;
+  }
+
+  // 5. Continuation / Agreement phrases ("yes build it", "let's build that", "go ahead", "start now", "do it")
+  const isDirectBuildAgreement =
+    /\b(let('s|s)\s+build\s+(it|that|this)|build\s+(it|that|this)\s+now|just\s+build\s+(it|that|this)|build\s+that\s+idea|start\s+building\s+now|go\s+ahead\s+and\s+build|yes\s+(please\s+)?(build|start|create|make|code|do\s+it))\b/i.test(
+      trimmed
+    );
+  if (isDirectBuildAgreement) {
+    return true;
+  }
+
+  const isShortAgreement =
+    /^(yes|yeah|yep|sure|okay|ok|alright|go\s+ahead|let('s|s)\s+do\s+it|let('s|s)\s+go|do\s+it|proceed|start|start\s+now|make\s+it\s+happen|sounds\s+good|sounds\s+like\s+a\s+plan|yes\s+please|please\s+do)[\s.!]*$/i.test(
+      trimmed
+    );
+  if (isShortAgreement && history.length > 0) {
+    const recentHistory = history
+      .slice(-4)
+      .map((h) => h.content || "")
+      .join(" ");
+    if (
+      /\b(start\s+building|start\s+scaffolding|start\s+coding|should\s+we\s+start|would\s+you\s+like\s+me\s+to\s+(start|build|scaffold)|ready\s+to\s+scaffold|build\s+this\s+now|app|application|project|platform|todo|store|dashboard|calculator)\b/i.test(
+        recentHistory
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 const TITLE_STOP_WORDS = new Set([
@@ -399,6 +541,7 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
     if (/flowstate/i.test(cleanProj)) return "Flowstate Focus OS";
     if (/amity/i.test(cleanProj)) return "Amity Social App";
     if (/apexwealth/i.test(cleanProj)) return "ApexWealth Advisor";
+    if (/taskflow/i.test(cleanProj)) return "TaskFlow Todo App";
     if (cleanProj.length >= 3 && cleanProj.length <= 26) {
       return cleanProj;
     }
@@ -428,7 +571,8 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
   if (lower.includes("landing page") || lower.includes("startup landing")) return "Startup Landing Page";
   if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum") || lower.includes("arbitrage")) return "Crypto Analytics";
   if (lower.includes("invest") || lower.includes("stock") || lower.includes("portfolio") || lower.includes("finance") || lower.includes("wealth")) return "ApexWealth Finance";
-  if (lower.includes("todo") || lower.includes("task") || lower.includes("kanban") || lower.includes("sprint")) return "Sprint Task Board";
+  if (lower.includes("todo") || lower.includes("to-do") || /\bto\s+do\b/i.test(lower) || lower.includes("checklist")) return "TaskFlow Todo App";
+  if (lower.includes("task") || lower.includes("kanban") || lower.includes("sprint")) return "Sprint Task Board";
   if (lower.includes("weather") || lower.includes("forecast")) return "Weather Forecast App";
   if (lower.includes("music") || lower.includes("audio") || lower.includes("podcast") || lower.includes("synthesizer")) return "Audio Studio App";
   if (lower.includes("note") || lower.includes("journal") || lower.includes("markdown") || lower.includes("inkwell") || lower.includes("publication")) return "Inkwell Publishing";

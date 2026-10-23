@@ -377,7 +377,7 @@ export async function collectProjectExportData(
   let summary = "";
 
   const effectiveSessionId =
-    !sessionId || sessionId === "default" ? "session-1790005321834" : sessionId;
+    !sessionId || sessionId === "default" ? "" : sessionId;
 
   // 1. If explicit files provided from client
   if (providedFiles && providedFiles.length > 0) {
@@ -461,20 +461,6 @@ export async function collectProjectExportData(
     }
   }
 
-  // 5. Fallback defaults ONLY for the seed session if still no application files found
-  if (fileMap.size === 0 && effectiveSessionId === "session-1790005321834") {
-    if (!title) title = "RailGo Train Booking";
-    const { generateRichDomainFallback } = require("./domain-templates");
-    const fallbackFiles = generateRichDomainFallback(
-      `train booking application ${title}`,
-      title,
-      "railgo-train-booking"
-    );
-    for (const f of fallbackFiles) {
-      fileMap.set(f.path.replace(/^\/+/, ""), f.content);
-    }
-  }
-
   if (fileMap.size === 0) {
     return {
       title: title || "New Session",
@@ -484,7 +470,7 @@ export async function collectProjectExportData(
     };
   }
 
-  if (!title) title = "RailGo Train Booking";
+  if (!title) title = "Vyrexo Project";
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
 
   // 6. Ensure package.json exists with real scripts
@@ -569,6 +555,250 @@ test("project metadata validation", () => {
   };
 }
 
+export interface MaterializedProject {
+  projectTitle: string;
+  projectSlug: string;
+  localFolderName?: string;
+  localTargetPath: string;
+  workspaceDir: string;
+  workspaceFilePath: string;
+  files: ProjectExportFile[];
+}
+
+/**
+ * Synchronously materializes a session's project files onto disk in workspaces/<sessionId>
+ * and returns workspace paths and files for IDE launch or export.
+ */
+export function materializeProjectOnDisk(
+  sessionId: string,
+  providedFiles?: ProjectExportFile[],
+  explicitTitle?: string
+): MaterializedProject {
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+
+  const cleanSessionId = (sessionId || "workspace").replace(/[^a-zA-Z0-9_-]/g, "_");
+  const candidateRoot = process.cwd().endsWith("frontend")
+    ? path.resolve(process.cwd(), "..", "workspaces")
+    : path.resolve(process.cwd(), "workspaces");
+
+  let workspacesRoot = candidateRoot;
+  try {
+    if (!fs.existsSync(workspacesRoot)) {
+      fs.mkdirSync(workspacesRoot, { recursive: true });
+    }
+    fs.accessSync(workspacesRoot, fs.constants.W_OK);
+  } catch {
+    workspacesRoot = path.join(os.tmpdir(), "vyrexo-workspaces");
+    try {
+      fs.mkdirSync(workspacesRoot, { recursive: true });
+    } catch {}
+  }
+
+  const workspaceDir = path.join(workspacesRoot, cleanSessionId);
+  try {
+    fs.mkdirSync(workspaceDir, { recursive: true });
+  } catch {}
+
+  const fileMap = new Map<string, string>();
+  const isRawSessionId = (s?: string) => !s || /^session-\d+$/i.test(s.trim()) || s.trim() === "New Session";
+  let title = !isRawSessionId(explicitTitle) ? explicitTitle!.trim() : "";
+  let localFolderName = "";
+  let customLocalPath = "";
+  let summary = "";
+  let techStack: string[] = ["React 19", "TypeScript", "Tailwind CSS", "Vite"];
+
+  if (providedFiles && providedFiles.length > 0) {
+    for (const f of providedFiles) {
+      if (f?.path && typeof f.content === "string") {
+        fileMap.set(f.path.replace(/^\/+/, ""), f.content);
+      }
+    }
+  }
+
+  if (sessionId && sessionId !== "default") {
+    ensureSessionWorkspaceMaterialized(sessionId, !isRawSessionId(explicitTitle) ? explicitTitle : undefined);
+
+    const connected = getSessionConnectedProject(sessionId);
+    if (connected) {
+      if (connected.localFolderName && !isRawSessionId(connected.localFolderName)) {
+        localFolderName = connected.localFolderName;
+      }
+      if (
+        connected.path &&
+        !connected.path.startsWith("/app/applet") &&
+        !connected.path.startsWith("/workspaces/") &&
+        !connected.path.startsWith("/local/")
+      ) {
+        if (connected.path.startsWith("~/") || connected.path.startsWith("~\\")) {
+          const tail = connected.path.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "");
+          customLocalPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail || localFolderName || "vyrexo-project"}`;
+        } else {
+          customLocalPath = connected.path;
+        }
+      }
+      if (!title && connected.name && !isRawSessionId(connected.name)) {
+        title = connected.name;
+      }
+      if (connected.summary) summary = connected.summary;
+      if (connected.techStack && connected.techStack.length > 0) {
+        techStack = connected.techStack;
+      }
+      if (connected.files && connected.files.length > 0) {
+        for (const f of connected.files) {
+          const clean = f.path.replace(/^\/+/, "");
+          if (!fileMap.has(clean)) {
+            fileMap.set(clean, f.content);
+          }
+        }
+      }
+    }
+
+    const wsFiles = getSessionWorkspaceFiles(sessionId);
+    if (wsFiles && wsFiles.length > 0) {
+      for (const f of wsFiles) {
+        const clean = f.path.replace(/^\/+/, "");
+        if (!fileMap.has(clean)) {
+          fileMap.set(clean, f.content);
+        }
+      }
+    }
+
+    const activeProj = getSessionProject(sessionId);
+    if (activeProj) {
+      if (!title && activeProj.title && !isRawSessionId(activeProj.title)) {
+        title = activeProj.title;
+      }
+      if (!summary) summary = activeProj.summary;
+      if (activeProj.techStack && activeProj.techStack.length > 0) {
+        techStack = activeProj.techStack;
+      }
+      if (Array.isArray(activeProj.files)) {
+        for (const f of activeProj.files) {
+          if (f?.path && typeof f.content === "string" && f.content.length > 0) {
+            const clean = f.path.replace(/^\/+/, "");
+            if (!fileMap.has(clean)) {
+              fileMap.set(clean, f.content);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const projectTitle = title || localFolderName || "Vyrexo Project";
+  const projectSlug =
+    (localFolderName || projectTitle)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 45) || "vyrexo-project";
+
+  const localTargetPath =
+    customLocalPath ||
+    `C:\\Users\\hp\\OneDrive\\Desktop\\${localFolderName || projectSlug}`;
+
+  if (fileMap.size > 0) {
+    if (!fileMap.has("tsconfig.json")) {
+      fileMap.set("tsconfig.json", generateTsConfig());
+    }
+    if (!fileMap.has("README.md")) {
+      fileMap.set("README.md", generateReadme(projectTitle, summary, techStack));
+    }
+  }
+
+  const workspaceFileName = `${projectSlug}.code-workspace`;
+  const workspaceFileContent = JSON.stringify(
+    {
+      folders: [{ path: ".", name: localFolderName ? `${localFolderName} — ${projectTitle}` : projectTitle }],
+      settings: {
+        "editor.formatOnSave": true,
+        "explorer.autoReveal": true,
+        "explorer.compactFolders": false,
+        "files.exclude": {
+          "**/node_modules": true,
+          "**/.git": true,
+          "**/.vyrexo-project.json": true,
+        },
+      },
+    },
+    null,
+    2
+  );
+  fileMap.set(workspaceFileName, workspaceFileContent);
+
+  // Clean up any stale session-*.code-workspace files on disk
+  try {
+    const existingEntries = fs.readdirSync(workspaceDir);
+    for (const entry of existingEntries) {
+      if (/^session-\d+\.code-workspace$/i.test(entry)) {
+        fs.unlinkSync(path.join(workspaceDir, entry));
+      }
+    }
+  } catch {}
+
+  const files: ProjectExportFile[] = [];
+  for (const [relPath, content] of Array.from(fileMap.entries())) {
+    if (/^session-\d+\.code-workspace$/i.test(relPath)) continue;
+    files.push({ path: relPath, content });
+    try {
+      const fullPath = path.join(workspaceDir, relPath);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, content, "utf-8");
+    } catch {}
+  }
+
+  return {
+    projectTitle,
+    projectSlug,
+    localFolderName: localFolderName || undefined,
+    localTargetPath,
+    workspaceDir,
+    workspaceFilePath: path.join(workspaceDir, workspaceFileName),
+    files,
+  };
+}
+
+/**
+ * Creates a .tar.gz archive Buffer from a materialized workspace directory on disk.
+ */
+export function createTarGzArchive(workspaceDir: string, projectSlug: string): Buffer {
+  const { execFileSync } = require("child_process");
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const zlib = require("zlib");
+
+  const tmpArchive = path.join(
+    os.tmpdir(),
+    `${projectSlug || "project"}-${Date.now()}.tar.gz`
+  );
+  try {
+    execFileSync("tar", ["-czf", tmpArchive, "-C", workspaceDir, "."], {
+      timeout: 10000,
+    });
+    const buf = fs.readFileSync(tmpArchive);
+    try {
+      fs.unlinkSync(tmpArchive);
+    } catch {}
+    return buf;
+  } catch {
+    // Pure Node fallback if system `tar` binary is unavailable
+    const bundle: Record<string, string> = {};
+    try {
+      const entries = fs.readdirSync(workspaceDir);
+      for (const e of entries) {
+        const full = path.join(workspaceDir, e);
+        if (fs.statSync(full).isFile()) {
+          bundle[e] = fs.readFileSync(full, "utf-8");
+        }
+      }
+    } catch {}
+    return zlib.gzipSync(Buffer.from(JSON.stringify(bundle, null, 2), "utf-8"));
+  }
+}
+
 /**
  * Generates a complete ZIP archive as a Node.js Buffer for downloading
  */
@@ -600,3 +830,4 @@ export async function generateProjectZipBuffer(
     fileCount: project.files.length,
   };
 }
+

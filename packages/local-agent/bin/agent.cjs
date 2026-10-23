@@ -54,7 +54,22 @@ async function launchIDE(targetDir, ide = "vscode", reuseWindow = true) {
     try { fs.mkdirSync(norm, { recursive: true }); } catch {}
   }
 
-  const reuseFlag = reuseWindow ? "-r" : "";
+  const entryCandidates = [
+    "src/components/App.tsx",
+    "src/App.tsx",
+    "README.md",
+    "package.json",
+  ];
+  let entryFileArg = "";
+  for (const rel of entryCandidates) {
+    const full = path.join(norm, rel);
+    if (fs.existsSync(full)) {
+      entryFileArg = ` "${full}"`;
+      break;
+    }
+  }
+
+  const reuseFlag = reuseWindow ? "-r" : "-n";
   let candidates = [];
   let ideDisplayName = "VS Code";
 
@@ -123,7 +138,7 @@ async function launchIDE(targetDir, ide = "vscode", reuseWindow = true) {
   for (const exe of candidates) {
     try {
       await new Promise((resolve, reject) => {
-        exec(`"${exe}" ${reuseFlag} "${norm}"`, { timeout: 4000 }, (err) => {
+        exec(`"${exe}" ${reuseFlag} "${norm}"${entryFileArg}`, { timeout: 4000 }, (err) => {
           if (err) reject(err);
           else resolve();
         });
@@ -179,6 +194,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Vyrexo-Token");
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -261,20 +277,66 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/vscode/open" && req.method === "POST") {
     const body = await parseBody();
-    const safeName = (body.projectSlug || body.projectName || body.sessionId || "vyrexo-project")
+    const safeName = (body.localFolderName || body.projectSlug || body.projectName || body.sessionId || "vyrexo-project")
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-|-$/g, "")
       .slice(0, 45) || "vyrexo-project";
-    const defaultLocalDir = path.join(os.homedir(), "vyrexo-projects", safeName);
+
+    const findExistingUserFolder = (folderName) => {
+      if (!folderName || typeof folderName !== "string") return null;
+      const clean = folderName.trim().replace(/^[/\\]+|[/\\]+$/g, "");
+      if (!clean || clean.includes("/") || clean.includes("\\")) return null;
+      const home = os.homedir();
+      const searchParents = [
+        path.join(home, "Desktop"),
+        path.join(home, "Documents"),
+        path.join(home, "Downloads"),
+        path.join(home, "Projects"),
+        path.join(home, "Developer"),
+        path.join(home, "OneDrive", "Desktop"),
+        path.join(home, "VyrexoWorkspaces"),
+        home,
+      ];
+      for (const parent of searchParents) {
+        try {
+          const candidate = path.join(parent, clean);
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+            return candidate;
+          }
+        } catch {}
+      }
+      return null;
+    };
+
+    const defaultLocalDir = path.join(os.homedir(), "VyrexoWorkspaces", safeName);
     let target = defaultLocalDir;
     const ide = body.ide || "vscode";
+    const shouldOpenIde = body.openIde !== false;
+
+    if (body.localFolderName && typeof body.localFolderName === "string") {
+      const discovered = findExistingUserFolder(body.localFolderName);
+      if (discovered) {
+        target = discovered;
+      } else {
+        target = path.join(os.homedir(), "Desktop", body.localFolderName.trim());
+      }
+    }
 
     if (body.path && typeof body.path === "string") {
       const rawPath = body.path.trim();
-      if (rawPath && rawPath !== "." && !rawPath.includes("/app/applet")) {
+      if (
+        rawPath &&
+        rawPath !== "." &&
+        !rawPath.includes("/app/applet") &&
+        !rawPath.startsWith("/workspaces/") &&
+        !rawPath.startsWith("/local/")
+      ) {
         if (rawPath.startsWith("~/") || rawPath.startsWith("~\\")) {
-          target = path.join(os.homedir(), rawPath.slice(2));
+          const relAfterHome = rawPath.slice(2);
+          const baseFolder = path.basename(relAfterHome);
+          const discovered = findExistingUserFolder(baseFolder);
+          target = discovered || path.join(os.homedir(), relAfterHome);
         } else {
           target = path.resolve(rawPath);
         }
@@ -282,6 +344,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Sync all session project files into target directory with complete directory hierarchy
+    let filesWritten = 0;
     if (Array.isArray(body.files) && body.files.length > 0) {
       try {
         fs.mkdirSync(target, { recursive: true });
@@ -292,6 +355,7 @@ const server = http.createServer(async (req, res) => {
           const filePath = path.join(target, cleanRel);
           fs.mkdirSync(path.dirname(filePath), { recursive: true });
           fs.writeFileSync(filePath, f.content, "utf-8");
+          filesWritten++;
         }
 
         // Generate .vscode settings and .code-workspace file
@@ -327,7 +391,9 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const result = await launchIDE(target, ide, body.reuseWindow ?? false);
+    const result = shouldOpenIde
+      ? await launchIDE(target, ide, body.reuseWindow ?? false)
+      : { ok: true, cliLaunched: false, message: `Synced ${filesWritten} files to ${target}`, targetPath: target };
     const forward = target.replace(/\\/g, "/").replace(/\/+$/, "");
     const uriPath = forward.startsWith("/") ? forward : `/${forward}`;
     const scheme =
@@ -343,6 +409,7 @@ const server = http.createServer(async (req, res) => {
     sendJson(200, {
       ...result,
       ok: true,
+      filesWritten,
       targetPath: target,
       path: target,
       vscodeUri,

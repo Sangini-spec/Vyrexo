@@ -106,6 +106,617 @@ export function generateRichDomainFallback(
     ];
   }
 
+  const isTodoListApp =
+    /\b(todo|to-do|to\s+do(\s+list)?|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+      combined
+    );
+
+  if (isTodoListApp) {
+    const todoAppTsx = `"use client";
+
+import React, { useState, useEffect, useMemo } from "react";
+
+export interface Subtask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
+export interface TodoTask {
+  id: string;
+  title: string;
+  notes: string;
+  category: "Work" | "Personal" | "Engineering" | "Health";
+  priority: "High" | "Medium" | "Low";
+  dueDate: string;
+  completed: boolean;
+  createdAt: string;
+  subtasks: Subtask[];
+}
+
+const INITIAL_TODOS: TodoTask[] = [
+  {
+    id: "TASK-101",
+    title: "Finalize system architecture & API contracts",
+    notes: "Review REST endpoints, state persistence, and responsive component hierarchy.",
+    category: "Engineering",
+    priority: "High",
+    dueDate: "Today",
+    completed: false,
+    createdAt: "09:00 AM",
+    subtasks: [
+      { id: "s1", title: "Define TypeScript interfaces", done: true },
+      { id: "s2", title: "Wire up LocalStorage sync hook", done: true },
+      { id: "s3", title: "Verify keyboard accessibility", done: false },
+    ],
+  },
+  {
+    id: "TASK-102",
+    title: "Design dark-mode task cards and priority badges",
+    notes: "Ensure crisp contrast ratios and smooth completion transitions.",
+    category: "Work",
+    priority: "Medium",
+    dueDate: "Today",
+    completed: true,
+    createdAt: "10:15 AM",
+    subtasks: [
+      { id: "s4", title: "Create priority color tokens", done: true },
+      { id: "s5", title: "Add interactive filter pills", done: true },
+    ],
+  },
+  {
+    id: "TASK-103",
+    title: "Evening 5K run & hydration tracking",
+    notes: "Maintain daily wellness streak and log recovery metrics.",
+    category: "Health",
+    priority: "Low",
+    dueDate: "Tomorrow",
+    completed: false,
+    createdAt: "11:30 AM",
+    subtasks: [],
+  },
+  {
+    id: "TASK-104",
+    title: "Prepare sprint demo & release notes",
+    notes: "Walk through interactive task creation, filtering, and analytics.",
+    category: "Personal",
+    priority: "High",
+    dueDate: "Friday",
+    completed: false,
+    createdAt: "01:00 PM",
+    subtasks: [
+      { id: "s6", title: "Record live preview walkthrough", done: false },
+    ],
+  },
+];
+
+export default function App() {
+  const [tasks, setTasks] = useState<TodoTask[]>(INITIAL_TODOS);
+  const [newTitle, setNewTitle] = useState("");
+  const [newNotes, setNewNotes] = useState("");
+  const [newCategory, setNewCategory] = useState<TodoTask["category"]>("Engineering");
+  const [newPriority, setNewPriority] = useState<TodoTask["priority"]>("High");
+  const [newDueDate, setNewDueDate] = useState("Today");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "completed">("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("All");
+  const [priorityFilter, setPriorityFilter] = useState<string>("All");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>("TASK-101");
+  const [newSubtaskText, setNewSubtaskText] = useState("");
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("taskflow_todos_v1");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setTasks(parsed);
+        }
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("taskflow_todos_v1", JSON.stringify(tasks));
+    } catch {}
+  }, [tasks]);
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      if (statusFilter === "active" && task.completed) return false;
+      if (statusFilter === "completed" && !task.completed) return false;
+      if (categoryFilter !== "All" && task.category !== categoryFilter) return false;
+      if (priorityFilter !== "All" && task.priority !== priorityFilter) return false;
+      if (
+        searchQuery.trim() &&
+        !task.title.toLowerCase().includes(searchQuery.toLowerCase()) &&
+        !task.notes.toLowerCase().includes(searchQuery.toLowerCase())
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [tasks, statusFilter, categoryFilter, priorityFilter, searchQuery]);
+
+  const stats = useMemo(() => {
+    const total = tasks.length;
+    const completed = tasks.filter((t) => t.completed).length;
+    const active = total - completed;
+    const highPriorityPending = tasks.filter((t) => !t.completed && t.priority === "High").length;
+    const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+    return { total, completed, active, highPriorityPending, completionRate };
+  }, [tasks]);
+
+  const handleAddTask = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+    const created: TodoTask = {
+      id: \`TASK-\${Math.floor(100 + Math.random() * 900)}\`,
+      title: newTitle.trim(),
+      notes: newNotes.trim() || "Added via TaskFlow quick capture.",
+      category: newCategory,
+      priority: newPriority,
+      dueDate: newDueDate || "Today",
+      completed: false,
+      createdAt: "Just now",
+      subtasks: [],
+    };
+    setTasks((prev) => [created, ...prev]);
+    setNewTitle("");
+    setNewNotes("");
+  };
+
+  const handleToggleTask = (id: string) => {
+    setTasks((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t))
+    );
+  };
+
+  const handleDeleteTask = (id: string) => {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const handleClearCompleted = () => {
+    setTasks((prev) => prev.filter((t) => !t.completed));
+  };
+
+  const handleToggleSubtask = (taskId: string, subtaskId: string) => {
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id !== taskId) return t;
+        return {
+          ...t,
+          subtasks: t.subtasks.map((s) => (s.id === subtaskId ? { ...s, done: !s.done } : s)),
+        };
+      })
+    );
+  };
+
+  const handleAddSubtask = (taskId: string) => {
+    if (!newSubtaskText.trim()) return;
+    setTasks((prev) =>
+      prev.map((t) => {
+        if (t.id !== taskId) return t;
+        return {
+          ...t,
+          subtasks: [
+            ...t.subtasks,
+            { id: \`sub-\${Date.now()}\`, title: newSubtaskText.trim(), done: false },
+          ],
+        };
+      })
+    );
+    setNewSubtaskText("");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased">
+      <header className="sticky top-0 z-30 bg-slate-900/90 backdrop-blur border-b border-slate-800 px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center text-white font-black shadow-lg shadow-indigo-500/20">
+            ✓
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-bold text-white tracking-tight">
+                TaskFlow — Smart To-Do & Productivity Suite
+              </h1>
+              <span className="px-2 py-0.5 text-[10px] font-mono font-semibold uppercase rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                Synced
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">
+              Priority task management, subtask checklists & persistent local state
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {(["all", "active", "completed"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setStatusFilter(tab)}
+              className={\`px-3.5 py-1.5 rounded-xl text-xs font-semibold capitalize transition-all \${
+                statusFilter === tab
+                  ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/25"
+                  : "bg-slate-900 text-slate-400 hover:text-white border border-slate-800"
+              }\`}
+            >
+              {tab} ({tab === "all" ? stats.total : tab === "active" ? stats.active : stats.completed})
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-6xl w-full mx-auto p-6 space-y-6">
+        <section className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4">
+            <div className="text-xs text-slate-400 font-medium">Completion Rate</div>
+            <div className="text-2xl font-black text-white mt-1">{stats.completionRate}%</div>
+            <div className="w-full h-1.5 bg-slate-800 rounded-full mt-2 overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-300"
+                style={{ width: \`\${stats.completionRate}%\` }}
+              />
+            </div>
+          </div>
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4">
+            <div className="text-xs text-slate-400 font-medium">Active Tasks</div>
+            <div className="text-2xl font-black text-cyan-400 mt-1">{stats.active}</div>
+            <div className="text-[11px] text-slate-400 mt-1">In current queue</div>
+          </div>
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4">
+            <div className="text-xs text-slate-400 font-medium">High Priority Open</div>
+            <div className="text-2xl font-black text-rose-400 mt-1">{stats.highPriorityPending}</div>
+            <div className="text-[11px] text-slate-400 mt-1">Requires focus</div>
+          </div>
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4">
+            <div className="text-xs text-slate-400 font-medium">Completed</div>
+            <div className="text-2xl font-black text-emerald-400 mt-1">{stats.completed}</div>
+            <div className="text-[11px] text-slate-400 mt-1">Finished items</div>
+          </div>
+        </section>
+
+        <section className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+          <form onSubmit={handleAddTask} className="space-y-3">
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                placeholder="What needs to get done? (e.g., Ship authentication flow)..."
+                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+              />
+              <button
+                type="submit"
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-5 py-2.5 rounded-xl text-xs transition-all shadow-lg shadow-indigo-600/20 shrink-0"
+              >
+                + Add Task
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <input
+                type="text"
+                value={newNotes}
+                onChange={(e) => setNewNotes(e.target.value)}
+                placeholder="Optional notes or acceptance criteria..."
+                className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+              />
+              <select
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value as TodoTask["category"])}
+                className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+              >
+                <option value="Engineering">Category: Engineering</option>
+                <option value="Work">Category: Work</option>
+                <option value="Personal">Category: Personal</option>
+                <option value="Health">Category: Health</option>
+              </select>
+              <div className="flex gap-2">
+                <select
+                  value={newPriority}
+                  onChange={(e) => setNewPriority(e.target.value as TodoTask["priority"])}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="High">Priority: High</option>
+                  <option value="Medium">Priority: Medium</option>
+                  <option value="Low">Priority: Low</option>
+                </select>
+                <input
+                  type="text"
+                  value={newDueDate}
+                  onChange={(e) => setNewDueDate(e.target.value)}
+                  placeholder="Due"
+                  className="w-24 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/60 border border-slate-800/80 rounded-2xl px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-slate-400 font-medium">Category:</span>
+            {["All", "Engineering", "Work", "Personal", "Health"].map((cat) => (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(cat)}
+                className={\`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors \${
+                  categoryFilter === cat
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "text-slate-400 hover:text-white"
+                }\`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value)}
+              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300"
+            >
+              <option value="All">All Priorities</option>
+              <option value="High">High Priority</option>
+              <option value="Medium">Medium Priority</option>
+              <option value="Low">Low Priority</option>
+            </select>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search tasks..."
+              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+            />
+            {stats.completed > 0 && (
+              <button
+                onClick={handleClearCompleted}
+                className="text-xs text-rose-400 hover:text-rose-300 px-2.5 py-1.5 rounded-lg border border-rose-500/20 bg-rose-500/10"
+              >
+                Clear Done
+              </button>
+            )}
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          {filteredTasks.length === 0 ? (
+            <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-10 text-center">
+              <p className="text-sm text-slate-300 font-semibold">No matching tasks found</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Add a new task above or adjust your active filters.
+              </p>
+            </div>
+          ) : (
+            filteredTasks.map((task) => {
+              const isExpanded = expandedTaskId === task.id;
+              return (
+                <div
+                  key={task.id}
+                  className={\`bg-slate-900 border rounded-2xl p-4 transition-all \${
+                    task.completed ? "border-slate-800/60 opacity-75" : "border-slate-800 hover:border-slate-700"
+                  }\`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <button
+                        onClick={() => handleToggleTask(task.id)}
+                        aria-label={\`Toggle \${task.title}\`}
+                        className={\`mt-0.5 w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold border transition-all \${
+                          task.completed
+                            ? "bg-emerald-500 border-emerald-400 text-slate-950"
+                            : "bg-slate-950 border-slate-700 text-transparent hover:border-indigo-400"
+                        }\`}
+                      >
+                        ✓
+                      </button>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={\`text-sm font-semibold \${
+                              task.completed ? "line-through text-slate-500" : "text-white"
+                            }\`}
+                          >
+                            {task.title}
+                          </span>
+                          <span
+                            className={\`text-[10px] font-semibold px-2 py-0.5 rounded-full \${
+                              task.priority === "High"
+                                ? "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                : task.priority === "Medium"
+                                ? "bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                                : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                            }\`}
+                          >
+                            {task.priority}
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">
+                            {task.category}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            Due: {task.dueDate}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1">{task.notes}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => setExpandedTaskId(isExpanded ? null : task.id)}
+                        className="text-xs text-slate-400 hover:text-white px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800"
+                      >
+                        Subtasks ({task.subtasks.filter((s) => s.done).length}/{task.subtasks.length})
+                      </button>
+                      <button
+                        onClick={() => handleDeleteTask(task.id)}
+                        className="text-xs text-rose-400 hover:text-rose-300 px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <div className="mt-4 pt-3 border-t border-slate-800/80 pl-9 space-y-2">
+                      {task.subtasks.map((sub) => (
+                        <label
+                          key={sub.id}
+                          className="flex items-center gap-2.5 text-xs text-slate-300 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={sub.done}
+                            onChange={() => handleToggleSubtask(task.id, sub.id)}
+                            className="rounded border-slate-700 bg-slate-950 text-indigo-500"
+                          />
+                          <span className={sub.done ? "line-through text-slate-500" : ""}>
+                            {sub.title}
+                          </span>
+                        </label>
+                      ))}
+                      <div className="flex items-center gap-2 pt-1">
+                        <input
+                          type="text"
+                          value={newSubtaskText}
+                          onChange={(e) => setNewSubtaskText(e.target.value)}
+                          placeholder="Add checklist step..."
+                          className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleAddSubtask(task.id)}
+                          className="text-xs bg-slate-800 hover:bg-slate-700 text-white px-2.5 py-1 rounded-lg"
+                        >
+                          + Step
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+`;
+
+    const todoTypesTs = `export interface Subtask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
+export interface TodoTask {
+  id: string;
+  title: string;
+  notes: string;
+  category: "Work" | "Personal" | "Engineering" | "Health";
+  priority: "High" | "Medium" | "Low";
+  dueDate: string;
+  completed: boolean;
+  createdAt: string;
+  subtasks: Subtask[];
+}
+`;
+
+    const todoTestTs = `import { test, expect } from "bun:test";
+
+test("TaskFlow calculates completion percentage and filters tasks accurately", () => {
+  const tasks = [
+    { id: "1", title: "Task A", completed: true, priority: "High" },
+    { id: "2", title: "Task B", completed: false, priority: "High" },
+    { id: "3", title: "Task C", completed: true, priority: "Low" },
+  ];
+  const completedCount = tasks.filter((t) => t.completed).length;
+  const activeCount = tasks.filter((t) => !t.completed).length;
+  const completionRate = Math.round((completedCount / tasks.length) * 100);
+
+  expect(completedCount).toBe(2);
+  expect(activeCount).toBe(1);
+  expect(completionRate).toBe(67);
+});
+`;
+
+    const todoPackageJson = JSON.stringify(
+      {
+        name: slug || "taskflow-todo-app",
+        version: "1.0.0",
+        private: true,
+        scripts: {
+          build: "bun build src/components/App.tsx --outdir dist",
+          test: "bun test tests/app.test.ts",
+        },
+        dependencies: {
+          react: "^19.0.0",
+          "react-dom": "^19.0.0",
+        },
+      },
+      null,
+      2
+    );
+
+    const todoReadme = `# TaskFlow — Smart To-Do & Productivity Suite
+
+A full-featured, interactive To-Do List and Task Management application built with React, TypeScript, and Tailwind CSS.
+
+## Core Features
+- **Quick Task Capture**: Add tasks with custom notes, category tags (\`Engineering\`, \`Work\`, \`Personal\`, \`Health\`), priority levels (\`High\`, \`Medium\`, \`Low\`), and due dates.
+- **Subtask Checklists**: Break down complex tasks into interactive step-by-step subtasks.
+- **Multi-Dimensional Filtering**: Filter by status (\`All\`, \`Active\`, \`Completed\`), category, priority, and instant keyword search.
+- **Live Analytics & LocalStorage Persistence**: Real-time completion progress bar and automatic state persistence across refreshes.
+`;
+
+    return [
+      {
+        path: "src/components/App.tsx",
+        content: todoAppTsx,
+        category: "file_write",
+        agent: "coder",
+        tool: "file_writer",
+        message: "Created src/components/App.tsx with interactive To-Do list, subtasks, filters, and LocalStorage persistence",
+      },
+      {
+        path: "src/types/index.ts",
+        content: todoTypesTs,
+        category: "file_write",
+        agent: "coder",
+        tool: "file_writer",
+        message: "Created src/types/index.ts with TodoTask and Subtask TypeScript interfaces",
+      },
+      {
+        path: "package.json",
+        content: todoPackageJson,
+        category: "file_write",
+        agent: "coder",
+        tool: "file_writer",
+        message: "Configured package.json for TaskFlow To-Do Suite",
+      },
+      {
+        path: "tests/app.test.ts",
+        content: todoTestTs,
+        category: "test",
+        agent: "tester",
+        tool: "test_runner",
+        message: "Created tests/app.test.ts verifying task completion and filter invariants",
+      },
+      {
+        path: "README.md",
+        content: todoReadme,
+        category: "documentation",
+        agent: "documenter",
+        tool: "doc_generator",
+        message: "Documented TaskFlow To-Do List architecture and feature specifications",
+      },
+    ];
+  }
+
   const isFriendship =
     /\b(friend|friends|friendship|social\s*sanctuary|vibe\s*matcher|amity|buddy|buddies|pal|pals|bestie|bff|companion|character\s*garden|scrapbook)\b/i.test(
       combined

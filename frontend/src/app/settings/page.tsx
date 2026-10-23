@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
+import { VyrexoLogo } from "@/components/shared/VyrexoLogo";
 import {
   type VoiceSettings,
   speakHumanizedText,
@@ -206,21 +207,13 @@ export default function SettingsPage() {
       }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)]">
+      <div className="w-full flex items-center justify-between px-6 sm:px-10 py-4 border-b border-[var(--border)]">
         <div className="flex items-center gap-4">
-          <a
-            href="/"
-            className="text-lg font-bold"
-            style={{
-              background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
-            Vyrexo
+          <a href="/" className="flex items-center group">
+            <VyrexoLogo size="md" />
           </a>
           <span className="text-[var(--muted)] text-sm">/</span>
-          <span className="text-sm text-[var(--text3)]">Voice Settings</span>
+          <span className="text-sm font-medium text-[var(--text3)]">Voice Settings</span>
         </div>
         <div className="flex items-center gap-2.5">
           <button

@@ -1,5 +1,11 @@
 import { extractProjectSpecification } from "../project-spec";
 import type { GeneratedFile } from "../workspace-executor";
+import {
+  redactSensitiveData,
+  wrapUntrustedContent,
+  validateEnvironmentSecurity,
+  recordAuditEvent,
+} from "../security/governance";
 
 export const CLAUDE_CODING_MODEL = "claude-sonnet-5-5";
 export const CLAUDE_MAX_OUTPUT_TOKENS = 20000;
@@ -48,13 +54,14 @@ function getServerAnthropicApiKey(): string | null {
 
 /**
  * Returns public-safe metadata about the Claude Coding Agent configuration.
- * Never includes the raw API key.
+ * Validates ANTHROPIC_MODEL configuration without treating the model identifier as a secret.
  */
 export function getAnthropicCodingConfig(): AnthropicCodingConfig {
   const key = getServerAnthropicApiKey();
+  const envStatus = validateEnvironmentSecurity();
   return {
     configured: Boolean(key),
-    model: CLAUDE_CODING_MODEL,
+    model: envStatus.providers.anthropicModel || CLAUDE_CODING_MODEL,
     maxOutputTokens: CLAUDE_MAX_OUTPUT_TOKENS,
     source: key ? "env" : "none",
   };
@@ -68,11 +75,7 @@ function clampOutputTokens(requested: number): number {
 }
 
 function redactSecrets(input: string): string {
-  if (!input) return "";
-  return input
-    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, "[REDACTED_KEY]")
-    .replace(/sk-[a-zA-Z0-9_-]{16,}/g, "[REDACTED_KEY]")
-    .replace(/AIza[a-zA-Z0-9_-]{20,}/g, "[REDACTED_KEY]");
+  return redactSensitiveData(input);
 }
 
 /**
@@ -106,85 +109,121 @@ async function callAnthropicMessages(params: {
 
   const startTime = Date.now();
   const maxTokens = clampOutputTokens(params.maxTokens ?? 16000);
-  const timeoutMs = params.timeoutMs ?? 90000;
+  const timeoutMs = params.timeoutMs ?? 120000;
+  const configuredModel = getAnthropicCodingConfig().model || CLAUDE_CODING_MODEL;
+  const candidateModels = Array.from(
+    new Set([
+      configuredModel,
+      CLAUDE_CODING_MODEL,
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+    ])
+  );
 
-  try {
-    const abortCtrl = new AbortController();
-    const timer = setTimeout(() => abortCtrl.abort(), timeoutMs);
+  let lastError = "Anthropic API request failed";
 
-    const payload: Record<string, unknown> = {
-      model: CLAUDE_CODING_MODEL,
-      max_tokens: maxTokens,
-      thinking: { type: "between_tools" },
-      messages: params.messages,
-    };
+  for (const modelId of candidateModels) {
+    try {
+      const abortCtrl = new AbortController();
+      const timer = setTimeout(() => abortCtrl.abort(), timeoutMs);
 
-    if (params.system) {
-      payload.system = params.system;
-    }
+      // Note: Do NOT send `temperature` because `claude-sonnet-5-5` deprecates `temperature`
+      // and rejects requests containing it with HTTP 400 invalid_request_error.
+      // Use `output_config: { effort: "low" }` on Sonnet 5.x models so 100% of `max_tokens`
+      // are dedicated to direct code output rather than consuming 15k+ internal thinking tokens.
+      const payload: Record<string, unknown> = {
+        model: modelId,
+        max_tokens: maxTokens,
+        messages: params.messages,
+      };
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
-      signal: abortCtrl.signal,
-    });
-    clearTimeout(timer);
+      if (modelId.includes("sonnet-5") || modelId.includes("opus-4-7")) {
+        payload.output_config = { effort: "low" };
+      }
 
-    const latencyMs = Date.now() - startTime;
-    const body = await res.json().catch(() => null);
+      if (params.system) {
+        payload.system = params.system;
+      }
 
-    if (!res.ok) {
-      const errMsg = redactSecrets(
-        body?.error?.message ||
-          body?.message ||
-          `Anthropic API returned HTTP ${res.status}`
-      );
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: abortCtrl.signal,
+      });
+      clearTimeout(timer);
+
+      const latencyMs = Date.now() - startTime;
+      const body = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const errMsg = redactSecrets(
+          body?.error?.message ||
+            body?.message ||
+            `Anthropic API returned HTTP ${res.status}`
+        );
+        lastError = errMsg;
+        // If the account does not have access to this specific model identifier, try next Sonnet tier
+        if (
+          res.status === 404 ||
+          /model|not_found/i.test(errMsg)
+        ) {
+          continue;
+        }
+        return {
+          ok: false,
+          text: "",
+          model: configuredModel,
+          latencyMs,
+          error: errMsg,
+        };
+      }
+
+      const contentBlocks = Array.isArray(body?.content) ? body.content : [];
+      const text = contentBlocks
+        .filter((b: any) => b?.type === "text" && typeof b?.text === "string")
+        .map((b: any) => b.text)
+        .join("\n")
+        .trim();
+
+      const inputTokens = body?.usage?.input_tokens ?? 0;
+      const outputTokens = body?.usage?.output_tokens ?? 0;
+
+      return {
+        ok: true,
+        text,
+        model: body?.model || modelId,
+        latencyMs,
+        stopReason: body?.stop_reason,
+        tokensUsed: {
+          input: inputTokens,
+          output: outputTokens,
+          total: inputTokens + outputTokens,
+        },
+      };
+    } catch (err: any) {
+      const latencyMs = Date.now() - startTime;
       return {
         ok: false,
         text: "",
-        model: CLAUDE_CODING_MODEL,
+        model: configuredModel,
         latencyMs,
-        error: errMsg,
+        error: err?.name === "AbortError" ? "Anthropic API request timed out" : err?.message || String(err),
       };
     }
-
-    const contentBlocks = Array.isArray(body?.content) ? body.content : [];
-    const text = contentBlocks
-      .filter((b: any) => b?.type === "text" && typeof b?.text === "string")
-      .map((b: any) => b.text)
-      .join("\n")
-      .trim();
-
-    const inputTokens = body?.usage?.input_tokens ?? 0;
-    const outputTokens = body?.usage?.output_tokens ?? 0;
-
-    return {
-      ok: true,
-      text,
-      model: body?.model || CLAUDE_CODING_MODEL,
-      latencyMs,
-      stopReason: body?.stop_reason,
-      tokensUsed: {
-        input: inputTokens,
-        output: outputTokens,
-        total: inputTokens + outputTokens,
-      },
-    };
-  } catch (err: any) {
-    const latencyMs = Date.now() - startTime;
-    return {
-      ok: false,
-      text: "",
-      model: CLAUDE_CODING_MODEL,
-      latencyMs,
-      error: err?.name === "AbortError" ? "Anthropic API request timed out" : err?.message || String(err),
-    };
   }
+
+  return {
+    ok: false,
+    text: "",
+    model: configuredModel,
+    latencyMs: Date.now() - startTime,
+    error: lastError,
+  };
 }
 
 /**
@@ -194,8 +233,7 @@ export async function testClaudeConnection(): Promise<ClaudeBenchmarkResult> {
   const res = await callAnthropicMessages({
     system: "You are a health check responder. Reply only with OK.",
     messages: [{ role: "user", content: "ping" }],
-    maxTokens: 32,
-    temperature: 0,
+    maxTokens: 64,
     timeoutMs: 15000,
   });
 
@@ -218,6 +256,54 @@ export async function testClaudeConnection(): Promise<ClaudeBenchmarkResult> {
 }
 
 /**
+ * Linear-time O(N) JSON string scanner to recover {"path": "...", "content": "..."}
+ * entries without catastrophic regex backtracking if trailing JSON was truncated.
+ */
+function scanJsonStringLiteral(text: string, openQuoteIndex: number): { value: string; nextIndex: number } | null {
+  if (text[openQuoteIndex] !== '"') return null;
+  let out = "";
+  let i = openQuoteIndex + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      if (i + 1 >= text.length) break;
+      const next = text[i + 1];
+      if (next === '"') out += '"';
+      else if (next === "\\") out += "\\";
+      else if (next === "/") out += "/";
+      else if (next === "n") out += "\n";
+      else if (next === "r") out += "\r";
+      else if (next === "t") out += "\t";
+      else if (next === "b") out += "\b";
+      else if (next === "f") out += "\f";
+      else if (next === "u" && i + 5 < text.length) {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+        out += next;
+      } else {
+        out += next;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === '"') {
+      return { value: out, nextIndex: i + 1 };
+    }
+    out += ch;
+    i++;
+  }
+  // If string was truncated near the very end of max_tokens, still return what was accumulated if substantial
+  if (out.length > 200) {
+    return { value: out, nextIndex: text.length };
+  }
+  return null;
+}
+
+/**
  * Extracts a JSON object containing `{ files: [...] }` from Claude's response text.
  */
 function parseFilesJsonFromClaudeResponse(rawText: string): Array<{ path: string; content: string }> | null {
@@ -226,7 +312,7 @@ function parseFilesJsonFromClaudeResponse(rawText: string): Array<{ path: string
   const candidates: string[] = [];
 
   // 1. Try fenced ```json block if present
-  const jsonFenceMatch = rawText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+  const jsonFenceMatch = rawText.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/i);
   if (jsonFenceMatch && jsonFenceMatch[1]) {
     candidates.push(jsonFenceMatch[1].trim());
   }
@@ -257,19 +343,34 @@ function parseFilesJsonFromClaudeResponse(rawText: string): Array<{ path: string
     }
   }
 
-  // Fallback recovery: extract complete {"path": "...", "content": "..."} objects even if trailing JSON was truncated
+  // 4. Linear-time O(N) recovery of {"path": "...", "content": "..."} pairs
   try {
     const recovered: Array<{ path: string; content: string }> = [];
-    const fileBlockRegex = /\{\s*"path"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
-    let match: RegExpExecArray | null;
-    while ((match = fileBlockRegex.exec(rawText)) !== null) {
-      try {
-        const pathVal = JSON.parse(`"${match[1]}"`);
-        const contentVal = JSON.parse(`"${match[2]}"`);
-        if (pathVal && typeof contentVal === "string") {
-          recovered.push({ path: pathVal, content: contentVal });
-        }
-      } catch {}
+    let searchIdx = 0;
+    while (searchIdx < rawText.length) {
+      const pathKeyMatch = rawText.slice(searchIdx).match(/"path"\s*:\s*"/);
+      if (!pathKeyMatch || pathKeyMatch.index === undefined) break;
+      const pathQuoteStart = searchIdx + pathKeyMatch.index + pathKeyMatch[0].length - 1;
+      const pathParsed = scanJsonStringLiteral(rawText, pathQuoteStart);
+      if (!pathParsed) break;
+
+      const afterPath = rawText.slice(pathParsed.nextIndex);
+      const contentKeyMatch = afterPath.match(/^\s*,\s*"content"\s*:\s*"/);
+      if (!contentKeyMatch) {
+        searchIdx = pathParsed.nextIndex;
+        continue;
+      }
+      const contentQuoteStart = pathParsed.nextIndex + contentKeyMatch[0].length - 1;
+      const contentParsed = scanJsonStringLiteral(rawText, contentQuoteStart);
+      if (!contentParsed) break;
+
+      if (pathParsed.value && contentParsed.value) {
+        recovered.push({
+          path: pathParsed.value.trim(),
+          content: contentParsed.value,
+        });
+      }
+      searchIdx = contentParsed.nextIndex;
     }
     if (recovered.length > 0) {
       return recovered;
@@ -320,7 +421,7 @@ export async function synthesizeProjectWithClaude(
   // Check if modifying/evolving an existing workspace application
   const hasExistingApp =
     Array.isArray(existingFiles) &&
-    existingFiles.some((f) => f.path === "src/components/App.tsx" && f.content.length > 100);
+    existingFiles.some((f) => f.path === "src/components/App.tsx" && f.content.length > 40);
 
   let existingWorkspaceSection = "";
   let iterativeModeDirective = "";
@@ -335,19 +436,21 @@ export async function synthesizeProjectWithClaude(
     if (focusedFiles) {
       existingWorkspaceSection = `\nEXISTING WORKSPACE CODEBASE (Active Project in Sandbox):\n${focusedFiles}\n`;
       iterativeModeDirective = `
-ITERATIVE PRODUCT EVOLUTION DIRECTIVE:
+ITERATIVE MODIFICATION & UI/FEATURE EVOLUTION DIRECTIVE:
 - An active application already exists in this workspace (shown above).
-- If the user is asking to make changes, add a feature, refine the UI/UX, fix an issue, or "take it to an entire product level" / expand the existing project:
-  1. PRESERVE all existing working domain features, data models, tabs, and interactive workflows from the existing "src/components/App.tsx".
-  2. SEAMLESSLY INTEGRATE AND EXPAND the codebase with every newly requested feature, workflow, modal, analytics view, filter, validation rule, or product-grade enhancement.
-  3. If the user asks to elevate or take the project to a full product level, expand it into a comprehensive, multi-view production suite with rich domain data, end-to-end interactive workflows, search/filtering, summary KPIs, modals/drawers, and polished visual design.
-- Only replace the domain entirely if the user explicitly asks to build a completely different, unrelated type of application.`;
+- Carefully inspect what the user is requesting in their latest message:
+  1. IF THE USER IS REQUESTING UI / THEME / DESIGN / COMPONENT CHANGES (e.g., "I don't like the UI", "use some other theme and elements", "make the changes", "redesign", "change colors/layout", "improve the UI"):
+     - Completely transform and elevate the visual theme, color palette, typography, layout architecture, and UI components in "src/components/App.tsx"!
+     - Do NOT keep a plain or basic layout. Upgrade the UI into a visually striking, modern, multi-theme interface (include an interactive Theme Switcher in the header supporting e.g. "Warm Editorial Daylight", "Aurora Violet Glass", and "Midnight Obsidian" themes, with rich cards, progress visualizations, interactive modals/drawers, category pills, priority badges, and micro-interactions).
+     - Ensure every single interactive feature (creating, editing, completing, deleting, filtering, searching, sorting, and stats) works end-to-end with real state.
+  2. IF THE USER IS REQUESTING NEW FEATURES, FUNCTIONAL CHANGES, OR BUG FIXES:
+     - Preserve all working domain features from "src/components/App.tsx" and seamlessly integrate the newly requested features, controls, views, or fixes.
+     - If the existing "src/components/App.tsx" was overly basic or lacked interactive CRUD controls, upgrade it into a complete, rich, production-grade implementation while applying the user's changes.`;
     }
   }
 
   const systemPrompt = `You are Vyrexo's Principal Coding Agent powered by Anthropic Claude Sonnet 5.5 (${CLAUDE_CODING_MODEL}).
 Your role is to architect and implement complete, production-grade, deeply interactive React (TypeScript) software applications and executable unit tests.
-Take the necessary time and care to fulfill every single condition and requirement of the product specification without cutting corners.
 
 PROJECT SPECIFICATION:
 - Application Title: "${effectiveTitle}"
@@ -357,27 +460,35 @@ PROJECT SPECIFICATION:
 - Core Features: ${spec.coreFeatures.join("; ")}
 ${historyContext}${existingWorkspaceSection}${iterativeModeDirective}
 
-CRITICAL ENGINEERING & QUALITY REQUIREMENTS:
+CRITICAL ENGINEERING, UI DESIGN & PERFORMANCE REQUIREMENTS:
 1. "src/components/App.tsx":
    - Must be a complete, self-contained single-page React application component named "App" and exported via "export default App;" (and "export function App()").
-   - Include "use client"; at the top.
-   - Write a thorough, feature-complete, production-grade implementation (typically 300 to 650+ lines of well-structured TypeScript/JSX) that implements every requested workflow, view, and interactive feature in full detail.
-   - Zero placeholders, zero "TODO" comments, and zero stubbed buttons. Every button, search bar, filter, modal, tab, form input, stepper, and interactive control must work with real React state (useState, useEffect, useMemo, useCallback).
-   - Use Tailwind CSS utility classes for a refined, high-contrast, responsive UI with clear visual hierarchy, status badges, KPI cards, and interactive feedback.
-   - Use FontAwesome 6 icons via standard HTML <i> tags (e.g., <i className="fa-solid fa-train"></i>).
-   - Do NOT import external third-party packages like 'lucide-react', '@fortawesome/*', or external chart libraries; keep all subcomponents, modals, and helpers self-contained inside "src/components/App.tsx" so it compiles cleanly in a single bundle via Bun.
+   - Include "use client"; at the top, and import ONLY from 'react' (e.g., import React, { useState, useEffect, useMemo, useCallback } from 'react';).
+   - Define all TypeScript types/interfaces directly inside "src/components/App.tsx" (do NOT import from '../types' or external modules) so "src/components/App.tsx" compiles standalone with zero unresolved imports.
+   - Style with Tailwind CSS utility classes and write clean, well-structured, multi-section code (420 to 680 lines of TypeScript/JSX — do NOT golf or cram lines together, and never use bare icon boxes where product/visual imagery belongs).
+   - VISUAL & PRODUCT QUALITY MANDATE:
+     * NEVER use bare FontAwesome icons as a substitute for product photos in e-commerce, jewellery, fashion, food, real estate, or travel apps! Always use real, high-resolution curated Unsplash photography URLs (e.g., \`https://images.unsplash.com/photo-...?auto=format&fit=crop&w=800&q=80\`) with \`referrerPolicy="no-referrer"\`, \`loading="lazy"\`, object-cover styling, subtle hover zoom (\`group-hover:scale-105 transition-transform duration-500\`), and an \`onError\` fallback image so every card looks like a real luxury/production product!
+     * NEVER use raw unstyled browser \`<input type="checkbox">\` or plain unstyled \`<select>\` dropdowns. Always build custom-styled pill selectors, segmented tab bars, custom toggle switches, and refined filter chips.
+     * Include a striking **Hero Banner / Showcase Header** with editorial typography, value propositions, live KPI metrics, and primary/secondary CTA buttons.
+     * Include **Multi-View Navigation Tabs** in the top navbar (e.g., for e-commerce/jewellery: "Collections Catalog", "Bespoke Customizer / Atelier", "Saved Wishlist", and "Orders & Concierge"; for productivity/SaaS: "Workspace", "Kanban Board", "Analytics & Insights", "Settings").
+     * Include an interactive **Theme Switcher** with 4 cohesive, carefully crafted palettes (e.g., Luxury Noir & Champagne Gold, Warm Ivory Editorial, Emerald Velvet, Rose Quartz Daylight).
+     * Include rich **Detail & Customization Modals** (e.g., for jewellery: selectable Metal Karat 14K/18K/Platinum, Ring/Chain Size selector, custom Engraving text preview, GIA certification badge, and customer reviews) and a **Multi-Step Slide-Over Drawer / Checkout Flow** (Cart items, Promo codes, Gift packaging toggle, Shipping form, and instant Order Confirmation with tracking ID).
+   - PERFORMANCE & REACT STATE HYGIENE:
+     * Guard \`localStorage\` persistence with an \`isHydrated\` state flag so the save \`useEffect\` never overwrites stored data with empty defaults on initial mount.
+     * Memoize filtered/sorted lists with \`useMemo\` and handlers with \`useCallback\` for smooth 60fps interaction.
+     * Zero placeholders, zero "TODO" comments, and zero non-functional buttons.
 2. "src/types/index.ts":
-   - Complete TypeScript interfaces and domain types for the application.
+   - Exported TypeScript interfaces for reference and documentation.
 3. "package.json":
    - Valid JSON with name "${slug}", version "1.0.0", scripts: {"dev": "vite --port 5173", "build": "bun build src/components/App.tsx --outdir dist", "test": "bun test tests/app.test.ts"}.
 4. "tests/app.test.ts":
    - Real executable unit tests using ONLY: import { test, expect } from "bun:test";
-   - Include 4 to 6 meaningful unit test assertions verifying core calculations, filtering, state transitions, and domain invariants for "${effectiveTitle}". Do not import DOM/React rendering libraries in tests/app.test.ts; test pure domain logic and data invariants so "bun test" runs deterministically.
+   - Include 5 to 6 meaningful unit test assertions verifying core calculations, filtering, customization pricing, state transitions, and domain invariants for "${effectiveTitle}". Do not import DOM/React rendering libraries in tests/app.test.ts.
 5. "README.md":
-   - Comprehensive architectural overview, implemented features, and verification commands.
+   - Concise architectural overview, implemented features, and verification commands.
 
 OUTPUT FORMAT:
-Respond ONLY with a single valid JSON object (no markdown commentary outside the JSON) matching this exact schema:
+Respond ONLY with a single valid JSON object (no markdown prose outside the JSON) matching this exact schema:
 {
   "files": [
     { "path": "src/components/App.tsx", "content": "..." },
@@ -388,19 +499,29 @@ Respond ONLY with a single valid JSON object (no markdown commentary outside the
   ]
 }`;
 
+  const wrappedPrompt = wrapUntrustedContent("user_request", prompt);
   const userMessage = hasExistingApp
-    ? `Execute this iterative upgrade / feature implementation on the existing project ("${effectiveTitle}") for the user request: "${prompt}". Fulfill every requirement thoroughly, preserve existing working capabilities while adding the new features/improvements, and return ONLY the valid JSON object.`
-    : `Implement the complete, production-grade application files for the user request: "${prompt}" (Project Title: "${effectiveTitle}"). Fulfill every requirement thoroughly, ensure every interactive feature works end-to-end, and return ONLY the valid JSON object.`;
+    ? `Execute this iterative change / UI redesign / feature implementation on the existing project ("${effectiveTitle}") for the user request:\n${wrappedPrompt}\nApply all requested changes and UI/theme enhancements thoroughly, ensure every interactive control works end-to-end, and return ONLY the valid JSON object.`
+    : `Implement the complete, enhanced, production-grade application files for the user request:\n${wrappedPrompt}\n(Project Title: "${effectiveTitle}"). Fulfill every requirement with high-craft UI components and full interactivity, and return ONLY the valid JSON object.`;
 
-  // Allocate 19,500 max_tokens (strictly within the 20,000-token cap) and 180s timeout for thorough, high-quality synthesis
+  // Allocate 20,000 max_tokens and 180s timeout for thorough, high-quality synthesis
   const response = await callAnthropicMessages({
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
-    maxTokens: clampOutputTokens(19500),
+    maxTokens: clampOutputTokens(20000),
     timeoutMs: 180000,
   });
 
   if (!response.ok) {
+    recordAuditEvent({
+      category: "fallback",
+      severity: "MEDIUM",
+      action: "Claude coding agent API call returned non-OK",
+      outcome: "fallback",
+      agent: "claude-coding",
+      latencyMs: response.latencyMs,
+      reason: response.error,
+    });
     return {
       ok: false,
       model: CLAUDE_CODING_MODEL,
@@ -412,6 +533,15 @@ Respond ONLY with a single valid JSON object (no markdown commentary outside the
 
   const parsedFiles = parseFilesJsonFromClaudeResponse(response.text);
   if (!parsedFiles || parsedFiles.length === 0) {
+    recordAuditEvent({
+      category: "validation",
+      severity: "MEDIUM",
+      action: "Claude output schema validation failed",
+      outcome: "fallback",
+      agent: "claude-coding",
+      latencyMs: response.latencyMs,
+      reason: "Response did not contain a valid files JSON array",
+    });
     return {
       ok: false,
       model: response.model,
@@ -421,6 +551,20 @@ Respond ONLY with a single valid JSON object (no markdown commentary outside the
       error: "Claude response did not contain a valid files JSON array",
     };
   }
+
+  recordAuditEvent({
+    category: "validation",
+    severity: "INFO",
+    action: `Claude Sonnet 5.5 synthesized ${parsedFiles.length} verified files`,
+    outcome: "verified",
+    agent: "claude-coding",
+    latencyMs: response.latencyMs,
+    metadata: {
+      model: response.model,
+      filesCount: parsedFiles.length,
+      tokensUsed: response.tokensUsed,
+    },
+  });
 
   const files: GeneratedFile[] = parsedFiles.map((f) => ({
     path: f.path,

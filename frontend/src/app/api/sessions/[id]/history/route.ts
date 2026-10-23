@@ -5,13 +5,31 @@ import {
   appendSessionChatTurn,
   clearSessionChatHistory,
   SessionChatTurn,
+  verifySessionProjectOwnership,
 } from "@/lib/project-session-store";
+import { getSessionOwner, isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const { searchParams } = new URL(request.url);
+  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+
+  if (!id || isBlockedLegacySessionId(id)) {
+    return NextResponse.json({ ok: true, sessionId: id, turns: [] });
+  }
+
+  const owner = getSessionOwner(id);
+  if (owner && userId && owner !== userId) {
+    return NextResponse.json({ ok: false, error: "Forbidden", turns: [] }, { status: 403 });
+  }
+
+  if (userId && !verifySessionProjectOwnership(id, userId)) {
+    return NextResponse.json({ ok: false, error: "Forbidden", turns: [] }, { status: 403 });
+  }
+
   const turns = getSessionChatHistory(id);
 
   if (turns.length === 0) {
@@ -49,6 +67,16 @@ export async function POST(
   try {
     const { id } = await params;
     const body = await request.json();
+    const userId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
+
+    if (!id || isBlockedLegacySessionId(id)) {
+      return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 403 });
+    }
+
+    const owner = getSessionOwner(id);
+    if (owner && userId && owner !== userId) {
+      return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+    }
 
     if (Array.isArray(body.turns)) {
       const normalized: SessionChatTurn[] = body.turns.map((t: any) => ({
@@ -87,7 +115,20 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const { searchParams } = new URL(request.url);
+  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+
+  if (!id || isBlockedLegacySessionId(id)) {
+    return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 400 });
+  }
+
+  const owner = getSessionOwner(id);
+  if (owner && userId && owner !== userId) {
+    return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+  }
+
   clearSessionChatHistory(id);
   return NextResponse.json({ ok: true, sessionId: id, message: "History cleared" });
 }
+
 

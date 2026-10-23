@@ -86,9 +86,23 @@ function collectAllDirPaths(nodes: TreeNode[], acc: Set<string> = new Set()): Se
 
 function VSCodeServerWorkbench() {
   const searchParams = useSearchParams();
-  const sessionId = searchParams.get("sessionId") || searchParams.get("session") || "session-1790005321834";
+  const sessionId = searchParams.get("sessionId") || searchParams.get("session") || "";
+  const urlUserId = searchParams.get("user_id") || searchParams.get("userId") || "";
+  const [userIdParam, setUserIdParam] = useState<string>(urlUserId);
 
-  const [projectName, setProjectName] = useState<string>("RailGo Train Booking");
+  useEffect(() => {
+    if (!urlUserId && typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("vyrexo_user");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.id) setUserIdParam(String(parsed.id));
+        }
+      } catch {}
+    }
+  }, [urlUserId]);
+
+  const [projectName, setProjectName] = useState<string>("Workspace");
   const [workspacePath, setWorkspacePath] = useState<string>("");
   const [vscodeDesktopUri, setVscodeDesktopUri] = useState<string>("");
   const [filesMap, setFilesMap] = useState<Record<string, string>>({});
@@ -116,13 +130,16 @@ function VSCodeServerWorkbench() {
     try {
       const res = await fetch("/api/projects/vscode", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(userIdParam ? { "x-user-id": userIdParam } : {}),
+        },
+        body: JSON.stringify({ sessionId, userId: userIdParam || undefined }),
       });
       const data = await res.json();
       if (data?.ok && Array.isArray(data.files)) {
         setProjectName(data.projectName || "Workspace");
-        setWorkspacePath(data.targetPath || data.sandboxPath || `/app/applet/workspaces/${sessionId}`);
+        setWorkspacePath(data.targetPath || data.sandboxPath || `~/VyrexoWorkspaces/${data.projectSlug || sessionId}`);
         setVscodeDesktopUri(data.vscodeUri || "");
 
         const nextMap: Record<string, string> = {};
@@ -175,7 +192,7 @@ function VSCodeServerWorkbench() {
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, userIdParam]);
 
   useEffect(() => {
     loadWorkspace();
@@ -215,9 +232,13 @@ function VSCodeServerWorkbench() {
       const content = filesMap[activeFile] ?? "";
       const res = await fetch("/api/projects/file", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(userIdParam ? { "x-user-id": userIdParam } : {}),
+        },
         body: JSON.stringify({
           sessionId,
+          userId: userIdParam || undefined,
           file: activeFile,
           content,
         }),
@@ -240,7 +261,7 @@ function VSCodeServerWorkbench() {
       setSavingFile(false);
       setTimeout(() => setSaveStatus(""), 2500);
     }
-  }, [activeFile, filesMap, savingFile, sessionId]);
+  }, [activeFile, filesMap, savingFile, sessionId, userIdParam]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -273,8 +294,16 @@ function VSCodeServerWorkbench() {
     try {
       await fetch("/api/projects/file", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, file: clean, content: initialContent }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(userIdParam ? { "x-user-id": userIdParam } : {}),
+        },
+        body: JSON.stringify({
+          sessionId,
+          userId: userIdParam || undefined,
+          file: clean,
+          content: initialContent,
+        }),
       });
       setTerminalLogs((prev) => [...prev, `✓ Created ${clean}`]);
     } catch {}

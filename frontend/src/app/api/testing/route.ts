@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractAcceptanceCriteria } from "@/lib/testing/requirements-extractor";
 import { runDeterministicAppTests, type LiveTestReport } from "@/lib/testing/playwright-runner";
 import { executeAutonomousRepairLoop, type AutonomousRepairSessionResult } from "@/lib/testing/repair-loop";
-import { getSessionConnectedProject } from "@/lib/project-session-store";
+import {
+  getSessionConnectedProject,
+  verifySessionProjectOwnership,
+} from "@/lib/project-session-store";
+import { isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
+import { recordCrossUserBlock, checkToolPermission } from "@/lib/security/governance";
 import { getWorkspaceDir } from "@/lib/workspace-executor";
 import fs from "fs";
 import path from "path";
@@ -13,7 +18,23 @@ const sessionRepairResults = new Map<string, AutonomousRepairSessionResult>();
 
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
-  const sessionId = url.searchParams.get("sessionId") || "default";
+  const sessionId = (url.searchParams.get("sessionId") || url.searchParams.get("session") || "").trim();
+  const userId = (url.searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
+
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+    return NextResponse.json({
+      ok: true,
+      sessionId: "",
+      hasReport: false,
+      report: null,
+      repairSession: null,
+    });
+  }
+
+  if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+    recordCrossUserBlock(sessionId, userId, "GET /api/testing");
+    return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+  }
 
   const report = sessionTestReports.get(sessionId);
   const repair = sessionRepairResults.get(sessionId);
@@ -30,13 +51,25 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const sessionId = (body.sessionId as string) || "default";
+    const sessionId = ((body.sessionId || body.session) as string || "").trim();
+    const userId = (body.userId || body.user_id || req.headers.get("x-user-id") || "").trim();
     const prompt = (body.prompt as string) || "Interactive web application";
     const autoRepair = Boolean(body.autoRepair ?? true);
     const maxRetries = Math.min(5, Math.max(1, body.maxRetries || 3));
 
+    if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+      return NextResponse.json({ ok: false, error: "Valid session ID is required" }, { status: 400 });
+    }
+
+    if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+      recordCrossUserBlock(sessionId, userId, "POST /api/testing");
+      return NextResponse.json({ ok: false, error: "Forbidden: session belongs to another user" }, { status: 403 });
+    }
+
+    checkToolPermission("claude-coding", "workspace_test", { sessionId, userId });
+
     // Resolve project details from store or disk
-    const connectedProj = getSessionConnectedProject(sessionId);
+    const connectedProj = getSessionConnectedProject(sessionId, userId || undefined);
     const projectTitle = connectedProj?.name || "Vyrexo Application";
 
     // Build the preview URL to test

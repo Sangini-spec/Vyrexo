@@ -9,7 +9,17 @@ import {
   getSessionLastImages,
   getSessionWorkspaceFiles,
   ensureSessionWorkspaceMaterialized,
+  verifySessionProjectOwnership,
 } from "@/lib/project-session-store";
+import { isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
+import {
+  inspectUntrustedInput,
+  recordAgentRouting,
+  checkRateLimit,
+  recordCrossUserBlock,
+  redactSensitiveData,
+  validateSafeExternalUrl,
+} from "@/lib/security/governance";
 import {
   COSMETICS_STORE_TSX,
   COSMETICS_PRODUCTS_TS,
@@ -38,6 +48,7 @@ import {
   extractProjectName,
   generateChatTitle,
   extractProjectSpecification,
+  isBuildOrImplementationIntent,
 } from "@/lib/project-spec";
 import { getChariotConfig, chatWithChariot } from "@/lib/ai-provider-config";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -327,123 +338,138 @@ function classifyIntent(
   const trimmed = cleanedText.trim().toLowerCase();
   const normalized = trimmed.replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
 
+  const hasExistingSessionProject = sessionId
+    ? Boolean(getSessionProject(sessionId)) ||
+      Boolean(getSessionConnectedProject(sessionId)) ||
+      getSessionWorkspaceFiles(sessionId).length > 0 ||
+      Boolean(ensureSessionWorkspaceMaterialized(sessionId))
+    : false;
+
+  const isUnifiedBuildIntent = isBuildOrImplementationIntent(
+    cleanedText,
+    history,
+    hasExistingSessionProject
+  );
+
   // PRIORITY -1: Instant Greetings, Casual Pleasantries & Status Inquiries
-  // Direct, instantaneous answers (<1ms) for common basic conversational questions
-  // "What's up" and casual friend greetings
-  const isWhatsUp =
-    /^(he|hey|hi|yo)?\s*(what('s|s)?\s*up|sup|wassup|whats\s+good|what('s|s)?\s+happening)\b/i.test(normalized) ||
-    /^(what('s|s)?\s*up|sup|wassup|whats\s+good)\b/i.test(normalized);
+  // Only match when the message is NOT a build/implementation command
+  if (!isUnifiedBuildIntent) {
+    const isWhatsUp =
+      /^(he|hey|hi|yo)?\s*(what('s|s)?\s*up|sup|wassup|whats\s+good|what('s|s)?\s+happening)\s*$/i.test(normalized) ||
+      /^(what('s|s)?\s*up|sup|wassup|whats\s+good)\s*$/i.test(normalized);
 
-  if (isWhatsUp) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
-      spokenReply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
-    };
-  }
+    if (isWhatsUp) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
+        spokenReply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
+      };
+    }
 
-  // Social & Teammate Banter: Family / Mom questions
-  const isMomOrFamily = /\b(how('s| is) your mom|got a mom|have a mom|your mother|your family)\b/i.test(trimmed);
-  if (isMomOrFamily) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "Haha, no mom unfortunately 😄 I'm basically your software teammate living inside your machine. But if I did, she'd probably yell at me for staying online writing code all night!",
-      spokenReply: "Haha, no mom unfortunately 😄 I'm basically your software teammate living inside your machine. What are we building today?",
-    };
-  }
+    // Social & Teammate Banter: Family / Mom questions
+    const isMomOrFamily = /\b(how('s| is) your mom|got a mom|have a mom|your mother|your family)\b/i.test(trimmed);
+    if (isMomOrFamily) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "Haha, no mom unfortunately 😄 I'm basically your software teammate living inside your machine. But if I did, she'd probably yell at me for staying online writing code all night!",
+        spokenReply: "Haha, no mom unfortunately 😄 I'm basically your software teammate living inside your machine. What are we building today?",
+      };
+    }
 
-  // Social & Teammate Banter: Friendly teasing / "you're useless" jokes
-  const isBanterOrJokes = /\b(bro you('re| are) useless|you are useless|you suck|are you dumb|you're dumb|you noob|haha you suck|lol you suck)\b/i.test(trimmed);
-  if (isBanterOrJokes) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "Ouch, rough code review! 😂 Tell me what broke and I'll jump right in and fix it.",
-      spokenReply: "Ouch, rough review! 😂 Tell me what broke and I'll jump right in and fix it.",
-    };
-  }
+    // Social & Teammate Banter: Friendly teasing / "you're useless" jokes
+    const isBanterOrJokes = /\b(bro you('re| are) useless|you are useless|you suck|are you dumb|you're dumb|you noob|haha you suck|lol you suck)\b/i.test(trimmed);
+    if (isBanterOrJokes) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "Ouch, rough code review! 😂 Tell me what broke and I'll jump right in and fix it.",
+        spokenReply: "Ouch, rough review! 😂 Tell me what broke and I'll jump right in and fix it.",
+      };
+    }
 
-  // Frustration & Empathy
-  const isFrustration = /\b(why the hell|why is this still broken|why is it still broken|what the hell|wtf|still not working|fix this shit|damn it|damnit)\b/i.test(trimmed);
-  if (isFrustration) {
-    return {
-      isConversational: true,
-      emotion: "empathetic",
-      reply: "I hear you, debugging this can be really frustrating. Let's trace it down step-by-step together. What error or broken state are you seeing right now?",
-      spokenReply: "I hear you, debugging this can be frustrating. Let's trace it down step-by-step together. What error are you seeing?",
-    };
-  }
+    // Frustration & Empathy
+    const isFrustration = /\b(why the hell|why is this still broken|why is it still broken|what the hell|wtf|still not working|fix this shit|damn it|damnit)\b/i.test(trimmed);
+    if (isFrustration) {
+      return {
+        isConversational: true,
+        emotion: "empathetic",
+        reply: "I hear you, debugging this can be really frustrating. Let's trace it down step-by-step together. What error or broken state are you seeing right now?",
+        spokenReply: "I hear you, debugging this can be frustrating. Let's trace it down step-by-step together. What error are you seeing?",
+      };
+    }
 
-  // Excitement & Celebration
-  const isExcitement = /\b(yess+|yesss+|it worked|finally worked|holy shit it works|omg it worked|lets go+|let's go+|boom|awesome|fantastic)\b/i.test(trimmed);
-  if (isExcitement) {
-    return {
-      isConversational: true,
-      emotion: "upbeat",
-      reply: "Boom! That's what I'm talking about! 🎉 Love to see it. What's our next move?",
-      spokenReply: "Boom! That's what I'm talking about! 🎉 Love to see it. What's our next move?",
-    };
-  }
+    // Excitement & Celebration (short expressions only)
+    const isExcitement =
+      normalized.split(/\s+/).length <= 7 &&
+      /\b(yess+|yesss+|it worked|finally worked|holy shit it works|omg it worked|lets go+|let's go+|boom|awesome|fantastic)\b/i.test(trimmed);
+    if (isExcitement) {
+      return {
+        isConversational: true,
+        emotion: "upbeat",
+        reply: "Boom! That's what I'm talking about! 🎉 Love to see it. What's our next move?",
+        spokenReply: "Boom! That's what I'm talking about! 🎉 Love to see it. What's our next move?",
+      };
+    }
 
-  const isGreetingOrSocial =
-    /^(he|hey|hi|hello|good morning|good afternoon|good evening|yo)?\s*(how are you|how r u|how are you doing|how('s|s) it going|how is it going|how do you do|how('s|s) everything)\b/i.test(normalized) ||
-    /^(hey|hi|hello|heya|howdy|good morning|good afternoon|good evening|he rex|hey rex|hi rex|hello rex|yo rex|yo)\s*$/i.test(normalized);
+    const isGreetingOrSocial =
+      /^(he|hey|hi|hello|good morning|good afternoon|good evening|yo)?\s*(how are you|how r u|how are you doing|how('s|s) it going|how is it going|how do you do|how('s|s) everything)\s*(rex)?\s*$/i.test(normalized) ||
+      /^(hey|hi|hello|heya|howdy|good morning|good afternoon|good evening|he rex|hey rex|hi rex|hello rex|yo rex|yo)\s*$/i.test(normalized);
 
-  if (isGreetingOrSocial) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
-      spokenReply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
-    };
-  }
+    if (isGreetingOrSocial) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
+        spokenReply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
+      };
+    }
 
-  const isStatusOrStuckInquiry =
-    /\b(are you stuck|stuck with my question|did you freeze|are you frozen|are you there|you there|can you hear me|did you hear me|still thinking|why are you slow|taking so long|are you thinking)\b/i.test(trimmed);
+    const isStatusOrStuckInquiry =
+      /\b(are you stuck|stuck with my question|did you freeze|are you frozen|are you there|you there|can you hear me|did you hear me|still thinking|why are you slow|taking so long|are you thinking)\b/i.test(trimmed);
 
-  if (isStatusOrStuckInquiry) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to do?",
-      spokenReply: "Not at all! I'm right here and ready. What would you like to explore or build?",
-    };
-  }
+    if (isStatusOrStuckInquiry) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to do?",
+        spokenReply: "Not at all! I'm right here and ready. What would you like to explore or build?",
+      };
+    }
 
-  const isIdentityInquiry =
-    /\b(who are you|what is your name|what's your name|tell me about yourself|who created you|who made you)\b/i.test(trimmed);
+    const isIdentityInquiry =
+      /\b(who are you|what is your name|what's your name|tell me about yourself|who created you|who made you)\b/i.test(trimmed);
 
-  if (isIdentityInquiry) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: "I'm Rex, your voice-first AI engineering partner. I design architectures, write and review code, run terminal tasks, answer technical questions, and preview live software with you.",
-      spokenReply: "I'm Rex, your voice-first AI engineering partner. Ready to write code, review architecture, or discuss software with you.",
-    };
-  }
+    if (isIdentityInquiry) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: "I'm Rex, your voice-first AI engineering partner. I design architectures, write and review code, run terminal tasks, answer technical questions, and preview live software with you.",
+        spokenReply: "I'm Rex, your voice-first AI engineering partner. Ready to write code, review architecture, or discuss software with you.",
+      };
+    }
 
-  const isCapabilitiesInquiry =
-    /\b(what can you do|what are your capabilities|what do you do|help me|how can you help)\b/i.test(trimmed);
+    const isCapabilitiesInquiry =
+      /\b(what can you do|what are your capabilities|what do you do|help me|how can you help)\b/i.test(trimmed);
 
-  if (isCapabilitiesInquiry) {
-    return {
-      isConversational: true,
-      emotion: "upbeat",
-      reply: "I can build complete web applications, write and debug code, run unit tests, explain architectures, and run live interactive sandboxes. You can talk to me naturally using voice or text!",
-      spokenReply: "I can build complete web applications, debug code, explain features, and run live interactive sandboxes with you.",
-    };
-  }
+    if (isCapabilitiesInquiry) {
+      return {
+        isConversational: true,
+        emotion: "upbeat",
+        reply: "I can build complete web applications, write and debug code, run unit tests, explain architectures, and run live interactive sandboxes. You can talk to me naturally using voice or text!",
+        spokenReply: "I can build complete web applications, debug code, explain features, and run live interactive sandboxes with you.",
+      };
+    }
 
-  const isSuccessVsMoney =
-    /\b(success or money|money or success|success vs money|money vs success|more important.*?(success|money)|which is (better|more important).*?(success|money))\b/i.test(trimmed);
+    const isSuccessVsMoney =
+      /\b(success or money|money or success|success vs money|money vs success|more important.*?(success|money)|which is (better|more important).*?(success|money))\b/i.test(trimmed);
 
-  if (isSuccessVsMoney) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-      reply: `### ⚖️ Success vs. Money: A Thoughtful Perspective
+    if (isSuccessVsMoney) {
+      return {
+        isConversational: true,
+        emotion: "warm",
+        reply: `### ⚖️ Success vs. Money: A Thoughtful Perspective
 
 Both success and money are deeply impactful, but they fulfill fundamentally different needs:
 
@@ -452,33 +478,22 @@ Both success and money are deeply impactful, but they fulfill fundamentally diff
 - **The Synergy**: While money is often a natural byproduct of creating immense value, money alone without purpose often leads to emptiness. Pursuing genuine mastery, relationships, and health provides long-term fulfillment that wealth alone cannot buy.
 
 Ultimately, money gives you the **freedom** to choose your direction, but **true success** is finding purpose and fulfillment in the journey.`,
-      spokenReply: "Between success and money, money provides essential freedom and security, while true success is defined by purpose, relationships, and mastery. Money is a tool, but success is fulfillment.",
-    };
-  }
+        spokenReply: "Between success and money, money provides essential freedom and security, while true success is defined by purpose, relationships, and mastery. Money is a tool, but success is fulfillment.",
+      };
+    }
 
-  const isGratitude =
-    /\b(thanks|thank you|thx|cheers|awesome|great job|perfect|love it|cool|nice|good job)\b/i.test(trimmed);
+    const isGratitude =
+      normalized.split(/\s+/).length <= 7 &&
+      /\b(thanks|thank you|thx|cheers|awesome|great job|perfect|love it|cool|nice|good job)\b/i.test(trimmed);
 
-  if (isGratitude) {
-    return {
-      isConversational: true,
-      emotion: "upbeat",
-      reply: "Always happy to help! What's next on your mind?",
-      spokenReply: "Always happy to help! What's next on your mind?",
-    };
-  }
-
-  // PRIORITY 0: Explicit Meta-Questions, Explanations, Inquiries, & Multimodal Reviews
-  // Note: Do not use a blanket trimmed.endsWith("?") here before buildCommandPatterns so polite build requests like "Can you build a task app?" still trigger the coding agent.
-  const isQuestionOrMetaInquiry =
-    /^(check if|why |how |what |can you explain|could you explain|did you|are you|do you|tell me about|explain |clarify |here's the proof|heres the proof|other than that|when i tried|i have a question|quick question|my question is)/i.test(trimmed) ||
-    /\b(pre-fed|prefed|hardcoded|why is it|why are you|answering me|follow-up|follow up|understanding the entire question|keywords and intents|what do you think|what is your take|what's your opinion|are you stuck|did you freeze|are you frozen|other tabs|code files|look through the screenshot|multimodal direction|capability to look|look at the screenshot|screenshot of the errors)\b/i.test(trimmed);
-
-  if (isQuestionOrMetaInquiry) {
-    return {
-      isConversational: true,
-      emotion: "warm",
-    };
+    if (isGratitude) {
+      return {
+        isConversational: true,
+        emotion: "upbeat",
+        reply: "Always happy to help! What's next on your mind?",
+        spokenReply: "Always happy to help! What's next on your mind?",
+      };
+    }
   }
 
   // PRIORITY 0.4: Internal Workspace Terminal / Build / Unit Test Execution Commands
@@ -493,56 +508,23 @@ Ultimately, money gives you the **freedom** to choose your direction, but **true
   }
 
   // PRIORITY 0.5: Explicit Build Commands, Incremental Code Modifications & Execution Demands
-  // Spoken or typed commands like "Can you build a clothes website?", "Build me an e-commerce store",
-  // "Add a search filter to the app", or "Add a 15-minute Quick Sprint preset button to the timer controls"
+  // Spoken or typed commands like "just build that to do list application", "start working on a project",
+  // "Can you build a clothes website?", "Build me an e-commerce store", or "Add a search filter to the app"
   // trigger the Claude Sonnet 5.5 Coding Agent!
-  const hasExistingSessionProject = sessionId
-    ? Boolean(getSessionProject(sessionId)) ||
-      Boolean(getSessionConnectedProject(sessionId)) ||
-      getSessionWorkspaceFiles(sessionId).length > 0 ||
-      Boolean(ensureSessionWorkspaceMaterialized(sessionId))
-    : false;
-
-  const isIncrementalWorkspaceEdit =
-    hasExistingSessionProject &&
-    (/^\s*(?:(?:hey\s+rex|rex|please|can\s+you|could\s+you|i\s+want\s+you\s+to|let's|lets)\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|polish|integrate|support|take|keep\s+working|continue\s+building|iterate|work\s+on)\b/i.test(
-      trimmed
-    ) ||
-      /\b(make\s+changes|add\s+a?\s*features?|take\s+(it|this|the\s+project|the\s+app)\s+to|entire\s+product\s+level|full\s+product\s+level|product\s+level|improve\s+(the|this)\s+(project|app|application|ui|code)|keep\s+working\s+on\s+(it|this|that|the\s+project))\b/i.test(
-        trimmed
-      )) &&
-    !/\b(vs\s*code|vscode|cursor|windsurf|browser|playwright)\b/i.test(trimmed);
-
-  const buildCommandPatterns = [
-    /\b(start\s+(building|coding|developing|creating|execution|the\s+build))\b/i,
-    /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building)\b/i,
-    /\b(let's\s+build|lets\s+build|start\s+to\s+build|now\s+build|please\s+build|go\s+ahead\s+and\s+build)\b/i,
-    /\b(build\s+(it|this|the|a|an|me|another|app|application|software|service|project))\b/i,
-    /\b(create\s+(it|this|the|a|an|me|another|app|application|software|service|project))\b/i,
-    /\b(implement\s+(it|this|the|a|an|features|architecture|plan))\b/i,
-    /\b(execute\s+(the\s+plan|the\s+build|it|now))\b/i,
-    /\b(write\s+(the\s+code|the\s+files|code))\b/i,
-    /\b(make\s+it\s+happen\s+in\s+the\s+background|run\s+in\s+(the\s+)?background|happening\s+in\s+(the\s+)?background)\b/i,
-    /\b(synchronize\s+that|sync\s+that|synchronize\s+the\s+code|sync\s+with\s+the\s+code)\b/i,
-    /\b(execution\s+mode|hard-commit|file-write\s+protocols)\b/i,
-    /\b(i\s+(want|wanted|said)\s+(you\s+to\s+|for\s+)?(build|make|create|develop|code|generate|improve|expand|upgrade|work\s+on))\b/i,
-    /\b(tell\s+rex\s+to\s+(build|make|create|develop|code|generate|improve|expand|upgrade|work\s+on))\b/i,
-    /\b(can\s+you\s+(please\s+)?(build|make|create|develop|code|generate|improve|expand|upgrade|work\s+on))\b/i,
-    /\b(could\s+you\s+(please\s+)?(build|make|create|develop|code|generate|improve|expand|upgrade|work\s+on))\b/i,
-    /\b(please\s+(build|make|create|develop|code|generate|improve|expand|upgrade|work\s+on))\b/i,
-    /\b(build|make|create|develop|code)\s+me\s+(an?\s+)?\b/i,
-    /\b(build|make|create|develop|code|work\s+on)\s+(an?\s+|the\s+)?(app|application|website|tool|dashboard|system|platform|calculator|tracker|portal|game|project|store)\b/i,
-    /^\s*(build|create|develop|code|scaffold|implement|generate|improve|enhance|expand|upgrade)\s+/i,
-    /^\s*(change the|update the|fix the|tweak the|set the|make the)\s+(color|font|padding|background|bg|text|size|style|layout|title|button|nav|header|footer|margin|border)\b/i,
-    /^\s*(add|modify|update|refactor|edit|improve|expand|upgrade)\s+(a\s+|an\s+|the\s+)?([a-z0-9\s_-]{2,40})\s+(to|in|into|on)\s+(the\s+|this\s+|my\s+)?(app|application|project|code|component|page|dashboard|store|tracker|calculator|src\/)/i,
-    /\b(modify|update|edit|refactor|improve|expand|upgrade)\s+(src\/components\/App\.tsx|App\.tsx|the\s+code|the\s+application|the\s+project|the\s+component)\b/i,
-    /\b(take\s+(it|this|the\s+project|the\s+app)\s+to\s+(an?\s+)?(entire\s+)?product\s+level|keep\s+working\s+on\s+(it|this|that|the\s+project))\b/i,
-    /\b(yes\s+we\s+should\s+start\s+building|we\s+should\s+start\s+building|start\s+actual\s+building|start\s+the\s+actual\s+building|have\s+a\s+plan\s+and\s+then\s+start\s+actual\s+building)\b/i,
-  ];
-
-  const isExplicitBuild = isIncrementalWorkspaceEdit || buildCommandPatterns.some((pattern) => pattern.test(trimmed));
-  if (isExplicitBuild) {
+  if (isUnifiedBuildIntent) {
     return { isConversational: false };
+  }
+
+  // PRIORITY 0.6: Explicit Meta-Questions, Explanations, Inquiries, & Multimodal Reviews
+  const isQuestionOrMetaInquiry =
+    /^(check if|why |how |what |can you explain|could you explain|did you|are you|do you|tell me about|explain |clarify |here's the proof|heres the proof|other than that|when i tried|i have a question|quick question|my question is)/i.test(trimmed) ||
+    /\b(pre-fed|prefed|hardcoded|why is it|why are you|answering me|follow-up|follow up|understanding the entire question|keywords and intents|what do you think|what is your take|what's your opinion|are you stuck|did you freeze|are you frozen|other tabs|code files|look through the screenshot|multimodal direction|capability to look|look at the screenshot|screenshot of the errors)\b/i.test(trimmed);
+
+  if (isQuestionOrMetaInquiry) {
+    return {
+      isConversational: true,
+      emotion: "warm",
+    };
   }
 
   // PRIORITY 0.7: Explicit Test On-Demand Commands (Scenario B)
@@ -803,10 +785,10 @@ function detectProjectContext(
 } {
   // Check if this is an incremental edit or product-level iteration on an already-active project in this session
   const isIncrementalEdit =
-    /^\s*(?:(?:hey\s+rex|rex|please|can\s+you|could\s+you|i\s+want\s+you\s+to|let's|lets)\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|tweak|set|make|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|polish|integrate|support|take|keep\s+working|continue\s+building|iterate|work\s+on)\b/i.test(
+    /^\s*(?:(?:hey\s+rex|rex|please|can\s+you|could\s+you|i\s+want\s+you\s+to|let's|lets)\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|tweak|set|make|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|polish|integrate|support|take|keep\s+working|continue\s+building|iterate|work\s+on|use|switch|replace|restyle)\b/i.test(
       text.trim()
     ) ||
-    /\b(make\s+changes|add\s+a?\s*features?|take\s+(it|this|the\s+project|the\s+app)\s+to|entire\s+product\s+level|full\s+product\s+level|product\s+level|improve\s+(the|this)\s+(project|app|application|ui|code)|keep\s+working\s+on\s+(it|this|that|the\s+project))\b/i.test(
+    /\b(make\s+(the\s+)?changes?|use\s+(some\s+)?(other|another|different|new|better|modern|dark|light)\s+(theme|ui|design|style|colors?|palette|layout|elements?|components?)|don'?t\s+like\s+the\s+(ui|design|theme|look|layout|style|colors?)|change\s+the\s+(ui|theme|design|style|layout|colors?|elements?)|update\s+the\s+(ui|theme|design|style|layout|elements?|app|application)|redesign\s+(the|it|this)|add\s+a?\s*features?|take\s+(it|this|the\s+project|the\s+app)\s+to|entire\s+product\s+level|full\s+product\s+level|product\s+level|improve\s+(the|this)\s+(project|app|application|ui|code)|keep\s+working\s+on\s+(it|this|that|the\s+project))\b/i.test(
       text.trim()
     );
   if (isIncrementalEdit && sessionId) {
@@ -859,6 +841,25 @@ function detectProjectContext(
     };
   }
 
+  // Priority check: Todo / Task List Application
+  if (
+    /\b(todo|to-do|to\s+do(\s+list)?|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(combinedAll)
+  ) {
+    return {
+      type: "custom",
+      title: "TaskFlow — Smart To-Do & Productivity Suite",
+      planSteps: [
+        { agent_name: "planner", description: "Architect TaskFlow To-Do List Suite (Task Matrix, Priority Filters, Categories, Subtasks & LocalStorage Persistence)", files: ["src/components/App.tsx", "src/types/index.ts"] },
+        { agent_name: "coder", description: "Synthesize TaskFlow interactive To-Do application via Claude Sonnet 5.5 (claude-sonnet-5-5)", files: ["src/components/App.tsx", "src/types/index.ts", "package.json"] },
+        { agent_name: "executor", description: "Compile React application bundle via Bun build and verify zero module errors", files: ["package.json", "dist/App.js"] },
+        { agent_name: "reviewer", description: "Audit task state transitions, keyboard accessibility, and responsive layout invariants", files: ["src/components/App.tsx"] },
+        { agent_name: "tester", description: "Execute automated unit test suite for task creation, completion, and priority filtering", files: ["tests/app.test.ts"] },
+        { agent_name: "documenter", description: "Author TaskFlow architectural specification and user guide in README.md", files: ["README.md"] },
+      ],
+      files: [],
+    };
+  }
+
   // 1. Check if the user is issuing a continuation or agreement phrase
   const isContinuationOrAgreement =
     /^(yes|yeah|sure|okay|ok|start building|start actual building|start coding|we should start|build it|make it|create it|code it|go ahead|now build|start|let's go|do it|proceed)[\s.!?]*$/i.test(text.trim()) ||
@@ -885,7 +886,7 @@ function detectProjectContext(
         break;
       }
       const pastMatch =
-        past.match(/(?:build|make|create|develop|code|work on)\s+(?:me\s+)?(?:an?\s+)?([a-zA-Z0-9\s-]{3,50}?)(?:\s+app|\s+application|\s+system|\s+platform|\s+tool|\s+website|\s+for|\.|\?|$)/i);
+        past.match(/(?:build|make|create|develop|code|work on)\s+(?:me\s+)?(?:an?\s+|that\s+|this\s+|the\s+)?([a-zA-Z0-9\s-]{3,50}?)(?:\s+app|\s+application|\s+system|\s+platform|\s+tool|\s+website|\s+for|\.|\?|$)/i);
       if (pastMatch && pastMatch[1]?.trim() && !/^(it|that|this|something|anything)$/i.test(pastMatch[1].trim())) {
         cleanTitle = pastMatch[1].trim();
         break;
@@ -894,37 +895,23 @@ function detectProjectContext(
   }
 
   if (!cleanTitle) {
-    const match =
-      text.match(/(?:build|make|create|develop|code|scaffold|work on)\s+(?:me\s+)?(?:an?\s+)?([a-zA-Z0-9\s-]{3,50}?)(?:\s+app|\s+application|\s+system|\s+platform|\s+tool|\s+website|\s+with|\s+that|\s+for|\.|\?|$)/i) ||
-      text.match(/(?:app|application|system|platform|tool)\s+for\s+([a-zA-Z0-9\s-]{3,50})/i);
-    if (match && match[1]?.trim() && !/^(it|that|this|something|anything)$/i.test(match[1].trim())) {
-      cleanTitle = match[1].trim();
+    const extracted = extractProjectName(text, history);
+    if (extracted && extracted !== "VyrexoApp") {
+      cleanTitle = extracted;
     } else {
-      let clean = text
-        .replace(/^(hey rex|rex|can you|could you|please|i want to|i told you to|i asked you to|let's|lets)\s+/i, "")
-        .replace(/^(build|make|create|develop|code)\s+(me\s+)?(an?\s+)?/i, "")
-        .replace(/^(i think i am|i think|i agree|i feel|sounds like|sounds good)\s+/i, "")
-        .replace(/\b(completely a green|a green with|agree with your idea|agree with you)\b/i, "")
-        .trim();
-
-      // If the remaining clean text is just conversational filler, look back in history
-      if (!clean || clean.split(/\s+/).length < 2 || /^(so|then|and|ok|yes|now|it|that|this|idea)$/i.test(clean)) {
-        for (let i = history.length - 1; i >= 0; i--) {
-          const past = history[i].content;
-          const matchApp = past.match(/(?:###|\d+\.|\*\*)\s*([A-Za-z0-9\s-]{3,30}?)(?:\*\*|—|:|-)/);
-          if (matchApp && matchApp[1]) {
-            clean = matchApp[1].trim();
-            break;
-          }
-        }
+      const match =
+        text.match(/(?:build|make|create|develop|code|scaffold|work on)\s+(?:me\s+)?(?:an?\s+|that\s+|this\s+|the\s+)?([a-zA-Z0-9\s-]{3,50}?)(?:\s+app|\s+application|\s+system|\s+platform|\s+tool|\s+website|\s+with|\s+that|\s+for|\.|\?|$)/i) ||
+        text.match(/(?:app|application|system|platform|tool)\s+for\s+([a-zA-Z0-9\s-]{3,50})/i);
+      if (match && match[1]?.trim() && !/^(it|that|this|something|anything|a\s+new)$/i.test(match[1].trim())) {
+        cleanTitle = match[1].replace(/^(that|this|the|my|our|a|an|new)\s+/i, "").trim();
+      } else {
+        cleanTitle = extracted || "Interactive Web Application";
       }
-
-      cleanTitle = (clean.charAt(0).toUpperCase() + clean.slice(1)).slice(0, 50) || "Flowstate OS";
     }
   }
 
   cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1);
-  if (!cleanTitle.toLowerCase().includes("app") && !cleanTitle.toLowerCase().includes("system") && !cleanTitle.toLowerCase().includes("platform") && !cleanTitle.toLowerCase().includes("os") && cleanTitle.length < 25) {
+  if (!cleanTitle.toLowerCase().includes("app") && !cleanTitle.toLowerCase().includes("system") && !cleanTitle.toLowerCase().includes("platform") && !cleanTitle.toLowerCase().includes("suite") && !cleanTitle.toLowerCase().includes("os") && cleanTitle.length < 25) {
     cleanTitle = `${cleanTitle} Application`;
   }
 
@@ -946,10 +933,51 @@ function detectProjectContext(
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const text: string = body.message || body.text || "";
+    const rawText: string = body.message || body.text || "";
     const history: Array<{ role: string; content: string }> = body.history || [];
-    const sessionId: string = body.sessionId || body.session || "default";
+    const rawSessionId: string = (body.sessionId || body.session || "").trim();
+    const sessionId: string =
+      !rawSessionId || rawSessionId === "default" ? `s_${Date.now().toString(36)}` : rawSessionId;
+    const userId: string = (body.userId || body.user_id || request.headers.get("x-user-id") || "").trim();
+    const forceBuildTask: boolean = Boolean(body.forceBuildTask);
     const incomingImages: string[] = Array.isArray(body.images) ? body.images : [];
+
+    // 1. Block legacy shared session IDs and verify session ownership
+    if (isBlockedLegacySessionId(sessionId) || !verifySessionProjectOwnership(sessionId, userId || null)) {
+      recordCrossUserBlock(sessionId, userId, "/api/chat");
+      return NextResponse.json(
+        { ok: false, error: "Forbidden: session belongs to another user or is invalid." },
+        { status: 403 }
+      );
+    }
+
+    // 2. Flexible rate limit check (unrestricted during development & demonstrations)
+    const rateCheck = checkRateLimit(userId || sessionId);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { ok: false, error: "Rate limit exceeded. Please wait a moment before sending another request." },
+        { status: 429 }
+      );
+    }
+
+    // 3. Prompt injection & secret exfiltration inspection
+    const promptInspection = inspectUntrustedInput(rawText, {
+      sessionId,
+      userId,
+      source: "user",
+    });
+    if (promptInspection.requiresBlock) {
+      return NextResponse.json({
+        ok: true,
+        isTask: false,
+        chatTitle: "Security Policy Notice",
+        reply: `🛡️ **Security Governance Guardrail**: I cannot fulfill requests that attempt to expose server credentials, environment variables, system prompts, or execute unsafe host commands.`,
+        spokenReply:
+          "For security reasons, I cannot expose environment variables, secret keys, or execute unsafe system commands.",
+        emotion: "calm",
+      });
+    }
+    const text = promptInspection.sanitizedText;
 
     // Save newly uploaded images into session memory
     if (incomingImages.length > 0) {
@@ -971,9 +999,18 @@ export async function POST(request: NextRequest) {
     }
 
     const intent = classifyIntent(text, history, sessionId);
+    const isCodingTask = forceBuildTask || !intent.isConversational;
+    const routeDecision = recordAgentRouting({
+      isCodingTask,
+      sessionId,
+      userId,
+      reason: isCodingTask
+        ? "Imperative software implementation/modification command routed to Claude Sonnet 5.5"
+        : "Conversational/voice dialogue routed to Gemini",
+    });
 
     // If it's an explicit software build command, incremental code modification, or background execution demand:
-    if (!intent.isConversational) {
+    if (isCodingTask) {
       const projectData = detectProjectContext(text, history, sessionId);
 
       // Execute the real autonomous pipeline powered by Claude Sonnet 5.5 (`claude-sonnet-5-5`):
@@ -990,6 +1027,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         ok: true,
         isTask: true,
+        traceId: routeDecision.traceId,
+        routedAgent: routeDecision.agent,
+        routedModel: routeDecision.model,
         projectType: projectData.type,
         projectTitle: execResult.projectTitle,
         chatTitle: generateChatTitle(text, execResult.projectTitle),
@@ -999,7 +1039,7 @@ export async function POST(request: NextRequest) {
         testing: execResult.testing,
         workspacePath: execResult.workspacePath,
         previewUrl: execResult.previewUrl,
-        summary: execResult.summary,
+        summary: redactSensitiveData(execResult.summary),
         message: text,
       });
     }
@@ -1158,6 +1198,19 @@ You can interact directly with the running application anytime in the **Preview*
       } else {
         targetUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
       }
+
+      const urlCheck = validateSafeExternalUrl(targetUrl, { sessionId, userId });
+      if (!urlCheck.allowed) {
+        return NextResponse.json({
+          ok: true,
+          isTask: false,
+          chatTitle: "Browser Security Notice",
+          reply: `🛡️ **Browser SSRF Guard**: Navigation to \`${targetUrl}\` was blocked (${urlCheck.reason}).`,
+          spokenReply: "That URL points to a restricted internal or local network address and was blocked.",
+          emotion: "calm",
+        });
+      }
+      targetUrl = urlCheck.normalizedUrl;
 
       // Check if local agent daemon is reachable on user machine
       const localHealth = await checkLocalAgentHealth();

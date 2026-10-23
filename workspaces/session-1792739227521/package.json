@@ -1,0 +1,14 @@
+{
+  "name": "auramart-fine-jewellery-atelier",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "bun build src/components/App.tsx --outdir dist",
+    "test": "bun test tests/app.test.ts"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

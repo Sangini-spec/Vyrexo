@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   readPersistedSessions,
   writePersistedSessions,
+  getSessionOwner,
+  isBlockedLegacySessionId,
+  deleteUserSession,
 } from "@/lib/session-persistent-storage";
 import {
   clearSessionChatHistory,
   getSessionProject,
   getSessionChatHistory,
+  removeSessionConnectedProject,
 } from "@/lib/project-session-store";
 import {
   isPlaceholderOrBadSessionName,
@@ -19,9 +23,22 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
-  const userId = body.user_id || "dev-local-user";
+  const userId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
   const requestedName = (body.name || "").trim();
 
+  if (!id || isBlockedLegacySessionId(id)) {
+    return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 403 });
+  }
+
+  const existingOwner = getSessionOwner(id);
+  if (existingOwner && userId && existingOwner !== userId) {
+    return NextResponse.json(
+      { ok: false, error: "Forbidden: session belongs to another user" },
+      { status: 403 }
+    );
+  }
+
+  const targetUserId = userId || existingOwner || "";
   const proj = getSessionProject(id);
   const history = getSessionChatHistory(id);
   const semanticName = !isPlaceholderOrBadSessionName(requestedName)
@@ -29,26 +46,27 @@ export async function PATCH(
     : resolveSemanticSessionName(requestedName, id, proj?.title, history);
 
   try {
-    const store: Map<string, any[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
-    const list = store?.get(userId) || readPersistedSessions(userId) || [];
-    const idx = list.findIndex((s: any) => s.id === id);
-    if (idx >= 0) {
-      const existingName = list[idx].name;
-      // Only overwrite an existing good semantic name if the requested name is also a valid semantic name
-      const finalName =
-        !isPlaceholderOrBadSessionName(requestedName)
-          ? requestedName
-          : !isPlaceholderOrBadSessionName(existingName)
-            ? existingName
-            : semanticName;
-      list[idx] = { ...list[idx], name: finalName, updatedAt: Date.now() };
-      if (store) store.set(userId, list);
-      writePersistedSessions(userId, list);
-      return NextResponse.json({
-        ok: true,
-        sessionId: id,
-        name: finalName,
-      });
+    if (targetUserId) {
+      const store: Map<string, any[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
+      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId) || [];
+      const idx = list.findIndex((s: any) => s.id === id);
+      if (idx >= 0) {
+        const existingName = list[idx].name;
+        const finalName =
+          !isPlaceholderOrBadSessionName(requestedName)
+            ? requestedName
+            : !isPlaceholderOrBadSessionName(existingName)
+              ? existingName
+              : semanticName;
+        list[idx] = { ...list[idx], name: finalName, updatedAt: Date.now() };
+        if (store) store.set(targetUserId, list);
+        writePersistedSessions(targetUserId, list);
+        return NextResponse.json({
+          ok: true,
+          sessionId: id,
+          name: finalName,
+        });
+      }
     }
   } catch {}
 
@@ -65,15 +83,33 @@ export async function DELETE(
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const userId = searchParams.get("user_id") || "dev-local-user";
+  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+
+  if (!id) {
+    return NextResponse.json({ ok: false, error: "Session ID required" }, { status: 400 });
+  }
+
+  const existingOwner = getSessionOwner(id);
+  if (existingOwner && userId && existingOwner !== userId) {
+    return NextResponse.json(
+      { ok: false, error: "Forbidden: session belongs to another user" },
+      { status: 403 }
+    );
+  }
+
+  const targetUserId = userId || existingOwner || "";
 
   try {
     const store: Map<string, any[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
-    const list = store?.get(userId) || readPersistedSessions(userId) || [];
-    const filtered = list.filter((s: any) => s.id !== id);
-    if (store) store.set(userId, filtered);
-    writePersistedSessions(userId, filtered);
+    if (targetUserId) {
+      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId) || [];
+      const filtered = list.filter((s: any) => s.id !== id);
+      if (store) store.set(targetUserId, filtered);
+      writePersistedSessions(targetUserId, filtered);
+    }
     clearSessionChatHistory(id);
+    removeSessionConnectedProject(id);
+    deleteUserSession(id, targetUserId || undefined);
   } catch {}
 
   return NextResponse.json({
@@ -81,3 +117,4 @@ export async function DELETE(
     sessionId: id,
   });
 }
+

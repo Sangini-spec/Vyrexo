@@ -121,21 +121,8 @@ export function removeOpenAIConfig(): void {
  * Saves or updates OpenAI configuration to disk for persistent runtime use.
  */
 export function saveOpenAIConfig(apiKey: string, model: string = "gpt-4o"): void {
-  const cfgPath = resolveConfigPath();
-  const dir = path.dirname(cfgPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  const data = {
-    openAiApiKey: apiKey.trim(),
-    openAiModel: model.trim() || "gpt-4o",
-    updatedAt: new Date().toISOString(),
-  };
-
-  fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf-8");
   process.env.OPENAI_API_KEY = apiKey.trim();
-  process.env.OPENAI_MODEL = model.trim();
+  process.env.OPENAI_MODEL = model.trim() || "gpt-4o";
   resetOpenAIKeyExhaustion(apiKey);
 }
 
@@ -450,23 +437,6 @@ export function getChariotConfig(): ChariotConfig {
     };
   }
 
-  // Check persistent disk config
-  const cfgPath = resolveConfigPath();
-  if (fs.existsSync(cfgPath)) {
-    try {
-      const raw = fs.readFileSync(cfgPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed.chariotApiKey) {
-        return {
-          chariotApiKey: parsed.chariotApiKey.trim(),
-          chariotBaseUrl: parsed.chariotBaseUrl?.trim() || envBaseUrl,
-          chariotModel: parsed.chariotModel?.trim() || envModel,
-          source: "disk",
-        };
-      }
-    } catch {}
-  }
-
   return {
     chariotApiKey: null,
     chariotBaseUrl: envBaseUrl,
@@ -476,35 +446,13 @@ export function getChariotConfig(): ChariotConfig {
 }
 
 /**
- * Saves or updates Chariot configuration to disk for persistent runtime use.
+ * Updates Chariot configuration in server memory without writing raw API keys to disk.
  */
 export function saveChariotConfig(
   apiKey: string,
   baseUrl: string = "https://api.chariot.in",
   model: string = "chariot-tts-v0"
 ): void {
-  const cfgPath = resolveConfigPath();
-  const dir = path.dirname(cfgPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  let existing: any = {};
-  if (fs.existsSync(cfgPath)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
-    } catch {}
-  }
-
-  const data = {
-    ...existing,
-    chariotApiKey: apiKey.trim(),
-    chariotBaseUrl: baseUrl.trim() || "https://api.chariot.in",
-    chariotModel: model.trim() || "chariot-tts-v0",
-    updatedAt: new Date().toISOString(),
-  };
-
-  fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf-8");
   process.env.CHARIOT_API_KEY = apiKey.trim();
   process.env.CHARIOT_BASE_URL = baseUrl.trim() || "https://api.chariot.in";
   process.env.CHARIOT_MODEL = model.trim() || "chariot-tts-v0";
@@ -606,22 +554,6 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
     };
   }
 
-  // Check persistent disk config
-  const cfgPath = resolveConfigPath();
-  if (fs.existsSync(cfgPath)) {
-    try {
-      const raw = fs.readFileSync(cfgPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed.elevenLabsApiKey) {
-        return {
-          elevenLabsApiKey: parsed.elevenLabsApiKey.trim(),
-          elevenLabsModel: parsed.elevenLabsModel?.trim() || envModel,
-          source: "disk",
-        };
-      }
-    } catch {}
-  }
-
   return {
     elevenLabsApiKey: null,
     elevenLabsModel: envModel,
@@ -630,33 +562,12 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
 }
 
 /**
- * Saves or updates ElevenLabs configuration to disk for persistent runtime use.
+ * Updates ElevenLabs configuration in server memory without writing raw API keys to disk.
  */
 export function saveElevenLabsConfig(
   apiKey: string,
   model: string = "eleven_turbo_v2_5"
 ): void {
-  const cfgPath = resolveConfigPath();
-  const dir = path.dirname(cfgPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  let existing: any = {};
-  if (fs.existsSync(cfgPath)) {
-    try {
-      existing = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
-    } catch {}
-  }
-
-  const data = {
-    ...existing,
-    elevenLabsApiKey: apiKey.trim(),
-    elevenLabsModel: model.trim() || "eleven_turbo_v2_5",
-    updatedAt: new Date().toISOString(),
-  };
-
-  fs.writeFileSync(cfgPath, JSON.stringify(data, null, 2), "utf-8");
   process.env.ELEVENLABS_API_KEY = apiKey.trim();
   process.env.ELEVENLABS_MODEL = model.trim() || "eleven_turbo_v2_5";
 }

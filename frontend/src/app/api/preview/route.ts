@@ -914,9 +914,10 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const rawSessionId = url.searchParams.get("session") || url.searchParams.get("sessionId");
   const sessionId =
-    !rawSessionId || rawSessionId === "default" ? "session-1790005321834" : rawSessionId;
+    !rawSessionId || rawSessionId === "default" ? "" : rawSessionId;
   const template = url.searchParams.get("template");
   const customHtml = url.searchParams.get("html");
+
 
   let htmlToServe: string;
 

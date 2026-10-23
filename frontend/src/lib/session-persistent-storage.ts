@@ -18,6 +18,24 @@ export interface SessionChatTurn {
   timestamp: number;
 }
 
+// Legacy pre-seeded or test session IDs that must never be assigned to users
+const BLOCKED_LEGACY_SESSION_IDS = new Set([
+  "session-1790005321834",
+  "session-default-1",
+  "session-default-2",
+  "default",
+  "test-session",
+  "test-session-1",
+  "test-session-finance",
+  "test-session-flight",
+  "railgo-train-booking",
+]);
+
+export function isBlockedLegacySessionId(sessionId?: string | null): boolean {
+  if (!sessionId) return true;
+  return BLOCKED_LEGACY_SESSION_IDS.has(sessionId);
+}
+
 // Determine persistent data root directory (.data at root level)
 function getDataDir(): string {
   const root = process.cwd().endsWith("frontend")
@@ -28,7 +46,6 @@ function getDataDir(): string {
     try {
       fs.mkdirSync(root, { recursive: true });
     } catch {
-      // fallback to local directory if root unwritable
       return path.resolve(process.cwd(), ".data");
     }
   }
@@ -44,17 +61,6 @@ function getChatsDir(): string {
   }
   return cDir;
 }
-
-const DEFAULT_SESSIONS: SessionRecord[] = [
-  {
-    id: "session-1790005321834",
-    user_id: "dev-local-user",
-    name: "RailGo Train Booking",
-    icon: "🚆",
-    createdAt: Date.now() - 1000 * 60 * 15,
-    updatedAt: Date.now() - 1000 * 60 * 15,
-  },
-];
 
 // In-memory cache for ultra-fast access, backed by disk
 const memorySessions = new Map<string, SessionRecord[]>();
@@ -106,20 +112,76 @@ function writeDiskTombstones(data: Record<string, string[]>): void {
 }
 
 /**
- * Get all sessions for a user, maintaining persistence across app reloads & restarts.
+ * Returns the user_id that owns a given sessionId, or null if no user owns it.
  */
-export function getUserSessions(userId: string = "dev-local-user"): SessionRecord[] {
-  // Check memory cache
+export function getSessionOwner(sessionId: string): string | null {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
+
+  for (const [uid, list] of Array.from(memorySessions.entries())) {
+    if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
+      return uid;
+    }
+  }
+
+  const diskData = readDiskSessions();
+  for (const [uid, list] of Object.entries(diskData)) {
+    if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
+      return uid;
+    }
+  }
+
+  const globalStore: Map<string, SessionRecord[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
+  if (globalStore) {
+    for (const [uid, list] of Array.from(globalStore.entries())) {
+      if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
+        return uid;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Checks whether the given userId is allowed to access or modify the given sessionId.
+ * - Blocked legacy/demo session IDs are always denied.
+ * - If the session is already owned by another user, access is strictly denied.
+ */
+export function canUserAccessSession(
+  sessionId: string,
+  userId?: string | null,
+  requireExistingOwnership = false
+): boolean {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return false;
+  if (!userId) return false;
+
+  const owner = getSessionOwner(sessionId);
+  if (owner) {
+    return owner === userId;
+  }
+
+  return !requireExistingOwnership;
+}
+
+/**
+ * Get all sessions strictly created by and assigned to `userId`.
+ * Brand-new users always receive an empty list `[]`.
+ */
+export function getUserSessions(userId?: string | null): SessionRecord[] {
+  if (!userId) return [];
+
   let userList = memorySessions.get(userId);
   if (!userList) {
     const diskData = readDiskSessions();
     if (diskData[userId] && Array.isArray(diskData[userId])) {
       userList = diskData[userId];
       memorySessions.set(userId, userList);
+    } else {
+      userList = [];
+      memorySessions.set(userId, userList);
     }
   }
 
-  // Load tombstones (sessions deleted by the user)
   let tombstones = memoryTombstones.get(userId);
   if (!tombstones) {
     const diskTombstones = readDiskTombstones();
@@ -127,35 +189,32 @@ export function getUserSessions(userId: string = "dev-local-user"): SessionRecor
     memoryTombstones.set(userId, tombstones);
   }
 
-  // If user has never had any session records and has never deleted default sessions
-  if (!userList || userList.length === 0) {
-    const diskData = readDiskSessions();
-    if (diskData[userId] && Array.isArray(diskData[userId])) {
-      userList = diskData[userId];
-    } else if (tombstones.size === 0) {
-      // Brand new user: initialize with default sessions and write immediately to disk
-      userList = [...DEFAULT_SESSIONS];
-      diskData[userId] = userList;
-      writeDiskSessions(diskData);
-    } else {
-      userList = [];
-    }
-    memorySessions.set(userId, userList);
-  }
+  const activeSessions = (userList || []).filter(
+    (s) =>
+      s &&
+      s.id &&
+      !isBlockedLegacySessionId(s.id) &&
+      (!s.user_id || s.user_id === userId) &&
+      !tombstones?.has(s.id)
+  );
 
-  // Filter out any tombstoned sessions
-  const activeSessions = (userList || []).filter((s) => !tombstones?.has(s.id));
   return [...activeSessions].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 
 /**
- * Save or update a session record on disk.
+ * Save or update a session record on disk, enforcing strict user ownership.
  */
-export function saveUserSession(userId: string = "dev-local-user", record: SessionRecord): SessionRecord {
+export function saveUserSession(userId: string, record: SessionRecord): SessionRecord | null {
+  if (!userId || !record?.id || isBlockedLegacySessionId(record.id)) return null;
+
+  const existingOwner = getSessionOwner(record.id);
+  if (existingOwner && existingOwner !== userId) {
+    return null;
+  }
+
   const current = getUserSessions(userId);
   const tombstones = memoryTombstones.get(userId) || new Set<string>();
 
-  // If resurrecting/updating a session, remove from tombstones
   if (tombstones.has(record.id)) {
     tombstones.delete(record.id);
     const diskTombstones = readDiskTombstones();
@@ -167,6 +226,7 @@ export function saveUserSession(userId: string = "dev-local-user", record: Sessi
   const now = Date.now();
   const updatedRecord: SessionRecord = {
     ...record,
+    user_id: userId,
     updatedAt: now,
   };
 
@@ -188,55 +248,34 @@ export function saveUserSession(userId: string = "dev-local-user", record: Sessi
 }
 
 /**
- * Rename a session by its ID. Updates persistent storage and cache.
+ * Rename a session by its ID, strictly scoped to `userId`.
  */
 export function renameUserSession(sessionId: string, newName: string, userId?: string): SessionRecord | null {
   const cleanName = newName.trim();
-  if (!cleanName) return null;
+  if (!cleanName || !userId || isBlockedLegacySessionId(sessionId)) return null;
+
+  const existingOwner = getSessionOwner(sessionId);
+  if (existingOwner && existingOwner !== userId) {
+    return null;
+  }
 
   const diskData = readDiskSessions();
-
-  // If userId provided, check that user first
-  const targetUsers = userId ? [userId] : Object.keys(diskData);
-  if (!targetUsers.includes("dev-local-user")) {
-    targetUsers.push("dev-local-user");
-  }
-
-  let foundUser: string | null = null;
-  let targetIdx = -1;
-
-  for (const u of targetUsers) {
-    const list = diskData[u] || memorySessions.get(u) || [];
-    const idx = list.findIndex((s) => s.id === sessionId);
-    if (idx >= 0) {
-      foundUser = u;
-      targetIdx = idx;
-      break;
-    }
-  }
-
-  // Fallback to dev-local-user if not found anywhere else
-  if (!foundUser) {
-    foundUser = userId || "dev-local-user";
-    const userList = getUserSessions(foundUser);
-    targetIdx = userList.findIndex((s) => s.id === sessionId);
-  }
-
-  const userList = [...(diskData[foundUser] || getUserSessions(foundUser))];
+  const userList = [...getUserSessions(userId)];
+  const targetIdx = userList.findIndex((s) => s.id === sessionId);
   let updatedRecord: SessionRecord;
 
   if (targetIdx >= 0) {
     userList[targetIdx] = {
       ...userList[targetIdx],
+      user_id: userId,
       name: cleanName,
       updatedAt: Date.now(),
     };
     updatedRecord = userList[targetIdx];
   } else {
-    // If session was freshly created in client, register and rename
     updatedRecord = {
       id: sessionId,
-      user_id: foundUser,
+      user_id: userId,
       name: cleanName,
       icon: "🚀",
       createdAt: Date.now(),
@@ -245,50 +284,49 @@ export function renameUserSession(sessionId: string, newName: string, userId?: s
     userList.unshift(updatedRecord);
   }
 
-  memorySessions.set(foundUser, userList);
-  diskData[foundUser] = userList;
+  memorySessions.set(userId, userList);
+  diskData[userId] = userList;
   writeDiskSessions(diskData);
 
   return updatedRecord;
 }
 
 /**
- * Delete a session permanently by its ID, persisting deletion to disk.
+ * Delete a session permanently by its ID, strictly scoped to `userId`.
  */
 export function deleteUserSession(sessionId: string, userId?: string): boolean {
+  if (!userId || !sessionId) return false;
+
+  const existingOwner = getSessionOwner(sessionId);
+  if (existingOwner && existingOwner !== userId) {
+    return false;
+  }
+
   const diskData = readDiskSessions();
   const diskTombstones = readDiskTombstones();
 
-  const targetUsers = userId ? [userId] : Object.keys(diskData);
-  if (!targetUsers.includes("dev-local-user")) {
-    targetUsers.push("dev-local-user");
-  }
+  const current = diskData[userId] || memorySessions.get(userId) || [];
+  diskData[userId] = current.filter((s) => s.id !== sessionId);
+  memorySessions.set(userId, diskData[userId]);
 
-  for (const u of targetUsers) {
-    const current = diskData[u] || memorySessions.get(u) || [];
-    diskData[u] = current.filter((s) => s.id !== sessionId);
-    memorySessions.set(u, diskData[u]);
-
-    // Record tombstone so default sessions are never resurrected
-    const tSet = memoryTombstones.get(u) || new Set(diskTombstones[u] || []);
-    tSet.add(sessionId);
-    memoryTombstones.set(u, tSet);
-    diskTombstones[u] = Array.from(tSet);
-  }
+  const tSet = memoryTombstones.get(userId) || new Set(diskTombstones[userId] || []);
+  tSet.add(sessionId);
+  memoryTombstones.set(userId, tSet);
+  diskTombstones[userId] = Array.from(tSet);
 
   writeDiskSessions(diskData);
   writeDiskTombstones(diskTombstones);
 
-  // Delete chat history file on disk
   deleteChatHistory(sessionId);
 
   return true;
 }
 
 /**
- * Clear all sessions for a user.
+ * Clear all sessions strictly for the specified user (never touches other users' sessions).
  */
-export function clearAllUserSessions(userId: string = "dev-local-user"): void {
+export function clearAllUserSessions(userId: string): void {
+  if (!userId) return;
   const current = getUserSessions(userId);
   const diskTombstones = readDiskTombstones();
   const tSet = memoryTombstones.get(userId) || new Set(diskTombstones[userId] || []);
@@ -309,9 +347,10 @@ export function clearAllUserSessions(userId: string = "dev-local-user"): void {
 }
 
 /**
- * Clear sessions older than given days.
+ * Clear sessions older than given days for a specific user.
  */
-export function clearOlderUserSessions(days: number, userId: string = "dev-local-user"): { deletedCount: number; deletedIds: string[] } {
+export function clearOlderUserSessions(days: number, userId: string): { deletedCount: number; deletedIds: string[] } {
+  if (!userId) return { deletedCount: 0, deletedIds: [] };
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const current = getUserSessions(userId);
   const kept: SessionRecord[] = [];
@@ -350,11 +389,11 @@ function getChatFilePath(sessionId: string): string {
 }
 
 export function getChatHistory(sessionId: string): SessionChatTurn[] {
-  // Check memory cache first
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return [];
+
   const cached = memoryChats.get(sessionId);
   if (cached && cached.length > 0) return cached;
 
-  // Read from disk
   const fPath = getChatFilePath(sessionId);
   if (fs.existsSync(fPath)) {
     try {
@@ -371,6 +410,7 @@ export function getChatHistory(sessionId: string): SessionChatTurn[] {
 }
 
 export function saveChatHistory(sessionId: string, turns: SessionChatTurn[]): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
   memoryChats.set(sessionId, turns);
   try {
     const fPath = getChatFilePath(sessionId);
@@ -381,6 +421,7 @@ export function saveChatHistory(sessionId: string, turns: SessionChatTurn[]): vo
 }
 
 export function appendChatTurn(sessionId: string, turn: Omit<SessionChatTurn, "timestamp"> & { timestamp?: number }): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
   const current = getChatHistory(sessionId);
   const newTurn: SessionChatTurn = {
     role: turn.role,
@@ -405,23 +446,30 @@ export function deleteChatHistory(sessionId: string): void {
 
 // ── Compatibility Exports for Session & Chat Persistence ─────────────────────
 
-export function readPersistedSessions(userId: string = "dev-local-user"): SessionRecord[] {
+export function readPersistedSessions(userId: string): SessionRecord[] {
+  if (!userId) return [];
   const diskData = readDiskSessions();
-  if (diskData[userId] && Array.isArray(diskData[userId]) && diskData[userId].length > 0) {
-    return diskData[userId];
+  if (diskData[userId] && Array.isArray(diskData[userId])) {
+    return diskData[userId].filter(
+      (s) => s && s.id && !isBlockedLegacySessionId(s.id) && (!s.user_id || s.user_id === userId)
+    );
   }
   return [];
 }
 
-export function writePersistedSessions(userId: string = "dev-local-user", sessions: SessionRecord[]): void {
-  memorySessions.set(userId, sessions);
+export function writePersistedSessions(userId: string, sessions: SessionRecord[]): void {
+  if (!userId) return;
+  const sanitized = sessions
+    .filter((s) => s && s.id && !isBlockedLegacySessionId(s.id))
+    .map((s) => ({ ...s, user_id: userId }));
+  memorySessions.set(userId, sanitized);
   const diskData = readDiskSessions();
-  diskData[userId] = sessions;
+  diskData[userId] = sanitized;
   writeDiskSessions(diskData);
 }
 
 export function findPersistedSessionById(sessionId: string): SessionRecord | null {
-  if (!sessionId) return null;
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
   const diskData = readDiskSessions();
   for (const list of Object.values(diskData)) {
     if (Array.isArray(list)) {
@@ -445,6 +493,7 @@ export function readPersistedHistories(): Record<string, SessionChatTurn[]> {
       for (const entry of entries) {
         if (entry.endsWith(".json")) {
           const sid = entry.slice(0, -5);
+          if (isBlockedLegacySessionId(sid)) continue;
           try {
             const raw = fs.readFileSync(path.join(dir, entry), "utf-8");
             const parsed = JSON.parse(raw);
@@ -482,4 +531,3 @@ export function clearAllPersistedHistories(): void {
     }
   } catch {}
 }
-

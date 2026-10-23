@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="14 14 456 132" width="456" height="132">
+  <defs>
+    <radialGradient id="orbU" cx="33%" cy="28%" r="78%">
+      <stop offset="0%" stop-color="#D6E2F0"/>
+      <stop offset="30%" stop-color="#5A7AA0"/>
+      <stop offset="66%" stop-color="#2B4270"/>
+      <stop offset="100%" stop-color="#0E1729"/>
+    </radialGradient>
+    <radialGradient id="rimGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="78%" stop-color="#7B93B0" stop-opacity="0"/>
+      <stop offset="92%" stop-color="#7B93B0" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#7B93B0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wordGrad" x1="0%" y1="0%" x2="100%" y2="60%">
+      <stop offset="0%" stop-color="#EDF2F8"/>
+      <stop offset="48%" stop-color="#9AB0CD"/>
+      <stop offset="100%" stop-color="#5A7AA0"/>
+    </linearGradient>
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#7DD3FC"/>
+      <stop offset="100%" stop-color="#C0C8D4"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(16,16) scale(0.64)">
+    <circle cx="100" cy="100" r="98" fill="url(#rimGlow)"/>
+    <circle cx="100" cy="100" r="94" fill="url(#orbU)"/>
+    <ellipse cx="70" cy="56" rx="42" ry="26" fill="#FFFFFF" opacity="0.18"/>
+    <path d="M80,66 L52,100 L80,134" fill="none" stroke="#F4F7FB" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M120,66 L148,100 L120,134" fill="none" stroke="#F4F7FB" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M84,100 L92,100 L97,82 L105,118 L112,86 L118,100 L124,100" fill="none" stroke="url(#waveGrad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="124" cy="100" r="4.5" fill="#7DD3FC"/>
+  </g>
+
+  <text x="168" y="100" font-family="'Outfit','Poppins','Segoe UI',Arial,sans-serif" font-size="56"
+        font-weight="700" letter-spacing="6" fill="url(#wordGrad)">VYREXO</text>
+</svg>

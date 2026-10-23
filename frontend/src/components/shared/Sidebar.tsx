@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { VyrexoLogo } from "./VyrexoLogo";
 
 export interface Session {
   id: string;
@@ -97,17 +98,13 @@ export function Sidebar({
       }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between p-[14px_16px] border-b border-[var(--border)] relative">
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[var(--border)] relative">
         <a
           href="/"
-          className="text-lg font-bold tracking-tight"
-          style={{
-            background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
-          }}
+          className="flex items-center group"
+          title="Vyrexo Home"
         >
-          Vyrexo
+          <VyrexoLogo size="sm" />
         </a>
         <div className="flex items-center gap-1.5">
           <div className="relative" ref={menuRef}>

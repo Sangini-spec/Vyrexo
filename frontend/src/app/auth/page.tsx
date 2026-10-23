@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { AtSign, ArrowLeft, Lock, User, KeyRound, CheckCircle2 } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
+import { VyrexoLogo } from "@/components/shared/VyrexoLogo";
 import Link from "next/link";
 
 function friendlyAuthError(message: string): string {
@@ -190,26 +191,8 @@ export default function AuthPage() {
           ))}
         </svg>
 
-        <Link href="/" className="relative z-10 flex items-center gap-2.5">
-          <span
-            className="flex h-9 w-9 items-center justify-center rounded-lg"
-            style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-            >
-              <rect x="3" y="3" width="8" height="8" rx="1.5" />
-              <rect x="13" y="3" width="8" height="8" rx="1.5" />
-              <rect x="3" y="13" width="8" height="8" rx="1.5" />
-              <rect x="13" y="13" width="8" height="8" rx="1.5" />
-            </svg>
-          </span>
-          <span className="text-xl font-semibold tracking-tight">Vyrexo</span>
+        <Link href="/" className="relative z-10 inline-flex items-center w-fit group">
+          <VyrexoLogo size="xl" forceDark={true} />
         </Link>
 
         <blockquote className="relative z-10 max-w-md">
@@ -234,26 +217,8 @@ export default function AuthPage() {
 
         <div className="flex flex-1 items-center justify-center px-6 pb-10 sm:px-10">
           <div className="w-full max-w-[400px]">
-            <Link href="/" className="mb-8 flex items-center gap-2.5 lg:hidden">
-              <span
-                className="flex h-8 w-8 items-center justify-center rounded-lg"
-                style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="2"
-                >
-                  <rect x="3" y="3" width="8" height="8" rx="1.5" />
-                  <rect x="13" y="3" width="8" height="8" rx="1.5" />
-                  <rect x="3" y="13" width="8" height="8" rx="1.5" />
-                  <rect x="13" y="13" width="8" height="8" rx="1.5" />
-                </svg>
-              </span>
-              <span className="text-lg font-semibold tracking-tight">Vyrexo</span>
+            <Link href="/" className="mb-8 inline-flex items-center lg:hidden group">
+              <VyrexoLogo size="lg" />
             </Link>
 
             {/* Header Titles */}

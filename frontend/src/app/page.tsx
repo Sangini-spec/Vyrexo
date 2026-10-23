@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
+import { VyrexoLogo } from "@/components/shared/VyrexoLogo";
 import { Neural3DCanvas } from "@/components/landing/Neural3DCanvas";
 import { Tilt3DCard } from "@/components/landing/Tilt3DCard";
 import { InteractiveVoiceHero } from "@/components/landing/InteractiveVoiceHero";
@@ -196,44 +197,17 @@ export default function LandingPage() {
             : "bg-transparent"
         }`}
       >
-        <div className="max-w-[1240px] mx-auto px-6 sm:px-8 py-4 sm:py-5 flex items-center justify-between">
-          {/* Logo */}
+        <div className="w-full px-5 sm:px-8 lg:px-12 xl:px-16 py-4 sm:py-5 flex items-center justify-between relative">
+          {/* Logo — flush left, larger, submerged directly into theme */}
           <Link
             href="/"
-            className="flex items-center gap-2.5 group cursor-pointer"
+            className="flex items-center group cursor-pointer flex-shrink-0"
           >
-            <span
-              className="flex h-8 w-8 items-center justify-center rounded-lg shadow-sm transition-transform duration-300 group-hover:scale-105"
-              style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="white"
-                strokeWidth="2"
-              >
-                <rect x="3" y="3" width="8" height="8" rx="1.5" />
-                <rect x="13" y="3" width="8" height="8" rx="1.5" />
-                <rect x="3" y="13" width="8" height="8" rx="1.5" />
-                <rect x="13" y="13" width="8" height="8" rx="1.5" />
-              </svg>
-            </span>
-            <span
-              className="text-[17px] font-bold tracking-[3px] uppercase"
-              style={{
-                background: "linear-gradient(90deg, #5a7aa0, #8a9cb8, #C0C8D4)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-              }}
-            >
-              Vyrexo
-            </span>
+            <VyrexoLogo size="xl" />
           </Link>
 
-          {/* Navigation Links */}
-          <div className="hidden md:flex items-center gap-8 text-[12px] tracking-[2.5px] uppercase text-[var(--muted2)] font-semibold">
+          {/* Navigation Links — centered across the full-width bar, matched to Good evening Developer color theme */}
+          <div className="hidden md:flex md:absolute md:left-1/2 md:-translate-x-1/2 items-center gap-9 lg:gap-12 text-[14px] lg:text-[15px] tracking-[3px] uppercase text-[var(--hero-greeting)] font-semibold">
             <a
               href="#system"
               className="hover:text-[var(--text)] transition-colors duration-300 py-1"
@@ -260,25 +234,25 @@ export default function LandingPage() {
             </a>
           </div>
 
-          {/* Actions: Theme Toggle + Single Streamlined Action (Redundant Login removed) */}
-          <div className="flex items-center gap-3.5">
-            <ThemeToggle />
+          {/* Actions: Theme Toggle + Single Streamlined Action */}
+          <div className="flex items-center gap-3.5 sm:gap-4 flex-shrink-0">
+            <ThemeToggle className="w-[36px] h-[36px] rounded-[9px] border border-[var(--border2)] bg-[var(--surface2)] text-[var(--hero-greeting)] flex items-center justify-center hover:border-[var(--steel)] hover:text-[var(--text)] transition-all cursor-pointer" />
             {user ? (
               <Link
                 href="/app"
-                className="flex items-center gap-2 text-[12px] tracking-[2px] uppercase text-[var(--text)] font-bold border border-[#5a7aa040] hover:border-[var(--steel)] bg-[#5a7aa018] hover:bg-[#5a7aa030] px-5 py-2.5 rounded-full transition-all duration-300 shadow-sm"
+                className="flex items-center gap-2.5 text-[13px] lg:text-[14px] tracking-[2.2px] uppercase text-[var(--hero-greeting)] hover:text-[var(--text)] font-bold border border-[#5a7aa045] hover:border-[var(--steel)] bg-[#5a7aa018] hover:bg-[#5a7aa030] px-5 sm:px-6 py-2.5 rounded-full transition-all duration-300 shadow-sm"
               >
                 <span>Open App</span>
-                <span className="text-xs">&rarr;</span>
+                <span className="text-sm">&rarr;</span>
               </Link>
             ) : (
               <Link
                 href="/auth"
-                className="group relative flex items-center gap-2 text-[12px] tracking-[2px] uppercase text-[var(--text)] font-bold border border-[#5a7aa045] hover:border-[var(--steel)] bg-[#5a7aa015] hover:bg-[#5a7aa025] px-5 py-2.5 rounded-full transition-all duration-300 shadow-[0_0_20px_rgba(59,89,152,0.15)] hover:shadow-[0_0_30px_rgba(59,89,152,0.28)]"
+                className="group relative flex items-center gap-2.5 text-[13px] lg:text-[14px] tracking-[2.2px] uppercase text-[var(--hero-greeting)] hover:text-[var(--text)] font-bold border border-[#5a7aa045] hover:border-[var(--steel)] bg-[#5a7aa015] hover:bg-[#5a7aa025] px-5 sm:px-6 py-2.5 rounded-full transition-all duration-300 shadow-[0_0_20px_rgba(59,89,152,0.15)] hover:shadow-[0_0_30px_rgba(59,89,152,0.28)]"
               >
                 <span className="w-2 h-2 rounded-full bg-[#5a7aa0] group-hover:scale-125 group-hover:shadow-[0_0_10px_#5a7aa0] transition-all duration-300" />
                 <span>Initialize</span>
-                <span className="text-xs transition-transform duration-300 group-hover:translate-x-0.5">&rarr;</span>
+                <span className="text-sm transition-transform duration-300 group-hover:translate-x-0.5">&rarr;</span>
               </Link>
             )}
           </div>
@@ -307,15 +281,15 @@ export default function LandingPage() {
             heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
           }`}
         >
-          <h1 className="text-center leading-[1.2] max-w-[1080px]">
+          <h1 className="text-center leading-[1.18] max-w-[1440px]">
             <span
-              className="block text-[clamp(2.5rem,6vw,4.75rem)] font-light italic text-[var(--hero-greeting)] tracking-tight"
+              className="block text-[clamp(2.6rem,6.2vw,5.2rem)] font-light italic text-[var(--hero-greeting)] tracking-tight"
               style={{ fontFamily: "'Playfair Display', Georgia, serif" }}
             >
               <Typewriter text="Good evening, Developer." speed={45} delay={500} />
             </span>
             <span
-              className="block text-[clamp(2.5rem,5.6vw,4.4rem)] tracking-tight mt-4 sm:mt-5 font-extrabold"
+              className="block text-[clamp(2.6rem,5.8vw,4.8rem)] tracking-tight mt-4 sm:mt-5 font-extrabold"
               style={{
                 fontFamily: "'Outfit', sans-serif",
                 background: "var(--hero-rex-grad)",
@@ -334,7 +308,7 @@ export default function LandingPage() {
             heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"
           }`}
         >
-          <p className="text-[17px] sm:text-[19px] md:text-[20px] text-[var(--muted2)] text-center max-w-[720px] mt-8 sm:mt-10 mb-2 leading-[1.85] font-normal tracking-wide">
+          <p className="text-[17px] sm:text-[19px] md:text-[21px] text-[var(--muted2)] text-center max-w-[860px] mt-8 sm:mt-10 mb-2 leading-[1.85] font-normal tracking-wide">
             Your voice-first AI coding agent. I plan, code, test, review, and document.
             All through natural conversation.
           </p>
@@ -342,7 +316,7 @@ export default function LandingPage() {
 
         {/* Live Interactive Voice Audition Widget with ample margin */}
         <div
-          className={`w-full max-w-[660px] my-10 sm:my-12 transition-all duration-[1.8s] delay-[3.4s] ${
+          className={`w-full max-w-[780px] my-10 sm:my-12 transition-all duration-[1.8s] delay-[3.4s] ${
             heroVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"
           }`}
         >
@@ -384,10 +358,10 @@ export default function LandingPage() {
       </section>
 
       {/* ── System Telemetry Rings (4 Things in Circle) ──────────────── */}
-      <section className="relative z-10 py-24 sm:py-28 px-6 sm:px-8 border-y border-[var(--border2)]/40 bg-[var(--surface)]/50 backdrop-blur-xl">
-        <div className="max-w-[1100px] mx-auto">
+      <section className="relative z-10 py-24 sm:py-28 px-5 sm:px-8 lg:px-12 xl:px-16 border-y border-[var(--border2)]/40 bg-[var(--surface)]/50 backdrop-blur-xl">
+        <div className="w-full max-w-[1680px] mx-auto">
           <Reveal>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-10 sm:gap-12 md:gap-14 items-center justify-items-center">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-10 sm:gap-12 lg:gap-16 items-center justify-items-center">
               <Ring progress={1.0} label="Autonomous Agents" value="6" />
               <Ring progress={0.92} label="Integrated Tools" value="13" />
               <Ring progress={0.88} label="Voice Modulations" value="4 Tones" />
@@ -398,8 +372,8 @@ export default function LandingPage() {
       </section>
 
       {/* ── System Overview (3D Tilt Cards) ─────── */}
-      <section id="system" className="relative z-10 py-32 px-6">
-        <div className="max-w-[1200px] mx-auto">
+      <section id="system" className="relative z-10 py-32 px-5 sm:px-8 lg:px-12 xl:px-16">
+        <div className="w-full max-w-[1680px] mx-auto">
           <Reveal>
             <div className="text-center mb-20">
               <span className="text-[12px] tracking-[5px] uppercase text-[var(--steel)] font-mono font-semibold">
@@ -546,7 +520,7 @@ export default function LandingPage() {
       </section>
 
       {/* ── Protocol Architecture Stack (3D Exploded View) ─ */}
-      <section id="protocol" className="relative z-10 py-32 px-6 overflow-hidden">
+      <section id="protocol" className="relative z-10 py-32 px-5 sm:px-8 lg:px-12 xl:px-16 overflow-hidden">
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
@@ -554,7 +528,7 @@ export default function LandingPage() {
               "radial-gradient(ellipse 60% 50% at 50% 50%, var(--app-grad-from) 0%, transparent 100%)",
           }}
         />
-        <div className="max-w-[1240px] mx-auto relative">
+        <div className="w-full max-w-[1680px] mx-auto relative">
           <Reveal>
             <div className="text-center mb-12">
               <span className="text-[12px] tracking-[5px] uppercase text-[var(--steel)] font-mono font-semibold">
@@ -585,8 +559,8 @@ export default function LandingPage() {
       </section>
 
       {/* ── Agents Cohort ──────────────────────── */}
-      <section id="agents" className="relative z-10 py-32 px-6">
-        <div className="max-w-[1100px] mx-auto">
+      <section id="agents" className="relative z-10 py-32 px-5 sm:px-8 lg:px-12 xl:px-16">
+        <div className="w-full max-w-[1680px] mx-auto">
           <Reveal>
             <div className="text-center mb-16">
               <span className="text-[12px] tracking-[5px] uppercase text-[var(--steel)] font-mono font-semibold">
@@ -699,9 +673,9 @@ export default function LandingPage() {
       </section>
 
       {/* ── Final CTA Section ───────────────────── */}
-      <section className="relative z-10 py-36 px-6">
+      <section className="relative z-10 py-36 px-5 sm:px-8 lg:px-12 xl:px-16">
         <Reveal>
-          <div className="max-w-[620px] mx-auto text-center p-10 rounded-3xl border border-[#5a7aa030] bg-[var(--card)]/80 backdrop-blur-xl shadow-2xl">
+          <div className="w-full max-w-[920px] mx-auto text-center p-10 sm:p-14 rounded-3xl border border-[#5a7aa030] bg-[var(--card)]/80 backdrop-blur-xl shadow-2xl">
             <p className="text-[12px] text-[var(--steel)] tracking-[4px] uppercase mb-4 font-mono font-semibold">
               Get Started
             </p>
@@ -717,7 +691,7 @@ export default function LandingPage() {
                 &ldquo;Hey Rex&rdquo;
               </span>
             </h2>
-            <p className="text-[16px] text-[var(--muted2)] mt-4 leading-relaxed max-w-md mx-auto">
+            <p className="text-[16px] text-[var(--muted2)] mt-4 leading-relaxed max-w-lg mx-auto">
               No complex setup required. Initialize the workspace and start engineering
               with an autonomous voice AI.
             </p>
@@ -739,42 +713,15 @@ export default function LandingPage() {
       {/* ── Footer ─────────────────────────────── */}
       <footer
         id="landing-footer"
-        className="relative z-10 border-t border-[var(--border2)]/50 bg-[var(--surface)]/80 backdrop-blur-xl pt-16 pb-12 px-6 sm:px-10"
+        className="relative z-10 border-t border-[var(--border2)]/50 bg-[var(--surface)]/80 backdrop-blur-xl pt-16 pb-12 px-5 sm:px-8 lg:px-12 xl:px-16"
       >
-        <div className="max-w-[1240px] mx-auto">
+        <div className="w-full max-w-[1760px] mx-auto">
           {/* Top section: Brand & Columns */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-10 pb-12 border-b border-[var(--border2)]/40">
             {/* Column 1: Brand Info */}
             <div className="lg:col-span-2 flex flex-col gap-4 pr-0 lg:pr-8">
-              <div className="flex items-center gap-3">
-                <span
-                  className="flex h-8 w-8 items-center justify-center rounded-lg shadow-sm"
-                  style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
-                >
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="white"
-                    strokeWidth="2"
-                  >
-                    <rect x="3" y="3" width="8" height="8" rx="1.5" />
-                    <rect x="13" y="3" width="8" height="8" rx="1.5" />
-                    <rect x="3" y="13" width="8" height="8" rx="1.5" />
-                    <rect x="13" y="13" width="8" height="8" rx="1.5" />
-                  </svg>
-                </span>
-                <span
-                  className="text-xl font-bold tracking-tight"
-                  style={{
-                    background: "linear-gradient(135deg, #3B5998, #7B93B0, #C0C8D4)",
-                    WebkitBackgroundClip: "text",
-                    WebkitTextFillColor: "transparent",
-                  }}
-                >
-                  Vyrexo
-                </span>
+              <div className="flex items-center">
+                <VyrexoLogo size="lg" />
               </div>
               <p className="text-[14px] text-[var(--muted2)] leading-relaxed max-w-sm">
                 Voice-first conversational AI coding workspace. Think out loud, dictate

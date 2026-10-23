@@ -129,7 +129,9 @@ export function RightPanel({
 
       {/* Tab content */}
       <div className="flex-1 min-h-0">
-        {activeTab === "chat" && <ChatTab chatLog={chatLog} />}
+        {activeTab === "chat" && (
+          <ChatTab chatLog={chatLog} projectPath={projectPath} projectTitle={projectTitle} />
+        )}
         {activeTab === "code" && (
           <CodeTab
             codeEvents={codeEvents}
@@ -173,7 +175,29 @@ export function RightPanel({
 
 // ── Chat tab ────────────────────────────────────────────────────────────────
 
-function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
+function sanitizeChatText(rawText: string, projectPath?: string, projectTitle?: string): string {
+  if (!rawText) return "";
+  const fallbackFolder =
+    projectPath && !projectPath.startsWith("/app/applet") && !projectPath.startsWith("/workspaces/")
+      ? projectPath
+      : projectTitle && projectTitle !== "New Session" && !/^session-\d+$/i.test(projectTitle)
+      ? `C:\\Users\\hp\\OneDrive\\Desktop\\${projectTitle}`
+      : "C:\\Users\\hp\\OneDrive\\Desktop\\workspace";
+  return rawText.replace(
+    /\/(?:app\/applet\/)?workspaces\/session-\d+/g,
+    fallbackFolder
+  );
+}
+
+function ChatTab({
+  chatLog,
+  projectPath,
+  projectTitle,
+}: {
+  chatLog: ChatMessage[];
+  projectPath?: string;
+  projectTitle?: string;
+}) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -193,6 +217,9 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
     <div className="h-full overflow-y-auto p-3 flex flex-col gap-3">
       {chatLog.map((msg, i) => {
         const isUser = msg.role === "user";
+        const displayMsgText = isUser
+          ? msg.text
+          : sanitizeChatText(msg.text, projectPath, projectTitle);
         return (
           <div key={i} className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
             <span className="text-[9px] uppercase tracking-wide text-[var(--muted)] mb-1 px-1">
@@ -224,10 +251,10 @@ function ChatTab({ chatLog }: { chatLog: ChatMessage[] }) {
                 </div>
               )}
               {isUser ? (
-                msg.text
+                displayMsgText
               ) : (
                 <div className="md-content">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayMsgText}</ReactMarkdown>
                 </div>
               )}
             </div>
@@ -381,12 +408,30 @@ function CodeTab({
     error?: string;
   } | null>(null);
 
-  // Collect all virtual files created or updated by agent actions
+  // Helper to get current logged-in user ID from localStorage for authenticated API calls
+  const getCurrentUserId = useCallback((): string => {
+    try {
+      const raw = typeof window !== "undefined" ? localStorage.getItem("vyrexo_user") : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.id) return String(parsed.id);
+      }
+    } catch {}
+    return "";
+  }, []);
+
+  // Collect all virtual files created or updated by agent actions or session restore
   const virtualFiles = useMemo(() => {
     const map = new Map<string, { path: string; content: string; oldContent?: string }>();
     for (const e of codeEvents) {
-      if (e.kind === "action" && (e.category === "file_write" || e.category === "documentation") && e.path) {
-        map.set(e.path, { path: e.path, content: e.content || "", oldContent: e.oldContent });
+      if (
+        e.kind === "action" &&
+        (e.category === "file_write" || e.category === "documentation" || e.category === "file") &&
+        e.path &&
+        !e.path.endsWith(".code-workspace")
+      ) {
+        const cleanP = e.path.replace(/^\/+/, "");
+        map.set(cleanP, { path: cleanP, content: e.content || "", oldContent: e.oldContent });
       }
     }
     return map;
@@ -443,17 +488,21 @@ function CodeTab({
     async (file: string) => {
       setOpenPath(file);
       setOpenDiff(null);
-      const vf = virtualFiles.get(file);
-      if (vf) {
-        setOpenContent(vf.content || "");
+      const vf = virtualFiles.get(file) || virtualFiles.get(file.replace(/^\/+/, ""));
+      if (vf && vf.content) {
+        setOpenContent(vf.content);
         return;
       }
       setLoading(true);
       try {
+        const uid = getCurrentUserId();
+        const uidParam = uid ? `&user_id=${encodeURIComponent(uid)}` : "";
         const q = sessionId
-          ? `?sessionId=${encodeURIComponent(sessionId)}&file=${encodeURIComponent(file)}`
-          : `?path=${encodeURIComponent(projectPath)}&file=${encodeURIComponent(file)}`;
-        const r = await fetch(`/api/projects/file${q}`);
+          ? `?sessionId=${encodeURIComponent(sessionId)}&file=${encodeURIComponent(file)}${uidParam}`
+          : `?path=${encodeURIComponent(projectPath)}&file=${encodeURIComponent(file)}${uidParam}`;
+        const r = await fetch(`/api/projects/file${q}`, {
+          headers: uid ? { "x-user-id": uid } : undefined,
+        });
         const d = await r.json();
         setOpenContent(d.ok ? (d.content as string) : `// ${d.error || "couldn't open this file"}`);
       } catch {
@@ -462,7 +511,7 @@ function CodeTab({
         setLoading(false);
       }
     },
-    [projectPath, sessionId, virtualFiles]
+    [getCurrentUserId, projectPath, sessionId, virtualFiles]
   );
 
   const refreshTree = useCallback(
@@ -490,12 +539,16 @@ function CodeTab({
 
       // 2. Fetch from backend tree API (supports sessionId and projectPath)
       try {
+        const uid = getCurrentUserId();
+        const uidParam = uid ? `&user_id=${encodeURIComponent(uid)}` : "";
         const q = sessionId
-          ? `?sessionId=${encodeURIComponent(sessionId)}`
+          ? `?sessionId=${encodeURIComponent(sessionId)}${uidParam}`
           : projectPath
-          ? `?path=${encodeURIComponent(projectPath)}`
+          ? `?path=${encodeURIComponent(projectPath)}${uidParam}`
           : "";
-        const r = await fetch(`/api/projects/tree${q}`);
+        const r = await fetch(`/api/projects/tree${q}`, {
+          headers: uid ? { "x-user-id": uid } : undefined,
+        });
         const d = await r.json();
         if (d.ok && Array.isArray(d.tree) && d.tree.length > 0) {
           setTree(d.tree as TreeNode[]);
@@ -550,7 +603,7 @@ function CodeTab({
         setTreeLoading(false);
       }
     },
-    [buildVirtualTree, openFile, projectPath, sessionId, virtualFiles]
+    [buildVirtualTree, getCurrentUserId, openFile, projectPath, sessionId, virtualFiles]
   );
 
   // Download project as ZIP
@@ -559,6 +612,8 @@ function CodeTab({
     setDownloadingZip(true);
     setZipSuccessToast(null);
     try {
+      const uid = getCurrentUserId();
+      const uidParam = uid ? `&user_id=${encodeURIComponent(uid)}` : "";
       let res: Response;
       if (virtualFiles.size > 0) {
         const fileList = Array.from(virtualFiles.values()).map((v) => ({
@@ -567,20 +622,26 @@ function CodeTab({
         }));
         res = await fetch("/api/projects/download", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(uid ? { "x-user-id": uid } : {}),
+          },
           body: JSON.stringify({
             sessionId,
+            user_id: uid || undefined,
             files: fileList,
             title: ghRepo || "vyrexo-project",
           }),
         });
       } else {
         const q = sessionId
-          ? `?sessionId=${encodeURIComponent(sessionId)}`
+          ? `?sessionId=${encodeURIComponent(sessionId)}${uidParam}`
           : projectPath
-          ? `?path=${encodeURIComponent(projectPath)}`
+          ? `?path=${encodeURIComponent(projectPath)}${uidParam}`
           : "";
-        res = await fetch(`/api/projects/download${q}`);
+        res = await fetch(`/api/projects/download${q}`, {
+          headers: uid ? { "x-user-id": uid } : undefined,
+        });
       }
 
       if (!res.ok) throw new Error("Failed to download project zip");
@@ -605,7 +666,8 @@ function CodeTab({
       setZipSuccessToast(`Downloaded ${filename} successfully!`);
       setTimeout(() => setZipSuccessToast(null), 4000);
     } catch (err: unknown) {
-      alert(`Could not download ZIP: ${err instanceof Error ? err.message : "Error"}`);
+      setZipSuccessToast(`Could not download ZIP: ${err instanceof Error ? err.message : "Error"}`);
+      setTimeout(() => setZipSuccessToast(null), 4000);
     } finally {
       setDownloadingZip(false);
     }

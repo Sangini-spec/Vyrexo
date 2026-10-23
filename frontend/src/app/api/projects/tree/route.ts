@@ -1,93 +1,89 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  getSessionProject,
   getSessionConnectedProject,
   getSessionWorkspaceFiles,
-  ensureSessionWorkspaceMaterialized,
   buildFileTree,
+  ensureSessionWorkspaceMaterialized,
+  getSessionChatHistory,
+  verifySessionProjectOwnership,
 } from "@/lib/project-session-store";
-import { collectProjectExportData } from "@/lib/project-export";
+import { findPersistedSessionById, isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
 
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const rawSessionId = searchParams.get("sessionId");
-  const titleHint = searchParams.get("title") || undefined;
-  const sessionId =
-    !rawSessionId || rawSessionId === "default" ? "session-1790005321834" : rawSessionId;
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const sessionId = (searchParams.get("sessionId") || searchParams.get("session") || "").trim();
+  const userId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
 
-  if (sessionId) {
-    // Ensure previously built session workspace (e.g. RailGo train booking) is materialized on disk
-    ensureSessionWorkspaceMaterialized(sessionId, titleHint);
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+    return NextResponse.json({
+      ok: true,
+      tree: [],
+      source: "empty",
+      projectName: null,
+      project: null,
+      filesCount: 0,
+    });
+  }
 
-    // 1. Check if session has a connected project with complete files
-    const connectedProject = getSessionConnectedProject(sessionId);
-    if (connectedProject && connectedProject.files && connectedProject.files.length > 0) {
-      const tree = buildFileTree(connectedProject.files);
-      return NextResponse.json({
-        ok: true,
-        tree,
-        project: {
-          name: connectedProject.name,
-          path: connectedProject.path,
-          source: connectedProject.source,
-          filesCount: connectedProject.filesCount,
-        },
-      });
+  if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+    return NextResponse.json(
+      { ok: false, tree: [], source: "empty", projectName: null, project: null, filesCount: 0, error: "Forbidden" },
+      { status: 403 }
+    );
+  }
+
+  let connected = getSessionConnectedProject(sessionId, userId || undefined);
+  if (!connected) {
+    const cogProj = getSessionProject(sessionId, userId || undefined);
+    const persisted = findPersistedSessionById(sessionId);
+    const chatTurns = getSessionChatHistory(sessionId);
+    const title = cogProj?.title || persisted?.name || "";
+    if (
+      (title && title !== "New Session") ||
+      chatTurns.some((t) => t.role === "user" && t.text.trim().length > 0)
+    ) {
+      connected = ensureSessionWorkspaceMaterialized(
+        sessionId,
+        title || "Sandbox Application",
+        chatTurns
+      );
     }
+  }
 
-    // 2. Check if workspace disk files exist
-    const wsFiles = getSessionWorkspaceFiles(sessionId);
-    if (wsFiles && wsFiles.length > 0) {
-      const tree = buildFileTree(wsFiles);
-      return NextResponse.json({
-        ok: true,
-        tree,
-        project: {
-          name: titleHint || "Active Sandbox Project",
-          path: `workspaces/${sessionId}`,
-          source: "workspace",
-          filesCount: wsFiles.length,
-        },
-      });
-    }
+  if (connected && connected.files.length > 0) {
+    return NextResponse.json({
+      ok: true,
+      tree: buildFileTree(connected.files),
+      source: "connected",
+      projectName: connected.name,
+      projectPath: connected.path,
+      project: { name: connected.name, path: connected.path },
+      filesCount: connected.files.length,
+    });
+  }
 
-    // 3. If this is a brand-new empty session ("New Session"), return empty tree until user builds
-    if (titleHint === "New Session") {
-      return NextResponse.json({
-        ok: true,
-        tree: [],
-        project: null,
-      });
-    }
-
-    // 4. Fallback to synthesizing export data for this session
-    try {
-      const projectData = await collectProjectExportData(sessionId, undefined, titleHint);
-      if (projectData.files.length > 0) {
-        const formatted = projectData.files.map((f) => ({
-          path: f.path,
-          content: f.content,
-          size: Buffer.byteLength(f.content, "utf-8"),
-          lastModified: Date.now(),
-        }));
-        const tree = buildFileTree(formatted);
-        return NextResponse.json({
-          ok: true,
-          tree,
-          project: {
-            name: projectData.title,
-            path: `workspaces/${projectData.slug}`,
-            source: "session_template",
-            filesCount: formatted.length,
-          },
-        });
-      }
-    } catch {}
+  const wsFiles = getSessionWorkspaceFiles(sessionId);
+  if (wsFiles.length > 0) {
+    const proj = getSessionProject(sessionId, userId || undefined);
+    const projName = proj?.title || `Workspace (${sessionId})`;
+    return NextResponse.json({
+      ok: true,
+      tree: buildFileTree(wsFiles),
+      source: "workspace",
+      projectName: projName,
+      project: { name: projName },
+      filesCount: wsFiles.length,
+    });
   }
 
   return NextResponse.json({
     ok: true,
     tree: [],
+    source: "empty",
+    projectName: null,
     project: null,
+    filesCount: 0,
   });
 }
 

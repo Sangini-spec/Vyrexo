@@ -6,7 +6,12 @@ import {
   testWorkspace,
   getWorkspaceDir,
 } from "@/lib/workspace-executor";
-import { updateSessionProjectType } from "@/lib/project-session-store";
+import {
+  updateSessionProjectType,
+  verifySessionProjectOwnership,
+} from "@/lib/project-session-store";
+import { isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
+import { recordCrossUserBlock, checkToolPermission } from "@/lib/security/governance";
 import fs from "fs";
 import path from "path";
 
@@ -58,7 +63,17 @@ const sessionDeployments = globalDeployments.__sessionDeployments;
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const sessionId = searchParams.get("sessionId") || "default";
+  const sessionId = (searchParams.get("sessionId") || searchParams.get("session") || "").trim();
+  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+    return NextResponse.json({ ok: true, latest: null, history: [] });
+  }
+
+  if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+    recordCrossUserBlock(sessionId, userId, "GET /api/deploy");
+    return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+  }
 
   const history = sessionDeployments.get(sessionId) || [];
   const latest = history.length > 0 ? history[history.length - 1] : null;
@@ -74,10 +89,22 @@ export async function POST(request: NextRequest) {
   const startTime = Date.now();
   try {
     const body = await request.json();
-    const sessionId = body.sessionId || "default";
+    const sessionId = (body.sessionId || body.session || "").trim();
+    const userId = (body.userId || body.user_id || request.headers.get("x-user-id") || "").trim();
     const target = body.target || "live_container";
     const explicitTitle = body.projectTitle || body.title;
     const clientFiles: ProjectExportFile[] | undefined = Array.isArray(body.files) ? body.files : undefined;
+
+    if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+      return NextResponse.json({ ok: false, error: "Valid session ID is required" }, { status: 400 });
+    }
+
+    if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+      recordCrossUserBlock(sessionId, userId, "POST /api/deploy");
+      return NextResponse.json({ ok: false, error: "Forbidden: session belongs to another user" }, { status: 403 });
+    }
+
+    checkToolPermission("claude-coding", "project_deploy", { sessionId, userId });
 
     const steps: DeploymentRecord["steps"] = [];
 

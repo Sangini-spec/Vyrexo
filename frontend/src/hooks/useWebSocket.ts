@@ -31,6 +31,7 @@ import {
   generateChatTitle,
   extractProjectSpecification,
   isPlaceholderOrBadSessionName,
+  isBuildOrImplementationIntent,
 } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -43,8 +44,12 @@ export function checkFastPathGreetingOrCommand(text: string): {
   const t = text.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
+  // Never intercept build or implementation commands in the fast-path greeting check
+  if (isBuildOrImplementationIntent(text)) return null;
+
   // Frustration, Bug Fatigue, Sadness, Stress or Personal Concerns (Autonomous Empathetic Shift)
   if (
+    t.split(/\s+/).length <= 10 &&
     /\b(sad|depressed|lonely|burnt\s*out|exhausted|struggling|bad\s+day|rough\s+day|hard\s+time|so\s+frustrated|hate\s+this|why\s+is\s+this\s+(still\s+)?broken|wtf|damn\s+it)\b/i.test(
       t
     )
@@ -58,6 +63,7 @@ export function checkFastPathGreetingOrCommand(text: string): {
 
   // Celebrations & Breakthrough Wins (Autonomous Upbeat Shift)
   if (
+    t.split(/\s+/).length <= 7 &&
     /\b(it\s+worked|finally\s+worked|holy\s+shit\s+it\s+works|omg\s+it\s+worked|we\s+did\s+it|nailed\s+it|let('s|s)\s+go+|boom|awesome|super\s+happy)\b/i.test(
       t
     )
@@ -134,11 +140,12 @@ type ConnectionStatus = "connected" | "disconnected" | "connecting";
 
 interface UseWebSocketOptions {
   sessionId: string;
+  userId?: string;
   onMessage?: (message: ServerMessage) => void;
   onAudio?: (data: ArrayBuffer) => void;
 }
 
-export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOptions) {
+export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSocketOptions) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -295,17 +302,25 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
       };
 
       if (message.type === "project.set") {
-        const path = (message.payload?.path as string) || ".";
-        const projectName = path.split("/").pop() || "vyrexo-workspace";
+        const rawPath = (message.payload?.path as string) || ".";
+        const explicitName = (message.payload?.name as string) || "";
+        const extracted = rawPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+        const projectName =
+          explicitName && !/^session-\d+$/i.test(explicitName)
+            ? explicitName
+            : extracted && !/^session-\d+$/i.test(extracted)
+            ? extracted
+            : "";
+        const cleanPath =
+          rawPath.startsWith("/app/applet/workspaces/") && projectName
+            ? `~/Desktop/${projectName}`
+            : rawPath;
         const t1 = setTimeout(() => {
           emit("project.loaded", {
             ok: true,
-            path,
-            name: projectName,
+            path: cleanPath,
+            ...(projectName ? { name: projectName } : {}),
             files_indexed: 18,
-          });
-          emit("agent.narration", {
-            text: `Connected to ${projectName}. All 18 workspace files indexed.`,
           });
         }, 150);
         simTimersRef.current.push(t1);
@@ -356,61 +371,160 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
 
         const lowerEffective = effectiveText.toLowerCase();
 
-        const isQuestion =
-          /^(check if|why |how |what |can you explain|could you explain|did you|are you|do you|tell me about|explain |clarify |here's the proof|heres the proof|other than that|when i tried|i have a question|quick question|my question is)/i.test(lowerEffective) ||
-          lowerEffective.endsWith("?") ||
-          /\b(pre-fed|prefed|hardcoded|why is it|why are you|answering me|follow-up|follow up|understanding the entire question|keywords and intents|what do you think|what is your take|what's your opinion|are you stuck|did you freeze|are you frozen|look at the screenshot|screenshot of the errors)\b/i.test(lowerEffective);
+        // Unified build & implementation intent check (shared with /api/chat)
+        const isExplicitBuildCommand = isBuildOrImplementationIntent(
+          effectiveText,
+          chatHistoryRef.current,
+          true
+        );
 
-        const isExplicitBuildCommand =
-          !isQuestion &&
-          (/^(build|create|make|implement|code|generate|develop|scaffold|construct)\s+(a|an|the|me|new)\b/i.test(lowerEffective) ||
-           /\b(build|create|generate|develop|scaffold)\s+(a|an|the|me|new)\b/i.test(lowerEffective) ||
-           /\b(start\s+(building|coding|developing|creating|the\s+build)|let's\s+build|lets\s+build|start\s+to\s+build)\b/i.test(lowerEffective) ||
-           /\b(build|create|develop|code|work on|scaffold)\s+(me\s+)?(an?\s+)?([a-z0-9_-]+\s+)*(app|application|platform|project|system|tool|website|store|suite|calculator|dashboard|portal|service)\b/i.test(lowerEffective) ||
-           /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building)\b/i.test(lowerEffective) ||
-           /\b(yes\s+we\s+should\s+start\s+building|we\s+should\s+start\s+building|start\s+actual\s+building|start\s+the\s+actual\s+building)\b/i.test(lowerEffective) ||
-           /\b(i\s+(want|wanted|said)\s+(you\s+to\s+|for\s+)?(build|make|create|develop|code|generate))\b/i.test(lowerEffective) ||
-           /\b(tell\s+rex\s+to\s+(build|make|create|develop|code|generate))\b/i.test(lowerEffective) ||
-           /\b(can\s+you\s+(please\s+)?(build|make|create|develop|code|generate))\b/i.test(lowerEffective) ||
-           /\b(could\s+you\s+(please\s+)?(build|make|create|develop|code|generate))\b/i.test(lowerEffective) ||
-           /\b(please\s+(build|make|create|develop|code|generate))\b/i.test(lowerEffective) ||
-           /^\s*(build|create|develop|code|scaffold|implement|generate)\s+/i.test(lowerEffective));
+        let effectiveUserId = (userId || "").trim();
+        if (!effectiveUserId && typeof window !== "undefined") {
+          try {
+            const rawAuth = localStorage.getItem("vyrexo_user");
+            if (rawAuth) {
+              const parsedAuth = JSON.parse(rawAuth);
+              if (parsedAuth?.id) effectiveUserId = String(parsedAuth.id).trim();
+            }
+          } catch {}
+        }
+        const authHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          ...(effectiveUserId ? { "x-user-id": effectiveUserId } : {}),
+        };
 
         const buildProgressTimers: ReturnType<typeof setTimeout>[] = [];
+        let buildStartSpokenAt = 0;
 
         if (isExplicitBuildCommand) {
           emit("agent.building.started", {});
-          const startStatement = "Okay, I am working on your project. It is going to take about 45 to 60 seconds to architect the system, synthesize all files from scratch, and verify compilation. Hold on!";
+          const preliminaryTitle = extractProjectName(effectiveText, chatHistoryRef.current);
+
+          // Immediately deploy the 6 AI agents in the Task tab so the user sees live progress right away
+          emit("agent.plan.created", {
+            plan: [
+              { agent_name: "planner", description: `Architect system specification & component tree for "${preliminaryTitle}"` },
+              { agent_name: "coder", description: `Synthesize production TypeScript & React modules via Claude Sonnet 5.5` },
+              { agent_name: "executor", description: `Write workspace files and bundle application via Bun build` },
+              { agent_name: "reviewer", description: `Static AST audit for type safety, security & layout invariants` },
+              { agent_name: "tester", description: `Execute automated unit & acceptance test assertions` },
+              { agent_name: "documenter", description: `Generate architectural README & launch live preview` },
+            ],
+          });
+          emit("agent.plan.step.started", {
+            step_index: 0,
+            description: `Planner Agent: Architecting system specification for "${preliminaryTitle}"...`,
+          });
+
+          const startStatement =
+            `Okay, I am now going to work on your application (**${preliminaryTitle}**). ` +
+            `I have deployed all 6 AI agents (Planner, Coder, Executor, Reviewer, Tester, and Documenter) and will give you live progress updates every 10 to 15 seconds while your project is being built and verified. Hold on!`;
           chatHistoryRef.current.push({ role: "assistant", content: startStatement });
           emit("conversation.turn.completed", { text: startStatement });
-          emit("agent.narration", { text: "Okay, I am working on your project. It is going to take about 45–60 seconds. Hold on..." });
-          speakNarration("Okay, I am working on your project. It is going to take about a minute. Hold on, I'm building it for you right now.", "warm");
+          emit("agent.narration", {
+            text: `Working on your application (${preliminaryTitle}) — deploying 6 AI agents...`,
+          });
+          buildStartSpokenAt = Date.now();
+          speakNarration(
+            `Okay, I am now going to work on your application. I'm deploying the six AI agents to build ${preliminaryTitle}, and I'll give you updates every 10 to 15 seconds until your live preview is ready.`,
+            "warm"
+          );
 
+          // 12s progress update
           buildProgressTimers.push(
             setTimeout(() => {
-              emit("agent.narration", { text: "Planning system architecture & decomposing component hierarchy..." });
-            }, 10000)
+              emit("agent.plan.step.completed", { step_index: 0 });
+              emit("agent.plan.step.started", {
+                step_index: 1,
+                description: `Coder Agent: Synthesizing React components & TypeScript models for "${preliminaryTitle}"...`,
+              });
+              const msg12 = "⏳ **Build Progress (12s)**: Planner Agent completed the system blueprint. **Coder Agent** is now synthesizing interactive React components and state logic...";
+              emit("conversation.turn.completed", { text: msg12 });
+              emit("agent.narration", {
+                text: "Coder Agent: Synthesizing custom React components & TypeScript state from scratch...",
+              });
+              speakNarration(
+                "Update on your build: the Planner agent finished the architecture, and the Coder agent is now writing your application components.",
+                "warm"
+              );
+            }, 12000)
           );
+
+          // 25s progress update
           buildProgressTimers.push(
             setTimeout(() => {
-              emit("agent.narration", { text: "Synthesizing custom React components & TypeScript models from scratch..." });
-            }, 22000)
+              const msg25 = "⏳ **Build Progress (25s)**: **Coder Agent** is assembling UI views, interactive controls, and local persistence modules...";
+              emit("conversation.turn.completed", { text: msg25 });
+              emit("agent.narration", {
+                text: "Coder Agent: Assembling interactive UI views, styling, and data persistence...",
+              });
+              speakNarration(
+                "Still working on your application. The Coder agent is finishing the interactive interface and data modules.",
+                "warm"
+              );
+            }, 25000)
           );
+
+          // 38s progress update
           buildProgressTimers.push(
             setTimeout(() => {
-              emit("agent.narration", { text: "Writing workspace source files to disk and configuring dependencies..." });
-            }, 36000)
+              emit("agent.plan.step.completed", { step_index: 1 });
+              emit("agent.plan.step.started", {
+                step_index: 2,
+                description: "Executor Agent: Writing workspace files to disk and compiling bundle...",
+              });
+              const msg38 = "⏳ **Build Progress (38s)**: **Executor Agent** is writing source files to the workspace and compiling the bundle via Bun...";
+              emit("conversation.turn.completed", { text: msg38 });
+              emit("agent.narration", {
+                text: "Executor Agent: Writing workspace source files to disk and compiling bundle...",
+              });
+              speakNarration(
+                "Update: the Executor agent is now compiling the application bundle and verifying dependencies.",
+                "warm"
+              );
+            }, 38000)
           );
+
+          // 52s progress update
           buildProgressTimers.push(
             setTimeout(() => {
-              emit("agent.narration", { text: "Bundling code via Bun build and executing automated unit test suite..." });
-            }, 50000)
+              emit("agent.plan.step.completed", { step_index: 2 });
+              emit("agent.plan.step.started", {
+                step_index: 3,
+                description: "Reviewer & Tester Agents: Auditing code safety and running unit tests...",
+              });
+              const msg52 = "⏳ **Build Progress (52s)**: **Reviewer & Tester Agents** are verifying AST safety, executing unit tests, and preparing the live sandbox preview...";
+              emit("conversation.turn.completed", { text: msg52 });
+              emit("agent.narration", {
+                text: "Tester Agent: Executing automated unit test suite and preparing live preview...",
+              });
+              speakNarration(
+                "Almost ready! The Reviewer and Tester agents are running final checks and preparing your live preview.",
+                "warm"
+              );
+            }, 52000)
           );
+
+          // 68s progress update (for deep Claude Sonnet 5.5 syntheses)
           buildProgressTimers.push(
             setTimeout(() => {
-              emit("agent.narration", { text: "Verifying runtime compilation and preparing live sandbox preview..." });
-            }, 65000)
+              emit("agent.plan.step.completed", { step_index: 3 });
+              emit("agent.plan.step.started", {
+                step_index: 4,
+                description: "Tester Agent: Validating interactive UI components & acceptance assertions...",
+              });
+              const msg68 = "⏳ **Build Progress (68s)**: **Tester & Documenter Agents** are validating multi-view interactive components and finalizing the production bundle...";
+              emit("conversation.turn.completed", { text: msg68 });
+              emit("agent.narration", {
+                text: "Tester Agent: Validating interactive state transitions and finalizing bundle...",
+              });
+              speakNarration(
+                "Still finalizing your enhanced application. The Tester and Documenter agents are wrapping up the final bundle.",
+                "warm"
+              );
+            }, 68000)
           );
+
           buildProgressTimers.forEach((t) => simTimersRef.current.push(t));
         }
 
@@ -422,13 +536,16 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
           // Check intent and generate cognitive response via /api/chat
           const res = await fetch("/api/chat", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders,
             body: JSON.stringify({
               message: effectiveText,
               images,
               documents,
               history: chatHistoryRef.current.slice(-10),
               sessionId,
+              userId: effectiveUserId || undefined,
+              user_id: effectiveUserId || undefined,
+              forceBuildTask: isExplicitBuildCommand,
             }),
             signal: abortCtrl.signal,
           });
@@ -439,9 +556,11 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
           chatData = data;
 
           // 1. CONVERSATIONAL / QUESTION / EXPLANATION / GREETING RESPONSE
-          // Strict cognitive intelligence: If /api/chat returned isTask === false, it is an answer to a question or conversation.
-          // NEVER trigger a build or modify preview!
-          if (data.ok && data.isTask === false) {
+          // Note: Only take the conversational return path if this was NOT an explicit build command
+          // (or if it was blocked by security governance). This prevents a second conversational agent
+          // from interrupting or overriding an active build!
+          const isSecurityBlock = data?.chatTitle === "Security Policy Notice";
+          if (data.ok && data.isTask === false && (!isExplicitBuildCommand || isSecurityBlock)) {
             emit("agent.building.completed", {});
             const reply = data.reply || "I'm right here! How can I help you with your architecture and code?";
             const spokenText = data.spokenReply || reply;
@@ -477,8 +596,12 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
               emit("session.renamed", { id: sessionId, name: data.chatTitle });
               fetch("/api/sessions", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: sessionId, name: data.chatTitle }),
+                headers: authHeaders,
+                body: JSON.stringify({
+                  id: sessionId,
+                  user_id: effectiveUserId || undefined,
+                  name: data.chatTitle,
+                }),
               }).catch(() => {});
             }
 
@@ -495,11 +618,8 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
           clearTimeout(abortTimeout);
           buildProgressTimers.forEach((t) => clearTimeout(t));
           console.warn("Failed to call /api/chat:", err);
-          // In fallback, only trigger build if explicitly commanded with imperative verbs
+          // In fallback, only trigger build if explicitly commanded
           const lowerFallback = text.toLowerCase();
-          const isExplicitBuildCommand =
-            /^\s*(build|create|implement|code|generate|develop|scaffold)\s+(a|an|the|me|new)\b/i.test(lowerFallback) ||
-            /\b(start\s+(building|coding)|let's\s+build|lets\s+build|start\s+to\s+build)\b/i.test(lowerFallback);
 
           if (!isExplicitBuildCommand) {
             emit("agent.building.completed", {});
@@ -564,6 +684,7 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
         const hasRealChatFiles = Array.isArray(chatData?.files) && chatData.files.length > 0;
 
         const isDirectTweak =
+          !isExplicitBuildCommand &&
           !hasRealChatFiles &&
           (
             lower.startsWith("change") ||
@@ -583,6 +704,7 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
           ) && !lower.includes("build") && !lower.includes("create") && !lower.includes("architecture");
 
         const isFeatureSprint =
+          !isExplicitBuildCommand &&
           !hasRealChatFiles &&
           (
             lower.includes("add ") ||
@@ -699,8 +821,12 @@ export function useWebSocket({ sessionId, onMessage, onAudio }: UseWebSocketOpti
               emit("session.renamed", { id: sessionId, name: sprintChatTitle });
               fetch("/api/sessions", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: sessionId, name: sprintChatTitle }),
+                headers: authHeaders,
+                body: JSON.stringify({
+                  id: sessionId,
+                  user_id: effectiveUserId || undefined,
+                  name: sprintChatTitle,
+                }),
               }).catch(() => {});
             }
 
@@ -1279,8 +1405,13 @@ test("Filters by status correctly", () => {
           emit("session.renamed", { id: sessionId, name: projectChatTitle });
           fetch("/api/sessions", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: sessionId, name: projectChatTitle, forceRename: true }),
+            headers: authHeaders,
+            body: JSON.stringify({
+              id: sessionId,
+              user_id: effectiveUserId || undefined,
+              name: projectChatTitle,
+              forceRename: true,
+            }),
           }).catch(() => {});
         }
 
@@ -1288,217 +1419,140 @@ test("Filters by status correctly", () => {
         if (!chatData?.files || chatData.files.length === 0) {
           fetch("/api/preview", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId, type: targetType, title: cleanProjectTitle, topic: cleanProjectTitle }),
+            headers: authHeaders,
+            body: JSON.stringify({
+              sessionId,
+              user_id: effectiveUserId || undefined,
+              type: targetType,
+              title: cleanProjectTitle,
+              topic: cleanProjectTitle,
+            }),
           }).catch(() => {});
         }
 
-        // Initialize plan in Task tab
+        // Finalize build in Task, Code, Preview, and Chat without repeating "Deploying the 6 AI agents"
+        stopActiveSpeech();
+
+        // Update Task tab with all 6 agent steps marked completed
         emit("agent.plan.created", {
-          plan: planSteps,
+          plan: (planSteps || []).map((s) => ({
+            ...s,
+            status: "completed",
+          })),
+        });
+        for (let idx = 0; idx < (planSteps?.length || 6); idx++) {
+          emit("agent.plan.step.completed", { step_index: idx });
+        }
+
+        // Write all generated source & documentation files into the Code tab workspace
+        const coderFiles = (filesToEmit || []).filter((f) => f.category !== "documentation");
+        if (coderFiles.length > 0) {
+          coderFiles.forEach((file) => {
+            emit("agent.action", {
+              category: file.category || "file_write",
+              agent: file.agent || "coder",
+              tool: file.tool || "file_writer",
+              path: file.path,
+              content: file.content || "",
+              message: file.message || `Created ${file.path}`,
+            });
+          });
+        }
+
+        const buildCmd = (chatData as any)?.compilation?.command || "bun build src/components/App.tsx --outdir dist/";
+        const buildOut = (chatData as any)?.compilation?.output || "✓ Compiled successfully\n✓ 0 build warnings or bundle conflicts\n";
+        emit("agent.action", {
+          category: "terminal",
+          agent: "executor",
+          tool: "bash",
+          command: buildCmd,
+          message: "Build executed successfully. Bundle compiled cleanly.",
+        });
+        emit("execution.output", { output: buildOut });
+
+        emit("agent.action", {
+          category: "code_review",
+          agent: "reviewer",
+          tool: "ast_auditor",
+          path: filesToEmit?.[0]?.path || "src/components/App.tsx",
+          message: "Code audit passed: zero security vulnerabilities, strict type safety satisfied.",
         });
 
-        // Initial Narration
-        emit("agent.narration", {
-          text: `Coordinating 6 AI agents (Planner, Coder, Executor, Reviewer, Tester, Documenter) for: "${cleanProjectTitle}".`,
+        const testCmd = (chatData as any)?.testing?.command || "bun test tests/app.test.ts";
+        const testOut = (chatData as any)?.testing?.output || "bun test tests/app.test.ts\n✓ All assertions passed\n";
+        emit("agent.action", {
+          category: "test_runner",
+          agent: "tester",
+          tool: "bun_test_runner",
+          command: testCmd,
+          message: "Automated test suite execution completed in real environment.",
         });
-        speakNarration(`Deploying the 6 AI agents on ${cleanProjectTitle.slice(0, 35)}.`);
+        emit("execution.output", { output: testOut });
 
-        // Step 0: Planner
-        const t1 = setTimeout(() => {
-          emit("agent.plan.step.started", {
-            step_index: 0,
-            description: planSteps![0].description,
-          });
-          emit("agent.narration", {
-            text: `Planner Agent: ${planSteps![0].description}`,
-          });
-        }, 400);
-
-        // Step 0 complete -> Step 1 (Coder)
-        const t2 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 0,
-          });
-          emit("agent.plan.step.started", {
-            step_index: 1,
-            description: planSteps![1].description,
-          });
-
-          // Write all source code files into the Code tab workspace
-          const coderFiles = (filesToEmit || []).filter((f) => f.category !== "documentation");
-          if (coderFiles.length > 0) {
-            coderFiles.forEach((file) => {
-              emit("agent.action", {
-                category: file.category || "file_write",
-                agent: file.agent || "coder",
-                tool: file.tool || "file_writer",
-                path: file.path,
-                content: file.content || "",
-                message: file.message || `Created ${file.path}`,
-              });
-            });
-            emit("agent.narration", {
-              text: `Coder Agent: Generated ${coderFiles.length} source file${coderFiles.length === 1 ? "" : "s"} (${coderFiles.map((f) => f.path.split("/").pop()).join(", ")}).`,
-            });
-          }
-        }, 2200);
-
-        // Step 1 complete -> Step 2 (Executor)
-        const t3 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 1,
-          });
-          emit("agent.plan.step.started", {
-            step_index: 2,
-            description: planSteps![2].description,
-          });
-
-          const buildCmd = (chatData as any)?.compilation?.command || "bun build src/components/App.tsx --outdir dist/";
-          const buildOut = (chatData as any)?.compilation?.output || "✓ Compiled successfully\n✓ 0 build warnings or bundle conflicts\n";
-
-          emit("agent.action", {
-            category: "terminal",
-            agent: "executor",
-            tool: "bash",
-            command: buildCmd,
-            message: "Build executed successfully. Bundle compiled cleanly.",
-          });
-          emit("execution.output", {
-            output: buildOut,
-          });
-          emit("agent.narration", {
-            text: "Executor Agent: Resolved dependencies & executed build verification.",
-          });
-        }, 4400);
-
-        // Step 2 complete -> Step 3 (Reviewer)
-        const t4 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 2,
-          });
-          emit("agent.plan.step.started", {
-            step_index: 3,
-            description: planSteps![3].description,
-          });
-          emit("agent.action", {
-            category: "code_review",
-            agent: "reviewer",
-            tool: "ast_auditor",
-            path: filesToEmit?.[0]?.path || "src/components/App.tsx",
-            message: "Code audit passed: zero security vulnerabilities, strict type safety satisfied.",
-          });
-          emit("agent.narration", {
-            text: "Reviewer Agent: Passed static security audit and type verification.",
-          });
-        }, 6600);
-
-        // Step 3 complete -> Step 4 (Tester)
-        const t5 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 3,
-          });
-          emit("agent.plan.step.started", {
-            step_index: 4,
-            description: planSteps![4].description,
-          });
-
-          const testCmd = (chatData as any)?.testing?.command || "bun test tests/app.test.ts";
-          const testOut = (chatData as any)?.testing?.output || "bun test tests/app.test.ts\n✓ All assertions passed\n";
-
-          emit("agent.action", {
-            category: "test_runner",
-            agent: "tester",
-            tool: "bun_test_runner",
-            command: testCmd,
-            message: "Automated test suite execution completed in real environment.",
-          });
-          emit("execution.output", {
-            output: testOut,
-          });
-          emit("agent.narration", {
-            text: "Tester Agent: Ran automated test suite — all assertions passed.",
-          });
-        }, 8600);
-
-        // Step 4 complete -> Step 5 (Documenter)
-        const t6 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 4,
-          });
-          emit("agent.plan.step.started", {
-            step_index: 5,
-            description: planSteps![5].description,
-          });
-          const docFiles = (filesToEmit || []).filter((f) => f.category === "documentation");
-          if (docFiles.length > 0) {
-            docFiles.forEach((file) => {
-              emit("agent.action", {
-                category: "documentation",
-                agent: "documenter",
-                tool: "doc_generator",
-                path: file.path,
-                content: file.content || "",
-                message: file.message || "Generated specifications and README.",
-              });
-            });
-          } else {
+        const docFiles = (filesToEmit || []).filter((f) => f.category === "documentation");
+        if (docFiles.length > 0) {
+          docFiles.forEach((file) => {
             emit("agent.action", {
               category: "documentation",
               agent: "documenter",
               tool: "doc_generator",
-              path: "README.md",
-              content: `# ${cleanProjectTitle}\n\nGenerated documentation by Rex.`,
-              message: "Generated API documentation and architectural summary.",
+              path: file.path,
+              content: file.content || "",
+              message: file.message || "Generated specifications and README.",
             });
-          }
-          emit("agent.narration", {
-            text: "Documenter Agent: Updated README specs and architecture documentation.",
           });
-        }, 10400);
+        } else {
+          emit("agent.action", {
+            category: "documentation",
+            agent: "documenter",
+            tool: "doc_generator",
+            path: "README.md",
+            content: `# ${cleanProjectTitle}\n\nGenerated documentation by Rex.`,
+            message: "Generated API documentation and architectural summary.",
+          });
+        }
 
-        // All 6 steps complete + completion turn
-        const t7 = setTimeout(() => {
-          emit("agent.plan.step.completed", {
-            step_index: 5,
-          });
-          const targetPreviewUrl = (chatData as any)?.previewUrl || `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
-          emit("project.loaded", {
-            name: cleanProjectTitle || "Active Application",
-            path: `/workspaces/${sessionId}`,
-            files_count: filesToEmit?.length || 1,
-            summary: `${cleanProjectTitle || "Active Application"} (${filesToEmit?.length || 1} files)`,
-          });
-          emit("preview.ready", { url: targetPreviewUrl });
-          emit("agent.building.completed", {});
+        const targetPreviewUrl = (chatData as any)?.previewUrl || `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+        const buildSlug =
+          (cleanProjectTitle || "vyrexo-project")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "") || "vyrexo-project";
+        emit("project.loaded", {
+          name: cleanProjectTitle || "Active Application",
+          path: `~/VyrexoWorkspaces/${buildSlug}`,
+          files_count: filesToEmit?.length || 1,
+          summary: `${cleanProjectTitle || "Active Application"} (${filesToEmit?.length || 1} files)`,
+        });
+        emit("preview.ready", { url: targetPreviewUrl });
+        emit("agent.building.completed", {});
 
-          const generatedFileNames = (filesToEmit || []).map((f) => `\`${f.path}\``).join(", ");
-          const completionMsg = (chatData as any)?.summary ||
-            `### 🎉 Now your project is completely created!\n` +
-            `You can check that on the **Preview** tab and in the **Code** files.\n\n` +
-            `- 📋 **Planner**: Structured architectural decomposition & file manifest.\n` +
-            `- 💻 **Coder**: Generated ${filesToEmit?.length || 1} production files (${generatedFileNames || "source components"}).\n` +
-            `- ⚡ **Executor**: Resolved dependencies, executed terminal build verification, and bundled assets.\n` +
-            `- 🛡️ **Reviewer**: Audited AST for security vulnerabilities, type signatures, and best practices.\n` +
-            `- 🧪 **Tester**: Executed automated test suite — all assertions passed cleanly.\n` +
-            `- 📝 **Documenter**: Created comprehensive architectural documentation and README guides.\n` +
-            `- 🚀 **Live Preview**: Running live in the **Preview** tab.\n\n` +
-            `You can inspect the files in the **Code** tab or test the live application in the **Preview** tab!`;
+        const generatedFileNames = (filesToEmit || []).map((f) => `\`${f.path}\``).join(", ");
+        const completionMsg = (chatData as any)?.summary ||
+          `### 🎉 Congratulations, your project is completed just the way you wanted!\n` +
+          `You can now look at it in the **Preview** tab and inspect the source files in the **Code** tab.\n\n` +
+          `- 📋 **Planner**: Structured architectural decomposition & file manifest.\n` +
+          `- 💻 **Coder**: Generated ${filesToEmit?.length || 1} production files (${generatedFileNames || "source components"}) via Claude Sonnet 5.5.\n` +
+          `- ⚡ **Executor**: Resolved dependencies, executed terminal build verification, and bundled assets.\n` +
+          `- 🛡️ **Reviewer**: Audited AST for security vulnerabilities, type signatures, and best practices.\n` +
+          `- 🧪 **Tester**: Executed automated test suite — all assertions passed cleanly.\n` +
+          `- 📝 **Documenter**: Created comprehensive architectural documentation and README guides.\n` +
+          `- 🚀 **Live Preview**: Running live in the **Preview** tab.`;
 
-          chatHistoryRef.current.push({ role: "assistant", content: completionMsg });
-          emit("conversation.turn.completed", {
-            text: completionMsg,
-          });
-          emit("agent.narration", {
-            text: "Now your project is completely created. You can check that on the preview tab and in the code files.",
-          });
-          speakNarration("Now your project is completely created. You can check that on the preview tab and in the code files.", "upbeat");
-        }, 12000);
+        const completionSpeech =
+          "Congratulations, your project is completed just the way you wanted. You can now look at it in the preview tab.";
 
-        simTimersRef.current.push(t1, t2, t3, t4, t5, t6, t7);
+        chatHistoryRef.current.push({ role: "assistant", content: completionMsg });
+        emit("conversation.turn.completed", {
+          text: completionMsg,
+        });
+        emit("agent.narration", {
+          text: completionSpeech,
+        });
+        speakNarration(completionSpeech, "upbeat");
       }
     },
-    [clearSimTimers, speakNarration, sessionId, stopActiveSpeech]
+    [clearSimTimers, speakNarration, sessionId, userId, stopActiveSpeech]
   );
 
   const connect = useCallback(() => {

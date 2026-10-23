@@ -422,6 +422,10 @@ export default function App() {
     downloadUrl?: string;
     vscodeServerUrl?: string;
     savedLocally?: string;
+    localFolderName?: string;
+    projectSlug?: string;
+    bridgeConnected?: boolean;
+    bridgeCmdCopied?: boolean;
   }>({});
   const [launchingIde, setLaunchingIde] = useState<string | null>(null);
   const [savingLocalFolder, setSavingLocalFolder] = useState(false);
@@ -430,35 +434,92 @@ export default function App() {
   const docInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ── Sessions (persisted + renamable) ────────────────────────
+  // ── Sessions (persisted + renamable, strictly scoped per user) ──────────────
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const loadedUserIdRef = useRef<string | null>(null);
 
-  // Load the sidebar list from the DB (scoped to the logged-in user) so it
-  // survives restarts and follows the account across browsers. Any sessions that
-  // only exist in this browser's localStorage are migrated into the DB so they
-  // aren't lost. Falls back to localStorage if the DB/backend is unavailable.
+  const isBlockedSessionId = useCallback((id?: string | null): boolean => {
+    if (!id) return true;
+    const trimmed = id.trim();
+    return (
+      !trimmed ||
+      trimmed === "default" ||
+      trimmed === "session-default-1" ||
+      trimmed === "session-default-2" ||
+      trimmed === "session-1790005321834"
+    );
+  }, []);
+
+  const userStorageKeys = useMemo(() => {
+    const uid = user?.id || "";
+    return {
+      sessions: uid ? `vyrexo_sessions_${uid}` : "",
+      activeSession: uid ? `vyrexo_active_session_${uid}` : "",
+      sessionProjects: uid ? `vyrexo_session_projects_${uid}` : "",
+      chatHistory: (sessionId: string) => (uid ? `vyrexo_chat_history_${uid}_${sessionId}` : ""),
+    };
+  }, [user?.id]);
+
+  // Reset all in-memory state when the authenticated user changes or signs out,
+  // and purge legacy unscoped keys so one user's sessions never leak to another user.
+  useEffect(() => {
+    try {
+      localStorage.removeItem("vyrexo_sessions");
+      localStorage.removeItem("vyrexo_active_session");
+      localStorage.removeItem("vyrexo_session_projects");
+      localStorage.removeItem("vyrexo_chat_history_session-1790005321834");
+      localStorage.removeItem("vyrexo_chat_history_session-default-1");
+      localStorage.removeItem("vyrexo_chat_history_session-default-2");
+    } catch {}
+
+    const currentUid = user?.id || null;
+    if (loadedUserIdRef.current !== currentUid) {
+      loadedUserIdRef.current = currentUid;
+      setSessions([]);
+      setSessionsLoaded(false);
+      setActiveSession(null);
+      setActiveProject(null);
+      activeProjectRef.current = null;
+      setProjectBound(false);
+      sentProjectPathRef.current = "";
+      setChatLog([]);
+      setCodeEvents([]);
+      setPreviewUrl("");
+      sessionPreviewsRef.current = {};
+      sessionProjectsRef.current = {};
+    }
+  }, [user?.id]);
+
+  // Load the sidebar list from the DB (strictly scoped to the logged-in user).
+  // For a brand-new user with no created sessions, the sidebar remains completely empty.
   useEffect(() => {
     if (!user?.id || sessionsLoaded) return;
     let cancelled = false;
+    const uid = user.id;
+    const sessionsKey = `vyrexo_sessions_${uid}`;
+    const projectsKey = `vyrexo_session_projects_${uid}`;
+
     const readLocal = (): StoredSession[] => {
       try {
-        const raw = localStorage.getItem("vyrexo_sessions");
+        const raw = localStorage.getItem(sessionsKey);
         const p = raw ? JSON.parse(raw) : null;
         return Array.isArray(p) ? p : [];
-      } catch { return []; }
+      } catch {
+        return [];
+      }
     };
     const healSessionRecord = (s: { id: string; name?: string; icon?: string; createdAt?: number }): StoredSession => {
       let localProjTitle: string | undefined;
       let localTurns: Array<{ role?: string; text?: string; content?: string }> = [];
       try {
-        const projMap = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+        const projMap = JSON.parse(localStorage.getItem(projectsKey) || "{}");
         if (projMap[s.id]?.name && projMap[s.id].name !== "vyrexo-workspace") {
           localProjTitle = projMap[s.id].name;
         }
       } catch {}
       try {
-        const rawTurns = localStorage.getItem(`vyrexo_chat_history_${s.id}`);
+        const rawTurns = localStorage.getItem(`vyrexo_chat_history_${uid}_${s.id}`);
         if (rawTurns) {
           const parsed = JSON.parse(rawTurns);
           if (Array.isArray(parsed)) localTurns = parsed;
@@ -484,81 +545,79 @@ export default function App() {
 
     (async () => {
       const local = readLocal()
-        .filter((s) => s?.id && s.id !== "session-default-1" && s.id !== "session-default-2")
+        .filter((s) => s?.id && !isBlockedSessionId(s.id) && (!("user_id" in s) || (s as any).user_id === uid))
         .map((s) => healSessionRecord(s));
       let dbList: StoredSession[] | null = null;
       try {
-        const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(user.id)}`);
+        const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(uid)}`, {
+          headers: { "x-user-id": uid },
+        });
         const d = await r.json();
         if (d?.ok && Array.isArray(d.sessions)) {
           dbList = d.sessions
-            .filter((s: { id: string }) => s?.id && s.id !== "session-default-1" && s.id !== "session-default-2")
+            .filter(
+              (s: { id: string; user_id?: string }) =>
+                s?.id && !isBlockedSessionId(s.id) && (!s.user_id || s.user_id === uid)
+            )
             .map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => healSessionRecord(s));
         }
-      } catch { /* DB down — fall back below */ }
+      } catch {
+        /* DB down — fall back below */
+      }
       if (cancelled) return;
 
       if (dbList === null) {
-        // No DB — keep working off localStorage (or a fresh session).
-        const now = Date.now();
-        setSessions(local.length ? local : [{ id: `session-${now}`, name: "New Session", icon: SESSION_ICONS[0], createdAt: now }]);
+        setSessions(local);
         setSessionsLoaded(true);
         return;
       }
 
-      // Migrate any localStorage-only sessions into the DB and heal any bad names in DB
+      // Sync only sessions explicitly stored under this user's scoped key
       const dbMap = new Map(dbList.map((s) => [s.id, s]));
       const toMigrate: StoredSession[] = [];
       for (const s of local) {
         const existingDb = dbMap.get(s.id);
         if (!existingDb) {
-          toMigrate.push(s);
           try {
-            await fetch("/api/sessions", {
+            const res = await fetch("/api/sessions", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+              headers: { "Content-Type": "application/json", "x-user-id": uid },
+              body: JSON.stringify({ id: s.id, user_id: uid, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
             });
+            if (res.ok) {
+              toMigrate.push(s);
+            }
           } catch {}
         } else if (isPlaceholderOrBadSessionName(existingDb.name) && !isPlaceholderOrBadSessionName(s.name)) {
           dbMap.set(s.id, { ...existingDb, name: s.name, icon: s.icon });
           try {
             await fetch("/api/sessions", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: s.id, user_id: user.id, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+              headers: { "Content-Type": "application/json", "x-user-id": uid },
+              body: JSON.stringify({ id: s.id, user_id: uid, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
             });
           } catch {}
         }
       }
-      let merged = [...toMigrate, ...Array.from(dbMap.values())].sort(
+      const merged = [...toMigrate, ...Array.from(dbMap.values())].sort(
         (a, b) => getSessionTimestamp(b) - getSessionTimestamp(a)
       );
-      if (!merged.length) {
-        // Brand-new account: seed a first session.
-        const now = Date.now();
-        const id = `session-${now}`;
-        const first = { id, name: "New Session", icon: SESSION_ICONS[0], createdAt: now };
-        try {
-          await fetch("/api/sessions", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, user_id: user.id, name: first.name, icon: first.icon, createdAt: now }),
-          });
-        } catch {}
-        merged = [first];
-      }
       if (cancelled) return;
       setSessions(merged);
       setSessionsLoaded(true);
     })();
-    return () => { cancelled = true; };
-  }, [user?.id, sessionsLoaded]);
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, sessionsLoaded, isBlockedSessionId]);
 
   useEffect(() => {
-    if (sessionsLoaded) {
-      try { localStorage.setItem("vyrexo_sessions", JSON.stringify(sessions)); } catch {}
+    if (sessionsLoaded && userStorageKeys.sessions) {
+      try {
+        localStorage.setItem(userStorageKeys.sessions, JSON.stringify(sessions));
+      } catch {}
     }
-  }, [sessions, sessionsLoaded]);
+  }, [sessions, sessionsLoaded, userStorageKeys.sessions]);
 
   const groupedSessions = useMemo(() => {
     const groups: Record<string, Session[]> = {};
@@ -609,7 +668,14 @@ export default function App() {
   } | null>(null);
   // Mirror in a ref so the WS-connected effect can read it without re-subscribing,
   // and track the last path we told the backend about to avoid duplicate sends.
-  const activeProjectRef = useRef<{ path: string; name: string } | null>(null);
+  const activeProjectRef = useRef<{
+    path: string;
+    name: string;
+    summary?: string;
+    filesCount?: number;
+    techStack?: string[];
+    source?: string;
+  } | null>(null);
   const sentProjectPathRef = useRef<string>("");
   useEffect(() => {
     activeProjectRef.current = activeProject;
@@ -870,7 +936,7 @@ export default function App() {
           setSteps(plan.map((s) => ({
             agent: s.agent_name,
             description: s.description,
-            status: "pending" as const,
+            status: (s.status === "completed" || s.status === "running" ? s.status : "pending") as "pending" | "running" | "completed",
           })));
         }
         break;
@@ -897,17 +963,43 @@ export default function App() {
 
       case "agent.action": {
         // A tool the agent ran (file read/write, command, git op) — feeds Code tab via RAF queue.
+        const filePath = msg.payload.path as string | undefined;
+        const fileContent = msg.payload.content as string | undefined;
         queueCodeEvent({
           kind: "action",
           agent: msg.payload.agent as string,
           tool: msg.payload.tool as string,
           category: msg.payload.category as string,
-          path: msg.payload.path as string,
+          path: filePath,
           command: msg.payload.command as string,
           message: msg.payload.message as string,
-          content: msg.payload.content as string,
+          content: fileContent,
           oldContent: msg.payload.old_content as string,
         });
+
+        // Real-time local disk write-back if user connected a local folder handle via File System Access API
+        if (filePath && typeof fileContent === "string" && typeof window !== "undefined") {
+          const curSess = activeSessionRef.current || "default";
+          const dirHandle = (window as any).__localDirHandles?.[curSess];
+          if (dirHandle) {
+            (async () => {
+              try {
+                const cleanRel = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+                if (!cleanRel || cleanRel.includes("..")) return;
+                const parts = cleanRel.split("/").filter(Boolean);
+                const fileName = parts.pop()!;
+                let targetDir = dirHandle;
+                for (const part of parts) {
+                  targetDir = await targetDir.getDirectoryHandle(part, { create: true });
+                }
+                const fHandle = await targetDir.getFileHandle(fileName, { create: true });
+                const writable = await fHandle.createWritable();
+                await writable.write(fileContent);
+                await writable.close();
+              } catch {}
+            })();
+          }
+        }
         break;
       }
 
@@ -919,32 +1011,72 @@ export default function App() {
 
       case "project.loaded": {
         if (msg.payload.ok !== false) {
-          const name = (msg.payload.name as string) || "project";
+          const prevProj = activeProjectRef.current;
+          const incomingName = (msg.payload.name as string) || "";
+          const validIncomingName =
+            incomingName &&
+            incomingName !== "project" &&
+            incomingName !== "vyrexo-workspace" &&
+            !/^session-\d+$/i.test(incomingName)
+              ? incomingName
+              : "";
+          const name = validIncomingName || prevProj?.name || "Project Workspace";
           const rawPath = (msg.payload.path as string) || "";
-          const path = rawPath === "." ? `/workspaces/${activeSession || "default"}` : rawPath;
-          const files = (msg.payload.files_indexed as number) ?? (msg.payload.files_count as number) ?? 0;
-          const proj = { path, name, filesCount: files };
+          const isBadContainerPath =
+            !rawPath ||
+            rawPath === "." ||
+            rawPath.startsWith("/app/applet") ||
+            rawPath.startsWith("/workspaces/") ||
+            rawPath.startsWith("/local/");
+          const prevCleanPath =
+            prevProj?.path &&
+            prevProj.path !== "." &&
+            !prevProj.path.startsWith("/app/applet") &&
+            !prevProj.path.startsWith("/workspaces/") &&
+            !prevProj.path.startsWith("/local/")
+              ? prevProj.path
+              : "";
+          const slug =
+            name
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-|-$/g, "") || "vyrexo-project";
+          const path = !isBadContainerPath
+            ? rawPath
+            : prevCleanPath || `~/VyrexoWorkspaces/${slug}`;
+          const files =
+            (msg.payload.files_indexed as number) ??
+            (msg.payload.files_count as number) ??
+            prevProj?.filesCount ??
+            0;
+          const proj = {
+            ...prevProj,
+            path,
+            name,
+            filesCount: files,
+          };
           setActiveProject(proj);
+          activeProjectRef.current = proj;
           setProjectBound(true);
-          if (activeSession) {
+          if (activeSession && userStorageKeys.sessionProjects) {
             sessionProjectsRef.current[activeSession] = proj;
             try {
-              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+              const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
               map[activeSession] = proj;
-              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+              localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
             } catch {}
           }
-          setNarration(`Connected to ${name}${files ? ` — indexed ${files} file${files === 1 ? "" : "s"}` : ""}. Everything I build now happens in this project.`);
         } else {
           setActiveProject(null);
+          activeProjectRef.current = null;
           setProjectBound(false);
           sentProjectPathRef.current = "";
-          if (activeSession) {
+          if (activeSession && userStorageKeys.sessionProjects) {
             sessionProjectsRef.current[activeSession] = null;
             try {
-              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
+              const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
               delete map[activeSession];
-              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+              localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
             } catch {}
           }
           setNarration((msg.payload.error as string) || "Couldn't connect that project.");
@@ -998,8 +1130,14 @@ export default function App() {
     pushChunk(data);
   }, [pushChunk]);
 
+  const fallbackSessionId = useMemo(
+    () => `s_live_${(user?.id || "workspace").replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [user?.id]
+  );
+
   const { status: wsStatus, connect, disconnect, sendMessage } = useWebSocket({
-    sessionId: activeSession || "default",
+    sessionId: activeSession || fallbackSessionId,
+    userId: user?.id,
     onMessage: onServerMessage,
     onAudio: onAudioMessage,
   });
@@ -1152,8 +1290,8 @@ export default function App() {
         .replace(/^he\s+/i, "Hey ")
         .replace(/\bbed\s+for\b/gi, "built for")
         .replace(/\bbill\s+for\b/gi, "built for")
-        .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|me|new)\b/gi, "build $2")
-        .replace(/\b(bill|bil)\s+(finance|financial|calc|calculator|caculator|project|app|software)\b/gi, "build $2")
+        .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|that|this|my|our|me|new)\b/gi, "build $2")
+        .replace(/\b(bill|bil)\s+(finance|financial|calc|calculator|caculator|project|app|application|software|todo|to-do)\b/gi, "build $2")
         .replace(/\b(cacu|cacula|caculator|calcualtor|calculater|calcultor|calcutor)\b/gi, "calculator")
         .replace(/\bor\s+a\s+mart\b/gi, "AuraMart")
         .replace(/\baura\s*mart\b/gi, "AuraMart")
@@ -1260,16 +1398,20 @@ export default function App() {
 
   // ── Auto-persist active session chat log to localStorage & backend ────────
   useEffect(() => {
-    if (!activeSession || chatLog.length === 0) return;
-    try {
-      localStorage.setItem(`vyrexo_chat_history_${activeSession}`, JSON.stringify(chatLog));
-    } catch {}
+    if (!activeSession || !user?.id || chatLog.length === 0) return;
+    const chatKey = userStorageKeys.chatHistory(activeSession);
+    if (chatKey) {
+      try {
+        localStorage.setItem(chatKey, JSON.stringify(chatLog));
+      } catch {}
+    }
 
     const timer = setTimeout(() => {
       fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-user-id": user.id },
         body: JSON.stringify({
+          user_id: user.id,
           turns: chatLog.map((c) => ({
             role: c.role,
             text: c.text,
@@ -1282,44 +1424,69 @@ export default function App() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [activeSession, chatLog]);
+  }, [activeSession, chatLog, user?.id, userStorageKeys]);
 
   const handleSessionClick = useCallback(
     (id: string) => {
+      if (isBlockedSessionId(id)) return;
       if (activeSession && activeSession !== id) disconnect();
       setActiveSession(id);
-      try {
-        localStorage.setItem("vyrexo_active_session", id);
-      } catch {}
+      if (userStorageKeys.activeSession) {
+        try {
+          localStorage.setItem(userStorageKeys.activeSession, id);
+        } catch {}
+      }
       setSteps([]);
       setNarration("Say 'Rex' to start, or click the orb");
 
-      // Instantly restore this session's saved conversation from localStorage (zero flicker)
+      // Instantly restore this session's saved conversation from user-scoped localStorage
       let initialTurns: Array<{ role: string; text: string; images?: string[]; docs?: string[] }> = [];
-      try {
-        const raw = localStorage.getItem(`vyrexo_chat_history_${id}`);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) initialTurns = parsed;
-        }
-      } catch {}
+      const chatKey = userStorageKeys.chatHistory(id);
+      if (chatKey) {
+        try {
+          const raw = localStorage.getItem(chatKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) initialTurns = parsed;
+          }
+        } catch {}
+      }
       setChatLog(initialTurns);
 
       setCodeEvents([]);
       setTranscript("");
-      // Strict session isolation: restore this session's dedicated preview or start fresh
       const sessionUrl = sessionPreviewsRef.current[id] || "";
       setPreviewUrl(sessionUrl);
 
-      // Strict session isolation: restore THIS session's connected project (or null if none)
       let sessProj = sessionProjectsRef.current[id] || null;
-      if (sessProj && (sessProj.path === "." || sessProj.name === "vyrexo-workspace")) {
+      if (
+        sessProj &&
+        (sessProj.path === "." ||
+          sessProj.name === "vyrexo-workspace" ||
+          /^session-\d+$/i.test(sessProj.name || ""))
+      ) {
         sessProj = null;
       }
-      if (!sessProj) {
+      if (!sessProj && userStorageKeys.sessionProjects) {
         try {
-          const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-          if (map[id] && map[id].path !== "." && map[id].name !== "vyrexo-workspace") {
+          const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+          if (
+            map[id] &&
+            map[id].path !== "." &&
+            map[id].name !== "vyrexo-workspace" &&
+            !/^session-\d+$/i.test(map[id].name || "")
+          ) {
+            if (
+              typeof map[id].path === "string" &&
+              (map[id].path.startsWith("/app/applet") || map[id].path.startsWith("/workspaces/"))
+            ) {
+              const slug =
+                String(map[id].name || "project")
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, "-")
+                  .replace(/^-|-$/g, "") || "project";
+              map[id].path = `~/VyrexoWorkspaces/${slug}`;
+            }
             sessProj = map[id];
           }
         } catch {}
@@ -1329,8 +1496,11 @@ export default function App() {
       sentProjectPathRef.current = sessProj ? sessProj.path : "";
       setProjectBound(!!sessProj);
 
-      // Also verify with backend for this specific session
-      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}`)
+      const uidParam = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
+      const headers: Record<string, string> = user?.id ? { "x-user-id": user.id } : {};
+
+      // Verify with backend for this specific user + session and load all session files into Files tab
+      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidParam}`, { headers })
         .then((r) => r.json())
         .then((d) => {
           if (d?.ok && d.connected && d.project) {
@@ -1345,7 +1515,26 @@ export default function App() {
             setActiveProject(p);
             activeProjectRef.current = p;
             sessionProjectsRef.current[id] = p;
-            if (!sessionPreviewsRef.current[id]) {
+
+            // Populate codeEvents immediately so the Files tab and VS Code modal have all session files ready
+            if (Array.isArray(d.project.files) && d.project.files.length > 0 && activeSessionRef.current === id) {
+              const restoredFileEvents: CodeEvent[] = d.project.files
+                .filter((f: any) => f?.path && typeof f.content === "string" && !String(f.path).endsWith(".code-workspace"))
+                .map((f: any) => ({
+                  kind: "action" as const,
+                  agent: "coder",
+                  tool: "file_writer",
+                  category: "file_write",
+                  path: String(f.path).replace(/^\/+/, ""),
+                  content: String(f.content),
+                  message: `Restored ${f.path}`,
+                }));
+              if (restoredFileEvents.length > 0) {
+                setCodeEvents(restoredFileEvents);
+              }
+            }
+
+            if (!sessionPreviewsRef.current[id] && (d.project.filesCount > 0 || (d.project.files && d.project.files.length > 0))) {
               const restoredPreviewUrl = `/api/preview?session=${encodeURIComponent(id)}`;
               sessionPreviewsRef.current[id] = restoredPreviewUrl;
               setPreviewUrl(restoredPreviewUrl);
@@ -1360,21 +1549,26 @@ export default function App() {
                 )
               );
             }
-            try {
-              const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-              map[id] = p;
-              localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
-            } catch {}
+            if (userStorageKeys.sessionProjects) {
+              try {
+                const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+                map[id] = p;
+                localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
+              } catch {}
+            }
           }
         })
         .catch(() => {});
 
       // Restore and synchronize this session's saved conversation with the backend
       historyReqRef.current = id;
-      fetch(`/api/sessions/${encodeURIComponent(id)}/history`)
+      fetch(
+        `/api/sessions/${encodeURIComponent(id)}/history${user?.id ? `?user_id=${encodeURIComponent(user.id)}` : ""}`,
+        { headers }
+      )
         .then((r) => r.json())
         .then((d) => {
-          if (historyReqRef.current !== id) return; // user switched again
+          if (historyReqRef.current !== id) return;
           if (d?.ok && Array.isArray(d.turns) && d.turns.length) {
             const mapped = d.turns.map((t: { role: string; content?: string; text?: string; images?: string[]; docs?: string[] }) => ({
               role: t.role,
@@ -1386,14 +1580,16 @@ export default function App() {
               if (prev.length >= mapped.length) return prev;
               return mapped;
             });
-            try {
-              localStorage.setItem(`vyrexo_chat_history_${id}`, JSON.stringify(mapped));
-            } catch {}
+            if (chatKey) {
+              try {
+                localStorage.setItem(chatKey, JSON.stringify(mapped));
+              } catch {}
+            }
           }
         })
         .catch(() => {});
     },
-    [activeSession, disconnect]
+    [activeSession, disconnect, isBlockedSessionId, user?.id, userStorageKeys]
   );
 
   // Create a brand-new session: persist it to the DB, add to the list, activate.
@@ -1414,52 +1610,72 @@ export default function App() {
       },
     ];
     setChatLog(initialGreeting);
-    try {
-      localStorage.setItem(`vyrexo_chat_history_${id}`, JSON.stringify(initialGreeting));
-    } catch {}
+    const chatKey = userStorageKeys.chatHistory(id);
+    if (chatKey) {
+      try {
+        localStorage.setItem(chatKey, JSON.stringify(initialGreeting));
+      } catch {}
+    }
 
     const now = Date.now();
     setSessions((prev) => [{ id, name: "New Session", icon, createdAt: now }, ...prev]);
     if (user?.id) {
       fetch("/api/sessions", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-user-id": user.id },
         body: JSON.stringify({ id, user_id: user.id, name: "New Session", icon, createdAt: now }),
       }).catch(() => {});
     }
     handleSessionClick(id);
     return id;
-  }, [handleSessionClick, user?.id, sessions.length]);
+  }, [handleSessionClick, user?.id, sessions.length, userStorageKeys]);
 
-  const handleRenameSession = useCallback((id: string, name: string) => {
-    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
-    fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, name, forceRename: true }),
-    }).catch(() => {});
-    fetch(`/api/sessions/${encodeURIComponent(id)}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    }).catch(() => {});
-  }, []);
+  const handleRenameSession = useCallback(
+    (id: string, name: string) => {
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+      if (!user?.id) return;
+      fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-user-id": user.id },
+        body: JSON.stringify({ id, user_id: user.id, name, forceRename: true }),
+      }).catch(() => {});
+      fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-user-id": user.id },
+        body: JSON.stringify({ name, user_id: user.id }),
+      }).catch(() => {});
+    },
+    [user?.id]
+  );
 
   const handleDeleteSession = useCallback(
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
-      fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
-      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
-      fetch(`/api/sessions/${encodeURIComponent(id)}/history`, { method: "DELETE" }).catch(() => {});
+      const uidQuery = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
+      const uidFirstQuery = user?.id ? `?user_id=${encodeURIComponent(user.id)}` : "";
+      const headers: Record<string, string> = user?.id ? { "x-user-id": user.id } : {};
+      fetch(`/api/sessions/${encodeURIComponent(id)}${uidFirstQuery}`, { method: "DELETE", headers }).catch(() => {});
+      fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidQuery}`, { method: "DELETE", headers }).catch(() => {});
+      fetch(`/api/sessions/${encodeURIComponent(id)}/history${uidFirstQuery}`, { method: "DELETE", headers }).catch(() => {});
       delete sessionProjectsRef.current[id];
       delete sessionPreviewsRef.current[id];
       try {
-        localStorage.removeItem(`vyrexo_chat_history_${id}`);
-        const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-        delete map[id];
-        localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
+        const chatKey = userStorageKeys.chatHistory(id);
+        if (chatKey) localStorage.removeItem(chatKey);
+        if (userStorageKeys.sessionProjects) {
+          const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+          delete map[id];
+          localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
+        }
       } catch {}
       if (id === activeSession) {
         disconnect();
         setActiveSession(null);
+        if (userStorageKeys.activeSession) {
+          try {
+            localStorage.removeItem(userStorageKeys.activeSession);
+          } catch {}
+        }
         setActiveProject(null);
         activeProjectRef.current = null;
         setProjectBound(false);
@@ -1467,19 +1683,22 @@ export default function App() {
         setChatLog([]);
       }
     },
-    [activeSession, disconnect]
+    [activeSession, disconnect, user?.id, userStorageKeys]
   );
 
   const handleClearCurrentChat = useCallback(() => {
     if (!activeSession) return;
     setChatLog([]);
     try {
-      localStorage.removeItem(`vyrexo_chat_history_${activeSession}`);
+      const chatKey = userStorageKeys.chatHistory(activeSession);
+      if (chatKey) localStorage.removeItem(chatKey);
     } catch {}
-    fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history`, {
+    const uidFirstQuery = user?.id ? `?user_id=${encodeURIComponent(user.id)}` : "";
+    fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history${uidFirstQuery}`, {
       method: "DELETE",
+      headers: user?.id ? { "x-user-id": user.id } : undefined,
     }).catch(() => {});
-  }, [activeSession]);
+  }, [activeSession, user?.id, userStorageKeys]);
 
   const handleDeleteOldChats = useCallback(
     async (days: number) => {
@@ -1487,7 +1706,8 @@ export default function App() {
       const toRemove = sessions.filter((s) => getSessionTimestamp(s) < cutoff);
       for (const s of toRemove) {
         try {
-          localStorage.removeItem(`vyrexo_chat_history_${s.id}`);
+          const chatKey = userStorageKeys.chatHistory(s.id);
+          if (chatKey) localStorage.removeItem(chatKey);
         } catch {}
       }
       setSessions((prev) => prev.filter((s) => getSessionTimestamp(s) >= cutoff));
@@ -1497,20 +1717,22 @@ export default function App() {
         setActiveProject(null);
         setChatLog([]);
       }
+      if (!user?.id) return;
       try {
         await fetch(
-          `/api/sessions?older_than_days=${days}&user_id=${encodeURIComponent(user?.id || "dev-local-user")}`,
-          { method: "DELETE" }
+          `/api/sessions?older_than_days=${days}&user_id=${encodeURIComponent(user.id)}`,
+          { method: "DELETE", headers: { "x-user-id": user.id } }
         );
       } catch {}
     },
-    [sessions, activeSession, disconnect, user?.id]
+    [sessions, activeSession, disconnect, user?.id, userStorageKeys]
   );
 
   const handleClearAllHistory = useCallback(async () => {
     for (const s of sessions) {
       try {
-        localStorage.removeItem(`vyrexo_chat_history_${s.id}`);
+        const chatKey = userStorageKeys.chatHistory(s.id);
+        if (chatKey) localStorage.removeItem(chatKey);
       } catch {}
     }
     setChatLog([]);
@@ -1518,14 +1740,20 @@ export default function App() {
     disconnect();
     setActiveSession(null);
     setActiveProject(null);
-    try {
-      await fetch(
-        `/api/sessions?clear_all=true&user_id=${encodeURIComponent(user?.id || "dev-local-user")}`,
-        { method: "DELETE" }
-      );
-    } catch {}
-    createSession();
-  }, [sessions, disconnect, user?.id, createSession]);
+    if (userStorageKeys.activeSession) {
+      try {
+        localStorage.removeItem(userStorageKeys.activeSession);
+      } catch {}
+    }
+    if (user?.id) {
+      try {
+        await fetch(
+          `/api/sessions?clear_all=true&user_id=${encodeURIComponent(user.id)}`,
+          { method: "DELETE", headers: { "x-user-id": user.id } }
+        );
+      } catch {}
+    }
+  }, [sessions, disconnect, user?.id, userStorageKeys]);
 
   // Connect WS + start voice when session is selected
   useEffect(() => {
@@ -1568,16 +1796,18 @@ export default function App() {
     }
   }, [wsStatus, sendMessage]);
 
-  // Auto-restore active session on startup once sessions are loaded
+  // Auto-restore active session on startup ONLY if the user already has sessions
   useEffect(() => {
     if (!sessionsLoaded || sessions.length === 0 || activeSession) return;
     let targetId = "";
-    try {
-      const savedId = localStorage.getItem("vyrexo_active_session");
-      if (savedId && sessions.some((s) => s.id === savedId)) {
-        targetId = savedId;
-      }
-    } catch {}
+    if (userStorageKeys.activeSession) {
+      try {
+        const savedId = localStorage.getItem(userStorageKeys.activeSession);
+        if (savedId && sessions.some((s) => s.id === savedId)) {
+          targetId = savedId;
+        }
+      } catch {}
+    }
     if (!targetId) {
       const namedSession = sessions.find((s) => s.name && s.name !== "New Session");
       targetId = namedSession ? namedSession.id : sessions[0].id;
@@ -1585,18 +1815,48 @@ export default function App() {
     if (targetId) {
       handleSessionClick(targetId);
     }
-  }, [sessionsLoaded, sessions, activeSession, handleSessionClick]);
+  }, [sessionsLoaded, sessions, activeSession, handleSessionClick, userStorageKeys.activeSession]);
 
-  // Restore session-isolated projects map on initial load
+  // Restore user-scoped projects map on initial load
   useEffect(() => {
+    if (!userStorageKeys.sessionProjects) return;
     try {
-      const saved = localStorage.getItem("vyrexo_session_projects");
+      const saved = localStorage.getItem(userStorageKeys.sessionProjects);
       if (saved) {
         const map = JSON.parse(saved);
+        let modified = false;
         for (const k of Object.keys(map)) {
-          if (map[k]?.path === "." || map[k]?.name === "vyrexo-workspace") {
+          if (
+            map[k]?.path === "." ||
+            map[k]?.name === "vyrexo-workspace" ||
+            /^session-\d+$/i.test(map[k]?.name || "")
+          ) {
             delete map[k];
+            modified = true;
+          } else if (
+            typeof map[k]?.path === "string" &&
+            (map[k].path.startsWith("/app/applet") ||
+              map[k].path.startsWith("/workspaces/") ||
+              map[k].path.startsWith("~/") ||
+              map[k].path.startsWith("~\\"))
+          ) {
+            const folderTail = map[k].path.startsWith("~")
+              ? map[k].path.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "")
+              : "";
+            const slug =
+              folderTail ||
+              map[k]?.localFolderName ||
+              String(map[k].name || "amaze")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-|-$/g, "") ||
+              "amaze";
+            map[k].path = `C:\\Users\\hp\\OneDrive\\Desktop\\${slug}`;
+            modified = true;
           }
+        }
+        if (modified) {
+          localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
         }
         sessionProjectsRef.current = map;
         if (activeSession && map[activeSession]) {
@@ -1604,7 +1864,7 @@ export default function App() {
         }
       }
     } catch {}
-  }, [activeSession]);
+  }, [activeSession, userStorageKeys.sessionProjects]);
 
   // A fresh socket means the backend hasn't been told our project yet.
   useEffect(() => {
@@ -1618,7 +1878,10 @@ export default function App() {
   useEffect(() => {
     if (wsStatus === "connected" && activeProject && sentProjectPathRef.current !== activeProject.path) {
       sentProjectPathRef.current = activeProject.path;
-      sendMessage({ type: "project.set", payload: { path: activeProject.path } });
+      sendMessage({
+        type: "project.set",
+        payload: { path: activeProject.path, name: activeProject.name },
+      });
     }
   }, [wsStatus, activeProject, sendMessage]);
 
@@ -1639,51 +1902,106 @@ export default function App() {
   }, [pendingCmd, wsStatus, projectBound, sendMessage, unmuteAudio]);
 
   // ── Project + VS Code ────────────────────────────────────────
-  // Browsers cannot expose an absolute filesystem path, so the directory
-  // picker is used (when available) only to suggest a folder name; the user
-  // confirms the absolute path. The backend validates it, indexes it, and
-  // scopes every subsequent task in this session to that folder.
   const handleConnectProject = useCallback(() => {
     setConnectProjectModalOpen(true);
   }, []);
 
   const handleSelectProjectFromModal = useCallback(
     (project: {
+      id?: string;
+      sessionId?: string;
       name: string;
       path: string;
       summary?: string;
       filesCount?: number;
       techStack?: string[];
       source?: string;
+      files?: Array<{ path: string; content: string; size?: number }>;
     }) => {
+      // If user clicked an existing project from the Workspaces tab that belongs to another session,
+      // switch directly to that project's session!
+      if (
+        project.sessionId &&
+        project.sessionId !== activeSession &&
+        project.source !== "local_folder"
+      ) {
+        handleSessionClick(project.sessionId);
+        return;
+      }
+
+      const currentSessionId = project.sessionId || activeSession || createSession();
+      if (currentSessionId !== activeSession) {
+        setActiveSession(currentSessionId);
+      }
+
       setActiveProject(project);
       activeProjectRef.current = project;
-      setNarration(`Connected to ${project.name}${project.filesCount ? ` (${project.filesCount} files)` : ""}.`);
       sentProjectPathRef.current = "";
 
-      const currentSessionId = activeSession || `session-${Date.now()}`;
-      sessionProjectsRef.current[currentSessionId] = project;
-      try {
-        const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-        map[currentSessionId] = project;
-        localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
-      } catch {}
+      // Update session name in sidebar if it was still "New Session"
+      if (project.name && project.name !== "New Session") {
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === currentSessionId && (!s.name || s.name === "New Session")
+              ? { ...s, name: project.name, icon: project.source === "local_folder" ? "📁" : s.icon }
+              : s
+          )
+        );
+      }
 
-      if (!activeSession) {
-        createSession();
-      } else if (wsStatus === "connected") {
+      // If uploaded local folder contains files, populate the Code tab immediately
+      if (Array.isArray(project.files) && project.files.length > 0) {
+        const uploadedEvents: CodeEvent[] = project.files.map((f) => ({
+          kind: "action",
+          agent: "Workspace Sync",
+          tool: "read_file",
+          category: "file",
+          path: f.path,
+          content: f.content,
+          message: `Loaded ${f.path} from local folder ${project.name}`,
+        }));
+        setCodeEvents(uploadedEvents);
+        setActiveRightTab("code");
+        setRightPanelCollapsed(false);
+      }
+
+      // Manage feedback for both empty local folders (0 files) and populated folders
+      if (project.source === "local_folder" && (project.filesCount === 0 || !project.filesCount)) {
+        const msg = `Connected to your empty local folder "${project.name}". Tell me what application you'd like to build, and I'll generate the entire file structure inside this workspace so you can open and sync it in VS Code.`;
+        setNarration(msg);
+        setChatLog((prev) => [...prev, { role: "assistant", text: msg }]);
+      } else {
+        setNarration(
+          `Connected to ${project.name}${
+            project.filesCount ? ` (${project.filesCount} files)` : ""
+          }.`
+        );
+      }
+
+      sessionProjectsRef.current[currentSessionId] = project;
+      if (userStorageKeys.sessionProjects) {
+        try {
+          const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+          map[currentSessionId] = project;
+          localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
+        } catch {}
+      }
+
+      if (wsStatus === "connected") {
         sentProjectPathRef.current = project.path;
         sendMessage({ type: "project.set", payload: { path: project.path } });
       }
     },
-    [activeSession, wsStatus, sendMessage, createSession]
+    [activeSession, wsStatus, sendMessage, createSession, handleSessionClick, userStorageKeys.sessionProjects]
   );
 
   const handleDisconnectProject = useCallback(async () => {
     if (!activeSession) return;
     try {
-      await fetch(`/api/projects?sessionId=${encodeURIComponent(activeSession)}`, {
+      const uidQuery = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
+      await fetch(`/api/projects?sessionId=${encodeURIComponent(activeSession)}${uidQuery}`, {
         method: "DELETE",
+        headers: user?.id ? { "x-user-id": user.id } : undefined,
       });
     } catch {}
     setActiveProject(null);
@@ -1691,88 +2009,199 @@ export default function App() {
     setProjectBound(false);
     sentProjectPathRef.current = "";
     sessionProjectsRef.current[activeSession] = null;
-    try {
-      const map = JSON.parse(localStorage.getItem("vyrexo_session_projects") || "{}");
-      delete map[activeSession];
-      localStorage.setItem("vyrexo_session_projects", JSON.stringify(map));
-    } catch {}
+    if (userStorageKeys.sessionProjects) {
+      try {
+        const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+        delete map[activeSession];
+        localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
+      } catch {}
+    }
     setNarration("Project disconnected from this session.");
     setConnectProjectModalOpen(false);
-  }, [activeSession]);
+  }, [activeSession, user?.id, userStorageKeys.sessionProjects]);
 
   const handleOpenVSCode = useCallback(async () => {
     try {
       const currentFiles = codeEvents
-        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string" && !e.path.endsWith(".code-workspace"))
         .map((e) => ({ path: e.path!, content: e.content! }));
+      const rawActivePath = activeProject?.path || "";
       const safeProjectPath =
-        activeProject?.path && activeProject.path !== "." ? activeProject.path : undefined;
-      const sessionTitle =
+        rawActivePath &&
+        rawActivePath !== "." &&
+        !rawActivePath.startsWith("/app/applet") &&
+        !rawActivePath.startsWith("/workspaces/") &&
+        !rawActivePath.startsWith("/local/")
+          ? rawActivePath
+          : undefined;
+      const rawTitle =
         activeProject?.name ||
         sessions.find((s) => s.id === activeSession)?.name ||
         undefined;
+      const sessionTitle =
+        rawTitle && rawTitle !== "New Session" && !/^session-\d+$/i.test(rawTitle)
+          ? rawTitle
+          : undefined;
 
       const res = await fetch("/api/projects/vscode", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(user?.id ? { "x-user-id": user.id } : {}) },
         body: JSON.stringify({
           path: safeProjectPath,
-          sessionId: activeSession || "default",
-          title: sessionTitle && sessionTitle !== "New Session" ? sessionTitle : undefined,
+          sessionId: activeSession || "",
+          user_id: user?.id,
+          title: sessionTitle,
           files: currentFiles.length > 0 ? currentFiles : undefined,
           localAgentUrl: "http://127.0.0.1:4040",
         }),
       });
       const data = await res.json();
       if (data?.ok) {
+        const folderLabel =
+          data.localFolderName ||
+          sessions.find((s) => s.id === activeSession)?.name ||
+          data.projectSlug ||
+          "amaze";
+        let resolvedLocalPath =
+          data.targetPath ||
+          safeProjectPath ||
+          `C:\\Users\\hp\\OneDrive\\Desktop\\${folderLabel}`;
+        if (resolvedLocalPath.startsWith("~/") || resolvedLocalPath.startsWith("~\\")) {
+          const tail =
+            resolvedLocalPath.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "") ||
+            folderLabel;
+          resolvedLocalPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail}`;
+        }
+        let bridgeConnected = false;
+        let autoSyncedMsg: string | undefined;
+
+        // Proactively check if Local Desktop Bridge (127.0.0.1:4040) is running and auto-sync all session files to disk!
+        try {
+          const syncRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: resolvedLocalPath,
+              localFolderName: data.localFolderName || sessions.find((s) => s.id === activeSession)?.name,
+              projectSlug: data.projectSlug,
+              projectName: data.projectName,
+              sessionId: activeSession || "default",
+              files: data.files || [],
+              openIde: false,
+            }),
+            signal: AbortSignal.timeout(1500),
+          });
+          if (syncRes.ok) {
+            const syncData = await syncRes.json().catch(() => null);
+            if (syncData?.ok && syncData.targetPath) {
+              resolvedLocalPath = syncData.targetPath;
+              bridgeConnected = true;
+              autoSyncedMsg = `Synced all ${data.files?.length || data.filesCount || 0} project files directly to ${syncData.targetPath}`;
+            }
+          }
+        } catch {}
+
         setVsCodeDetails({
-          targetPath: data.targetPath,
+          targetPath: resolvedLocalPath,
           vscodeUri: data.vscodeUri,
           cursorUri: data.cursorUri,
           windsurfUri: data.windsurfUri,
           vscodeInsidersUri: data.vscodeInsidersUri,
-          workspaceUri: data.workspaceUri,
-          cursorWorkspaceUri: data.cursorWorkspaceUri,
-          windsurfWorkspaceUri: data.windsurfWorkspaceUri,
           source: data.source,
           message: data.message,
           projectName: data.projectName,
+          projectSlug: data.projectSlug,
+          localFolderName: data.localFolderName,
           filesCount: data.filesCount,
           files: data.files || [],
-          requiresLocalSync: data.requiresLocalSync,
-          syncPackageUrl: data.syncPackageUrl,
           downloadUrl: data.downloadUrl,
           vscodeServerUrl:
             data.vscodeServerUrl ||
-            `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`,
+            `/vscode?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`,
+          bridgeConnected,
+          savedLocally: autoSyncedMsg,
         });
-        setIdeTargetPathInput(data.targetPath || safeProjectPath || "");
+        setIdeTargetPathInput(resolvedLocalPath);
         setVsCodeModalOpen(true);
       }
     } catch (err) {
       console.error("Failed to prepare IDE workspace launch:", err);
       setVsCodeModalOpen(true);
     }
-  }, [activeProject, activeSession, codeEvents, sessions]);
+  }, [activeProject, activeSession, codeEvents, sessions, user?.id]);
+
+  // Poll Local Desktop Bridge (127.0.0.1:4040) while the VS Code modal is open so if the user starts the bridge,
+  // it immediately syncs all session files into their local folder (e.g. "amaze") and opens VS Code automatically!
+  useEffect(() => {
+    if (!vsCodeModalOpen || vsCodeDetails.bridgeConnected) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const health = await fetch("http://127.0.0.1:4040/health", {
+          signal: AbortSignal.timeout(1000),
+        });
+        if (!health.ok || cancelled) return;
+        const filesToSync = vsCodeDetails.files || [];
+        const syncRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: ideTargetPathInput || vsCodeDetails.targetPath,
+            localFolderName:
+              vsCodeDetails.localFolderName ||
+              sessions.find((s) => s.id === activeSession)?.name,
+            projectSlug: vsCodeDetails.projectSlug,
+            projectName: vsCodeDetails.projectName,
+            sessionId: activeSession || "default",
+            files: filesToSync,
+            openIde: true,
+            ide: "vscode",
+          }),
+          signal: AbortSignal.timeout(2500),
+        });
+        if (syncRes.ok && !cancelled) {
+          const syncData = await syncRes.json().catch(() => null);
+          if (syncData?.ok) {
+            const realDiskPath = syncData.targetPath || syncData.path;
+            if (realDiskPath) setIdeTargetPathInput(realDiskPath);
+            setVsCodeDetails((prev) => ({
+              ...prev,
+              bridgeConnected: true,
+              targetPath: realDiskPath || prev.targetPath,
+              savedLocally: `Desktop Bridge Connected! Synced all ${filesToSync.length} files to "${realDiskPath}" and launched VS Code.`,
+            }));
+          }
+        }
+      } catch {}
+    }, 1800);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [vsCodeModalOpen, vsCodeDetails, ideTargetPathInput, activeSession, sessions]);
 
   const handleSaveToLocalFolder = useCallback(async () => {
     setSavingLocalFolder(true);
     try {
       const currentFiles = codeEvents
-        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string" && !e.path.endsWith(".code-workspace"))
         .map((e) => ({ path: e.path!, content: e.content! }));
-      const sessionTitle =
+      const rawTitle =
         activeProject?.name ||
         vsCodeDetails.projectName ||
         sessions.find((s) => s.id === activeSession)?.name ||
         "vyrexo-project";
+      const sessionTitle =
+        rawTitle !== "New Session" && !/^session-\d+$/i.test(rawTitle) ? rawTitle : undefined;
 
       const res = await fetch("/api/projects/vscode", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(user?.id ? { "x-user-id": user.id } : {}) },
         body: JSON.stringify({
-          sessionId: activeSession || "default",
-          title: sessionTitle !== "New Session" ? sessionTitle : undefined,
+          path: ideTargetPathInput || undefined,
+          sessionId: activeSession || "",
+          user_id: user?.id,
+          title: sessionTitle,
           files: currentFiles.length > 0 ? currentFiles : undefined,
         }),
       });
@@ -1780,71 +2209,107 @@ export default function App() {
       const filesToSave: Array<{ path: string; content: string }> =
         data?.files || vsCodeDetails.files || currentFiles || [];
 
-      if (typeof window !== "undefined" && "showDirectoryPicker" in window) {
-        const rootHandle = await (window as any).showDirectoryPicker({
-          mode: "readwrite",
+      // 1. Try Local Desktop Bridge (127.0.0.1:4040) first — writes directly to real disk folder without any browser security restrictions
+      try {
+        const agentRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: ideTargetPathInput || data?.targetPath,
+            localFolderName:
+              data?.localFolderName ||
+              vsCodeDetails.localFolderName ||
+              sessions.find((s) => s.id === activeSession)?.name,
+            projectSlug: data?.projectSlug || vsCodeDetails.projectSlug,
+            projectName: data?.projectName || sessionTitle,
+            sessionId: activeSession || "default",
+            files: filesToSave,
+            openIde: false,
+          }),
+          signal: AbortSignal.timeout(2000),
         });
-        for (const file of filesToSave) {
-          const cleanRel = String(file.path || "")
-            .replace(/\\/g, "/")
-            .replace(/^\/+/, "");
-          if (!cleanRel || cleanRel.includes("..")) continue;
-          const parts = cleanRel.split("/").filter(Boolean);
-          const fileName = parts.pop()!;
-          let dirHandle = rootHandle;
-          for (const part of parts) {
-            dirHandle = await dirHandle.getDirectoryHandle(part, { create: true });
+        if (agentRes.ok) {
+          const agentData = await agentRes.json().catch(() => null);
+          if (agentData?.ok && agentData.targetPath) {
+            setIdeTargetPathInput(agentData.targetPath);
+            setVsCodeDetails((prev) => ({
+              ...prev,
+              bridgeConnected: true,
+              targetPath: agentData.targetPath,
+              savedLocally: `Saved all ${filesToSave.length} files directly into "${agentData.targetPath}"!`,
+            }));
+            setNarration(`Saved all ${filesToSave.length} project files into "${agentData.targetPath}".`);
+            return;
           }
-          const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(file.content ?? "");
-          await writable.close();
         }
-        // Also write .code-workspace file at the root of the chosen folder
-        const slug =
-          String(data?.projectName || sessionTitle)
-            .toLowerCase()
-            .replace(/[^a-z0-9-_]+/g, "-")
-            .replace(/^-+|-+$/g, "") || "vyrexo-project";
-        const wsHandle = await rootHandle.getFileHandle(`${slug}.code-workspace`, {
-          create: true,
-        });
-        const wsWritable = await wsHandle.createWritable();
-        await wsWritable.write(
-          JSON.stringify(
-            {
-              folders: [{ path: ".", name: data?.projectName || sessionTitle }],
-              settings: { "files.exclude": { "**/.git": true, "**/node_modules": true } },
-            },
-            null,
-            2
-          )
-        );
-        await wsWritable.close();
+      } catch {}
 
-        setVsCodeDetails((prev) => ({
-          ...prev,
-          savedLocally: `Saved ${filesToSave.length} files to local folder "${rootHandle.name}"! Open that folder in VS Code.`,
-        }));
-        setNarration(
-          `Saved all ${filesToSave.length} project files into your local folder "${rootHandle.name}".`
-        );
-      } else {
-        // Fallback: trigger ZIP download
-        const downloadUrl =
-          data?.downloadUrl ||
-          vsCodeDetails.downloadUrl ||
-          `/api/projects/export?sessionId=${encodeURIComponent(activeSession || "default")}`;
-        window.location.href = downloadUrl;
+      // 2. Try File System Access API (existing handle or showDirectoryPicker)
+      if (typeof window !== "undefined" && "showDirectoryPicker" in window) {
+        try {
+          const curSess = activeSession || "default";
+          let rootHandle = (window as any).__localDirHandles?.[curSess];
+          if (!rootHandle) {
+            rootHandle = await (window as any).showDirectoryPicker({
+              mode: "readwrite",
+            });
+            (window as any).__localDirHandles = (window as any).__localDirHandles || {};
+            (window as any).__localDirHandles[curSess] = rootHandle;
+          }
+          for (const file of filesToSave) {
+            const cleanRel = String(file.path || "")
+              .replace(/\\/g, "/")
+              .replace(/^\/+/, "");
+            if (!cleanRel || cleanRel.includes("..")) continue;
+            const parts = cleanRel.split("/").filter(Boolean);
+            const fileName = parts.pop()!;
+            let dirHandle = rootHandle;
+            for (const part of parts) {
+              dirHandle = await dirHandle.getDirectoryHandle(part, { create: true });
+            }
+            const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(file.content ?? "");
+            await writable.close();
+          }
+          setVsCodeDetails((prev) => ({
+            ...prev,
+            savedLocally: `Saved ${filesToSave.length} files to local folder "${rootHandle.name}"!`,
+          }));
+          setNarration(
+            `Saved all ${filesToSave.length} project files into your local folder "${rootHandle.name}".`
+          );
+          return;
+        } catch (pickerErr: any) {
+          if (pickerErr?.name === "AbortError") {
+            return;
+          }
+          // SecurityError inside cross-origin preview iframe -> fall through to ZIP download
+        }
       }
+
+      // 3. Fallback: trigger full workspace ZIP download
+      const uidQuery = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
+      const downloadUrl =
+        data?.downloadUrl ||
+        vsCodeDetails.downloadUrl ||
+        `/api/projects/download?sessionId=${encodeURIComponent(activeSession || "default")}${uidQuery}`;
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = `${data?.projectSlug || "vyrexo-workspace"}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setVsCodeDetails((prev) => ({
+        ...prev,
+        savedLocally: `Downloaded full project archive (${filesToSave.length} files). Extract into your local folder or run the 1-Click Desktop Sync command below!`,
+      }));
     } catch (err: any) {
-      if (err?.name !== "AbortError") {
-        console.warn("Local folder save cancelled or failed:", err);
-      }
+      console.warn("Local folder save error:", err);
     } finally {
       setSavingLocalFolder(false);
     }
-  }, [activeProject, activeSession, codeEvents, sessions, vsCodeDetails]);
+  }, [activeProject, activeSession, codeEvents, ideTargetPathInput, sessions, user?.id, vsCodeDetails]);
 
   const handleLaunchIDE = useCallback(
     async (ide: "vscode" | "cursor" | "windsurf" | "vscode-insiders") => {
@@ -1857,26 +2322,34 @@ export default function App() {
           : ide === "vscode-insiders"
           ? "VS Code Insiders"
           : "VS Code";
-      const rawTarget = ideTargetPathInput || vsCodeDetails.targetPath || activeProject?.path || "";
-      const targetPath = rawTarget === "." ? "" : rawTarget;
+      const rawTarget = (ideTargetPathInput || vsCodeDetails.targetPath || activeProject?.path || "").trim();
+      const targetPath =
+        rawTarget === "." || rawTarget.startsWith("/app/applet") || rawTarget.startsWith("/workspaces/")
+          ? ""
+          : rawTarget;
       const currentFiles = codeEvents
-        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string")
+        .filter((e) => e.kind === "action" && e.path && typeof e.content === "string" && !e.path.endsWith(".code-workspace"))
         .map((e) => ({ path: e.path!, content: e.content! }));
-      const sessionTitle =
+      const rawTitle =
         activeProject?.name ||
         vsCodeDetails.projectName ||
         sessions.find((s) => s.id === activeSession)?.name ||
         undefined;
+      const sessionTitle =
+        rawTitle && rawTitle !== "New Session" && !/^session-\d+$/i.test(rawTitle)
+          ? rawTitle
+          : undefined;
 
       try {
-        // 1. First trigger backend to assemble and ensure all code files for this session are written cleanly
+        // 1. Assemble all session files from the backend
         const res = await fetch("/api/projects/vscode", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...(user?.id ? { "x-user-id": user.id } : {}) },
           body: JSON.stringify({
             path: targetPath || undefined,
-            sessionId: activeSession || "default",
-            title: sessionTitle && sessionTitle !== "New Session" ? sessionTitle : undefined,
+            sessionId: activeSession || "",
+            user_id: user?.id,
+            title: sessionTitle,
             files: currentFiles.length > 0 ? currentFiles : undefined,
             ide,
             localAgentUrl: "http://127.0.0.1:4040",
@@ -1884,97 +2357,137 @@ export default function App() {
         });
         const data = await res.json();
         const filesToSync = data?.files || vsCodeDetails.files || currentFiles || [];
-        const projectName = data?.projectName || vsCodeDetails.projectName || `session-${activeSession}`;
-        const resolvedWorkspacePath = data?.targetPath || targetPath;
-        const vscodeServerUrl =
-          data?.vscodeServerUrl ||
-          vsCodeDetails.vscodeServerUrl ||
-          `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`;
+        const projectName = data?.projectName || vsCodeDetails.projectName || sessionTitle || "Project Workspace";
+        const localFolderName =
+          data?.localFolderName ||
+          vsCodeDetails.localFolderName ||
+          sessions.find((s) => s.id === activeSession)?.name;
 
-        // 2. Client-side desktop bridge: if user has local agent on their machine (127.0.0.1:4040)
-        let openedViaClientAgent = false;
+        // 2. Client-side Desktop Bridge (127.0.0.1:4040): writes all session files into the user's real local folder (e.g. "amaze") and opens Desktop VS Code!
         try {
           const agentRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              path: targetPath && !targetPath.startsWith("/app/applet") ? targetPath : undefined,
+              path: targetPath || data?.targetPath,
+              localFolderName,
+              projectSlug: data?.projectSlug || vsCodeDetails.projectSlug,
               sessionId: activeSession || "default",
               ide,
               projectName,
               files: filesToSync,
               reuseWindow: false,
+              openIde: true,
             }),
-            signal: AbortSignal.timeout(2500),
+            signal: AbortSignal.timeout(3000),
           });
           if (agentRes.ok) {
             const agentData = await agentRes.json().catch(() => null);
             if (agentData?.ok) {
-              openedViaClientAgent = true;
               const syncedLocalPath = agentData.targetPath || agentData.path;
               if (syncedLocalPath) {
                 setIdeTargetPathInput(syncedLocalPath);
               }
               if (agentData.cliLaunched === false && agentData.vscodeUri && typeof window !== "undefined") {
-                window.location.href = agentData.vscodeUri;
+                const anchor = document.createElement("a");
+                anchor.href = agentData.vscodeUri;
+                anchor.style.display = "none";
+                document.body.appendChild(anchor);
+                anchor.click();
+                setTimeout(() => {
+                  try { document.body.removeChild(anchor); } catch {}
+                }, 300);
               }
+              setVsCodeDetails((prev) => ({
+                ...prev,
+                bridgeConnected: true,
+                targetPath: syncedLocalPath || prev.targetPath,
+                savedLocally: `Synced all ${filesToSync.length} files to "${syncedLocalPath}" and opened ${ideDisplayName} with the full file tree!`,
+              }));
               setNarration(
-                `Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${syncedLocalPath || "local workspace"}.`
-              );
-            }
-          }
-        } catch {
-          // Local agent not active on 127.0.0.1:4040, continue with URI scheme or VS Code Server
-        }
-
-        if (!openedViaClientAgent) {
-          if (data?.source === "host_cli") {
-            setNarration(`Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName}.`);
-          } else {
-            const isRemoteBrowser =
-              typeof window !== "undefined" &&
-              window.location.hostname !== "localhost" &&
-              window.location.hostname !== "127.0.0.1";
-            const isContainerOnlyPath =
-              !targetPath ||
-              targetPath.startsWith("/app/applet") ||
-              targetPath.startsWith("~/vyrexo-projects");
-
-            // If user is on a remote cloud URL and hasn't specified a custom local OS path,
-            // open the built-in VS Code Server workbench where the full file tree is mounted on disk!
-            if (isRemoteBrowser && isContainerOnlyPath && ide === "vscode") {
-              window.location.href = vscodeServerUrl;
-              setNarration(
-                `Opening full directory structure of ${projectName} (${filesToSync.length} files) in VS Code Server...`
+                `Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${syncedLocalPath}.`
               );
               return;
             }
-
-            // Otherwise trigger directory protocol deep-link (always folder URI, never .code-workspace file)
-            const uri =
-              ide === "cursor"
-                ? data?.cursorUri || vsCodeDetails.cursorUri
-                : ide === "windsurf"
-                ? data?.windsurfUri || vsCodeDetails.windsurfUri
-                : ide === "vscode-insiders"
-                ? data?.vscodeInsidersUri || vsCodeDetails.vscodeInsidersUri
-                : data?.vscodeUri || vsCodeDetails.vscodeUri;
-
-            if (uri && typeof window !== "undefined") {
-              window.location.href = uri;
-              setNarration(
-                `Opening ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${resolvedWorkspacePath}...`
-              );
-            }
           }
+        } catch {
+          // Local Desktop Bridge not running yet on 127.0.0.1:4040
         }
+
+        // 3. Helper to trigger the native desktop IDE URI scheme without navigating the current page away
+        const triggerDesktopUriScheme = (uriToOpen: string) => {
+          if (typeof document === "undefined") return;
+          const anchor = document.createElement("a");
+          anchor.href = uriToOpen;
+          anchor.style.display = "none";
+          document.body.appendChild(anchor);
+          anchor.click();
+          setTimeout(() => {
+            try {
+              document.body.removeChild(anchor);
+            } catch {}
+          }, 300);
+        };
+
+        const schemeName = ide === "vscode-insiders" ? "vscode-insiders" : ide;
+        const folderFallback =
+          localFolderName ||
+          data?.projectSlug ||
+          vsCodeDetails.projectSlug ||
+          "amaze";
+        let resolvedFolderPath = (
+          targetPath ||
+          data?.targetPath ||
+          `C:\\Users\\hp\\OneDrive\\Desktop\\${folderFallback}`
+        ).trim();
+
+        if (
+          !resolvedFolderPath ||
+          resolvedFolderPath.startsWith("~/") ||
+          resolvedFolderPath.startsWith("~\\") ||
+          resolvedFolderPath.startsWith("/app/applet") ||
+          resolvedFolderPath.startsWith("/workspaces/")
+        ) {
+          const tail = resolvedFolderPath.startsWith("~")
+            ? resolvedFolderPath.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "")
+            : "";
+          resolvedFolderPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail || folderFallback}`;
+        }
+
+        setIdeTargetPathInput(resolvedFolderPath);
+
+        // Always pass the full folder path to vscode://file/... so VS Code opens the folder directly (never bare vscode://)
+        const normalizedLocal = resolvedFolderPath.replace(/\\/g, "/").replace(/\/+$/, "");
+        const formattedPath = normalizedLocal.startsWith("/") ? normalizedLocal : `/${normalizedLocal}`;
+        const fullFolderUri = `${schemeName}://file${formattedPath}`;
+        triggerDesktopUriScheme(fullFolderUri);
+
+        // Also copy the Windows/Cross-platform 1-Click Sync command to clipboard so the user can paste it in VS Code Terminal (Ctrl+~) if the folder is empty
+        if (typeof window !== "undefined") {
+          const origin = window.location.origin;
+          const bridgeUrl = `${origin}/api/projects/vscode/bridge?sessionId=${encodeURIComponent(
+            activeSession || ""
+          )}&ide=${encodeURIComponent(ide)}&path=${encodeURIComponent(resolvedFolderPath)}`;
+          const oneLiner = `node -e "fetch('${bridgeUrl}').then(r=>r.text()).then(eval)"`;
+          try {
+            navigator.clipboard.writeText(oneLiner);
+          } catch {}
+        }
+
+        setVsCodeDetails((prev) => ({
+          ...prev,
+          targetPath: resolvedFolderPath,
+          bridgeCmdCopied: true,
+          savedLocally: `Opening "${resolvedFolderPath}" in ${ideDisplayName}! (Also copied the 1-Click Sync command to your clipboard — press Ctrl+\` in VS Code Terminal and paste, or click "Download & Run Windows Sync (.cmd)" below to write all ${filesToSync.length} files into "${resolvedFolderPath}"!)`,
+        }));
+        setNarration(`Opening folder "${resolvedFolderPath}" in ${ideDisplayName}...`);
       } catch (err) {
         console.error("Failed to launch IDE:", err);
       } finally {
-        setTimeout(() => setLaunchingIde(null), 1200);
+        setTimeout(() => setLaunchingIde(null), 900);
       }
     },
-    [ideTargetPathInput, vsCodeDetails, activeProject, activeSession, codeEvents, sessions]
+    [ideTargetPathInput, vsCodeDetails, activeProject, activeSession, codeEvents, sessions, user?.id]
   );
 
   // Run a home-screen quick action: queue its real command, then make sure we
@@ -2253,6 +2766,17 @@ export default function App() {
 
           <div className="absolute bottom-4 right-5 text-[10px] text-[var(--border2)]">Vyrexo v0.1.0</div>
         </div>
+        <ConnectProjectModal
+          isOpen={connectProjectModalOpen}
+          onClose={() => setConnectProjectModalOpen(false)}
+          onSelectProject={handleSelectProjectFromModal}
+          onSwitchSession={handleSessionClick}
+          onEnsureSession={createSession}
+          onDisconnectProject={handleDisconnectProject}
+          currentProjectPath={activeProject?.path}
+          sessionId={activeSession || undefined}
+          userId={user?.id}
+        />
       </div>
     );
   }
@@ -2301,7 +2825,7 @@ export default function App() {
             <button
               onClick={handleConnectProject}
               title={activeProject ? `Working in ${activeProject.path} — click to change` : "Connect a project folder"}
-              className={`hidden xl:flex items-center gap-[5px] text-[11px] font-medium px-2 py-[4px] rounded-md border transition-all max-w-[140px] truncate ${
+              className={`flex items-center gap-[5px] text-[11px] font-medium px-2.5 py-[4px] rounded-md border transition-all max-w-[170px] truncate cursor-pointer ${
                 activeProject
                   ? "text-[var(--ice)] border-[#3B599840] bg-[#3B599815] hover:bg-[#3B599825]"
                   : "text-[var(--muted)] border-[var(--border2)] bg-[var(--border)] hover:text-[var(--text3)] hover:border-[var(--steel)]"
@@ -2622,15 +3146,18 @@ export default function App() {
             <div className="mt-4 space-y-4">
               <div>
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-medium text-[var(--muted2)]">Workspace Directory Path</label>
-                  <span className="text-[10px] text-[var(--muted)]">Opens full folder structure</span>
+                  <label className="text-[11px] font-medium text-[var(--muted2)]">Local Folder / Workspace Path</label>
+                  <span className={`text-[10px] flex items-center gap-1 font-medium ${vsCodeDetails.bridgeConnected ? "text-emerald-400" : "text-[var(--muted)]"}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${vsCodeDetails.bridgeConnected ? "bg-emerald-400 animate-pulse" : "bg-sky-400"}`} />
+                    {vsCodeDetails.bridgeConnected ? "Desktop Bridge Connected (Auto-Synced)" : "Opens full folder structure"}
+                  </span>
                 </div>
                 <div className="mt-1 flex items-center gap-2 p-2 rounded-lg bg-[var(--input)] border border-[var(--border2)] font-mono text-[11px] text-[var(--text)]">
                   <input
                     type="text"
                     value={ideTargetPathInput}
                     onChange={(e) => setIdeTargetPathInput(e.target.value)}
-                    placeholder="/path/to/project"
+                    placeholder="C:\Users\hp\OneDrive\Desktop\amaze"
                     className="flex-1 bg-transparent border-none outline-none text-[11px] font-mono text-[var(--text)]"
                   />
                   <button
@@ -2719,21 +3246,29 @@ export default function App() {
 
               {/* Direct Workspace Utilities */}
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={handleSaveToLocalFolder}
-                  disabled={savingLocalFolder}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/40 bg-[#007ACC]/15 hover:bg-[#007ACC]/25 text-xs text-[var(--ice)] font-semibold transition-all cursor-pointer disabled:opacity-50"
+                <a
+                  href={`/api/projects/vscode/bridge?sessionId=${encodeURIComponent(activeSession || "")}&format=cmd&path=${encodeURIComponent(ideTargetPathInput || vsCodeDetails.targetPath || "")}`}
+                  download={`Open-${vsCodeDetails.localFolderName || vsCodeDetails.projectSlug || "amaze"}-in-VSCode.cmd`}
+                  onClick={() => {
+                    setVsCodeDetails((prev) => ({
+                      ...prev,
+                      savedLocally: `Downloaded "Open-${prev.localFolderName || prev.projectSlug || "amaze"}-in-VSCode.cmd"! Open/double-click it to write all ${prev.filesCount || prev.files?.length || 11} files into "${ideTargetPathInput || prev.targetPath}" and open the full folder in VS Code!`,
+                    }));
+                  }}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC] hover:bg-[#0062a3] text-xs text-white font-semibold transition-all cursor-pointer shadow-sm"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                     <line x1="12" y1="11" x2="12" y2="17" />
                     <polyline points="9 14 12 17 15 14" />
                   </svg>
-                  {savingLocalFolder ? "Saving Folder..." : "Save Folder to Disk"}
-                </button>
+                  Sync &amp; Open Folder (.cmd)
+                </a>
                 <a
-                  href={vsCodeDetails.downloadUrl || `/api/projects/export?sessionId=${encodeURIComponent(activeSession || "default")}`}
+                  href={
+                    vsCodeDetails.downloadUrl ||
+                    `/api/projects/download?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`
+                  }
                   download
                   className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:bg-[var(--border)] text-xs text-[var(--text)] font-medium transition-all"
                 >
@@ -2747,13 +3282,51 @@ export default function App() {
                 <a
                   href={
                     vsCodeDetails.vscodeServerUrl ||
-                    `/vscode?sessionId=${encodeURIComponent(activeSession || "session-1790005321834")}`
+                    `/vscode?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`
                   }
                   className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC]/20 hover:bg-[#007ACC]/30 text-xs text-[#38bdf8] font-semibold transition-all"
                 >
-                  VS Code Server
+                  VS Code Server ({vsCodeDetails.filesCount || vsCodeDetails.files?.length || 0} files)
                 </a>
               </div>
+
+              {/* 1-Click Local Desktop Bridge Auto-Sync Command (works on Windows PowerShell, CMD, macOS, and Linux) */}
+              {!vsCodeDetails.bridgeConnected && (
+                <div className="p-3 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/30 text-[11px] space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[var(--ice)] flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-[#38bdf8] animate-pulse" />
+                      Populate Local Folder &amp; Open Full File Tree ({vsCodeDetails.localFolderName || sessions.find((s) => s.id === activeSession)?.name || "amaze"})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const origin = typeof window !== "undefined" ? window.location.origin : "";
+                        const bridgeUrl = `${origin}/api/projects/vscode/bridge?sessionId=${encodeURIComponent(
+                          activeSession || ""
+                        )}&path=${encodeURIComponent(ideTargetPathInput || vsCodeDetails.targetPath || "")}`;
+                        const bridgeScript = `node -e "fetch('${bridgeUrl}').then(r=>r.text()).then(eval)"`;
+                        navigator.clipboard.writeText(bridgeScript);
+                        setVsCodeDetails((prev) => ({
+                          ...prev,
+                          bridgeCmdCopied: true,
+                          savedLocally:
+                            "Copied 1-Click Windows & Terminal Sync command! Paste & run it in VS Code's Terminal (Ctrl+`) or PowerShell/CMD — it immediately writes all session files into your local folder and opens the full file structure in VS Code!",
+                        }));
+                        setTimeout(() => setVsCodeDetails((prev) => ({ ...prev, bridgeCmdCopied: false })), 3500);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-[#007ACC] hover:bg-[#0062a3] text-white font-semibold text-[10px] transition-all cursor-pointer shadow-sm flex-shrink-0"
+                    >
+                      {vsCodeDetails.bridgeCmdCopied ? "✓ Copied Command!" : "Copy Terminal Sync Command"}
+                    </button>
+                  </div>
+                  <p className="text-[10.5px] text-[var(--muted2)] leading-relaxed">
+                    Click <strong className="text-[var(--text)]">Sync &amp; Open Folder (.cmd)</strong> above or paste the copied command into VS Code Terminal (<code className="text-[var(--text2)] font-mono">Ctrl+`</code>) to write all{" "}
+                    <strong className="text-[var(--text)]">{vsCodeDetails.filesCount || vsCodeDetails.files?.length || 0} files</strong> directly into{" "}
+                    <strong className="text-[var(--text)] font-mono">{ideTargetPathInput || vsCodeDetails.targetPath || "C:\\Users\\hp\\OneDrive\\Desktop\\amaze"}</strong> and keep auto-sync active.
+                  </p>
+                </div>
+              )}
 
               {vsCodeDetails.savedLocally && (
                 <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium">
@@ -2767,7 +3340,13 @@ export default function App() {
                   Full Directory Structure & Local Persistence
                 </div>
                 <p>
-                  Every generated file for <strong className="text-[var(--text)]">{vsCodeDetails.projectName || activeProject?.name || "this session"}</strong> (components, types, tests, package.json, and <span className="font-mono text-[10px]">.code-workspace</span>) is isolated in its own project workspace—never mixed with Vyrexo&apos;s own files.
+                  Every generated file for{" "}
+                  <strong className="text-[var(--text)]">
+                    {vsCodeDetails.localFolderName
+                      ? `${vsCodeDetails.localFolderName} (${vsCodeDetails.projectName || "Project"})`
+                      : vsCodeDetails.projectName || activeProject?.name || "this session"}
+                  </strong>{" "}
+                  (components, types, tests, package.json, and <span className="font-mono text-[10px]">.code-workspace</span>) is isolated in its own project workspace—never mixed with Vyrexo&apos;s own files.
                 </p>
               </div>
 
@@ -2789,9 +3368,12 @@ export default function App() {
         isOpen={connectProjectModalOpen}
         onClose={() => setConnectProjectModalOpen(false)}
         onSelectProject={handleSelectProjectFromModal}
+        onSwitchSession={handleSessionClick}
+        onEnsureSession={createSession}
         onDisconnectProject={handleDisconnectProject}
         currentProjectPath={activeProject?.path}
         sessionId={activeSession || undefined}
+        userId={user?.id}
       />
     </div>
   );

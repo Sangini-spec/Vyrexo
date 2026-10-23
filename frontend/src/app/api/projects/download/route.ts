@@ -1,51 +1,107 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateProjectZipBuffer, ProjectExportFile } from "@/lib/project-export";
+import {
+  materializeProjectOnDisk,
+  createTarGzArchive,
+  generateProjectZipBuffer,
+  ProjectExportFile,
+} from "@/lib/project-export";
+import { verifySessionProjectOwnership } from "@/lib/project-session-store";
+import { isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
 
-export async function GET(request: NextRequest) {
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const sessionId = searchParams.get("sessionId") || undefined;
-    const title = searchParams.get("title") || searchParams.get("path") || undefined;
+    const { searchParams } = new URL(req.url);
+    const sessionId = (searchParams.get("sessionId") || searchParams.get("session") || "").trim();
+    const format = (searchParams.get("format") || "zip").toLowerCase();
+    const userId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
 
-    const { buffer, filename, fileCount } = await generateProjectZipBuffer(sessionId, undefined, title);
+    if (!sessionId || isBlockedLegacySessionId(sessionId)) {
+      return NextResponse.json({ ok: false, error: "Valid session ID is required" }, { status: 400 });
+    }
 
+    if (!verifySessionProjectOwnership(sessionId, userId || null)) {
+      return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+    }
+
+    if (format === "workspace" || format === "targz") {
+      const materialized = materializeProjectOnDisk(sessionId);
+
+      if (format === "workspace") {
+        const wsFile = materialized.files.find((f) => f.path.endsWith(".code-workspace"));
+        const content = wsFile ? wsFile.content : "{}";
+        return new NextResponse(content, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${materialized.projectSlug}.code-workspace"`,
+          },
+        });
+      }
+
+      const archiveBuffer = createTarGzArchive(
+        materialized.workspaceDir,
+        materialized.projectSlug
+      );
+
+      return new NextResponse(new Uint8Array(archiveBuffer), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/gzip",
+          "Content-Disposition": `attachment; filename="${materialized.projectSlug}-project.tar.gz"`,
+          "Content-Length": String(archiveBuffer.length),
+        },
+      });
+    }
+
+    const { buffer, filename } = await generateProjectZipBuffer(sessionId);
     return new NextResponse(new Uint8Array(buffer), {
+      status: 200,
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${filename}"`,
-        "X-Project-Files-Count": String(fileCount),
-        "Cache-Control": "no-cache, no-store",
+        "Content-Length": String(buffer.length),
       },
     });
-  } catch (err: unknown) {
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to generate project ZIP" },
+      { ok: false, error: err?.message || "Failed to generate project archive" },
       { status: 500 }
     );
   }
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json();
-    const sessionId = body.sessionId || undefined;
-    const title = body.title || body.projectTitle || undefined;
-    const files: ProjectExportFile[] | undefined = Array.isArray(body.files) ? body.files : undefined;
+    const body = await req.json();
+    const sessionId = (body.sessionId || body.session || "").trim();
+    const userId = (body.user_id || body.userId || req.headers.get("x-user-id") || "").trim();
+    const files: ProjectExportFile[] | undefined = Array.isArray(body.files)
+      ? body.files
+      : undefined;
+    const title: string | undefined = body.title;
 
-    const { buffer, filename, fileCount } = await generateProjectZipBuffer(sessionId, files, title);
+    if (sessionId && isBlockedLegacySessionId(sessionId)) {
+      return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 403 });
+    }
 
+    if (sessionId && !verifySessionProjectOwnership(sessionId, userId || null)) {
+      return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
+    }
+
+    const { buffer, filename } = await generateProjectZipBuffer(sessionId, files, title);
     return new NextResponse(new Uint8Array(buffer), {
+      status: 200,
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="${filename}"`,
-        "X-Project-Files-Count": String(fileCount),
-        "Cache-Control": "no-cache, no-store",
+        "Content-Length": String(buffer.length),
       },
     });
-  } catch (err: unknown) {
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to generate project ZIP" },
+      { ok: false, error: err?.message || "Failed to generate project ZIP" },
       { status: 500 }
     );
   }
 }
+

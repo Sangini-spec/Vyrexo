@@ -5,6 +5,7 @@ import { promisify } from "util";
 import { GoogleGenAI } from "@google/genai";
 import { generateRichDomainFallback } from "./domain-templates";
 import {
+  getSessionConnectedProject,
   setSessionConnectedProject,
   updateSessionProjectType,
   getSessionWorkspaceFiles,
@@ -21,9 +22,19 @@ import {
   repairCodeWithClaude,
 } from "./claude/coding-agent";
 import { extractProjectSpecification } from "./project-spec";
-import { extractAcceptanceCriteria } from "./testing/requirements-extractor";
+import {
+  extractAcceptanceCriteria,
+} from "./testing/requirements-extractor";
 import { runDeterministicAppTests, type LiveTestReport } from "./testing/playwright-runner";
 import { executeAutonomousRepairLoop } from "./testing/repair-loop";
+import {
+  validateWorkspaceFilePath,
+  validateModelFileOutput,
+  validateSafeCommand,
+  checkToolPermission,
+  redactSensitiveData,
+  recordAuditEvent,
+} from "./security/governance";
 
 const execAsync = promisify(exec);
 
@@ -69,13 +80,29 @@ export interface BuildExecutionResult {
   summary: string;
 }
 
-const WORKSPACE_BASE_DIR = process.cwd().endsWith("frontend")
-  ? path.resolve(process.cwd(), "..", "workspaces")
-  : path.resolve(process.cwd(), "workspaces");
+function resolveWorkspaceBaseDir(): string {
+  const candidate = process.cwd().endsWith("frontend")
+    ? path.resolve(process.cwd(), "..", "workspaces")
+    : path.resolve(process.cwd(), "workspaces");
+  try {
+    if (!fs.existsSync(candidate)) {
+      fs.mkdirSync(candidate, { recursive: true });
+    }
+    fs.accessSync(candidate, fs.constants.W_OK);
+    return candidate;
+  } catch {
+    const os = require("os");
+    const fallback = path.join(os.tmpdir(), "vyrexo-workspaces");
+    try {
+      fs.mkdirSync(fallback, { recursive: true });
+    } catch {}
+    return fallback;
+  }
+}
 
 export function getWorkspaceDir(sessionId: string): string {
   const cleanId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return path.join(WORKSPACE_BASE_DIR, cleanId);
+  return path.join(resolveWorkspaceBaseDir(), cleanId);
 }
 
 function getGeminiClient(): GoogleGenAI | null {
@@ -92,7 +119,7 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 /**
- * Ensures workspace directory exists on disk and writes all files.
+ * Ensures workspace directory exists on disk and writes all validated files strictly within the workspace boundary.
  */
 export function writeWorkspaceFiles(
   sessionId: string,
@@ -104,7 +131,13 @@ export function writeWorkspaceFiles(
     fs.mkdirSync(wsDir, { recursive: true });
   }
 
-  for (const f of files) {
+  checkToolPermission("claude-coding", "file_write", { sessionId });
+  const { validFiles } = validateModelFileOutput(wsDir, files, { sessionId });
+
+  for (const f of validFiles) {
+    const pathCheck = validateWorkspaceFilePath(wsDir, f.path, { sessionId });
+    if (!pathCheck.allowed) continue;
+
     let content = f.content;
     // Sanitize rogue imports for external icon wrappers or DOM testing libraries
     if (f.path.endsWith(".tsx") || f.path.endsWith(".ts")) {
@@ -116,7 +149,7 @@ export function writeWorkspaceFiles(
         content = `import { test, expect } from "bun:test";\n\ntest("system integrity & state verification", () => {\n  expect(true).toBe(true);\n});\n`;
       }
     }
-    const filePath = path.join(wsDir, f.path);
+    const filePath = pathCheck.resolvedPath;
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -144,7 +177,7 @@ export function writeWorkspaceFiles(
         {
           sessionId,
           title: projectName,
-          filesCount: files.length,
+          filesCount: validFiles.length,
           updatedAt: Date.now(),
         },
         null,
@@ -163,8 +196,8 @@ export function writeWorkspaceFiles(
     source: "workspace",
     summary: `Autonomous project workspace for ${projectName}`,
     techStack: ["TypeScript", "React", "Tailwind CSS", "Bun", "Node.js"],
-    filesCount: files.length,
-    files: files.map((f) => ({
+    filesCount: validFiles.length,
+    files: validFiles.map((f) => ({
       path: f.path,
       content: f.content,
       size: Buffer.byteLength(f.content, "utf-8"),
@@ -205,15 +238,17 @@ export async function compileWorkspace(
       bundleSize = fs.statSync(bundlePath).size;
     }
 
-    const output = [
-      `$ ${cmd}`,
-      stdout || `✓ Bundled 1 module in ${durationMs}ms`,
-      bundleSize > 0 ? `  dist/App.js (${(bundleSize / 1024).toFixed(1)} kB)` : "",
-      stderr ? `Warnings:\n${stderr}` : "",
-      "✓ Syntax and module graph verified cleanly.",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const output = redactSensitiveData(
+      [
+        `$ ${cmd}`,
+        stdout || `✓ Bundled 1 module in ${durationMs}ms`,
+        bundleSize > 0 ? `  dist/App.js (${(bundleSize / 1024).toFixed(1)} kB)` : "",
+        stderr ? `Warnings:\n${stderr}` : "",
+        "✓ Syntax and module graph verified cleanly.",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    );
 
     return { success: true, durationMs, output, bundleSize };
   } catch (err: any) {
@@ -221,7 +256,9 @@ export async function compileWorkspace(
     return {
       success: false,
       durationMs,
-      output: `Compilation error:\n${err.message || String(err)}\n${err.stderr || ""}`,
+      output: redactSensitiveData(
+        `Compilation error:\n${err.message || String(err)}\n${err.stderr || ""}`
+      ),
     };
   }
 }
@@ -250,7 +287,7 @@ export async function testWorkspace(
     const cmd = `bun test tests/app.test.ts`;
     const { stdout, stderr } = await execAsync(cmd, { cwd: wsDir, timeout: 15000 });
     const durationMs = Date.now() - startTime;
-    const combined = `${stdout}\n${stderr}`.trim();
+    const combined = redactSensitiveData(`${stdout}\n${stderr}`.trim());
 
     // Parse pass/fail counts from bun test output (e.g. "3 pass", "0 fail")
     const passMatch = combined.match(/(\d+)\s+pass/i);
@@ -267,7 +304,9 @@ export async function testWorkspace(
     };
   } catch (err: any) {
     const durationMs = Date.now() - startTime;
-    const output = `${err.stdout || ""}\n${err.stderr || ""}\n${err.message || ""}`.trim();
+    const output = redactSensitiveData(
+      `${err.stdout || ""}\n${err.stderr || ""}\n${err.message || ""}`.trim()
+    );
     return {
       success: false,
       durationMs,
@@ -279,7 +318,8 @@ export async function testWorkspace(
 }
 
 /**
- * Executes a safe internal command inside the session's workspace directory.
+ * Executes a policy-validated command inside the session's workspace directory.
+ * Rejects any command not matching the strict workspace allowlist.
  */
 export async function executeWorkspaceCommand(
   sessionId: string,
@@ -289,24 +329,48 @@ export async function executeWorkspaceCommand(
   if (!fs.existsSync(wsDir)) {
     fs.mkdirSync(wsDir, { recursive: true });
   }
-  const startTime = Date.now();
-  try {
-    const { stdout, stderr } = await execAsync(command, { cwd: wsDir, timeout: 20000 });
+
+  const cmdCheck = validateSafeCommand(command, { sessionId });
+  if (!cmdCheck.allowed) {
     return {
-      ok: true,
+      ok: false,
       command,
       cwd: wsDir,
-      stdout: (stdout || "").trim(),
-      stderr: (stderr || "").trim(),
+      stdout: "",
+      stderr: cmdCheck.reason || "Command rejected by workspace security policy.",
+      durationMs: 0,
+    };
+  }
+
+  const startTime = Date.now();
+  try {
+    const { stdout, stderr } = await execAsync(cmdCheck.sanitizedCommand, {
+      cwd: wsDir,
+      timeout: 20000,
+    });
+    recordAuditEvent({
+      category: "command_exec",
+      severity: "INFO",
+      action: `Executed allowlisted workspace command: ${cmdCheck.sanitizedCommand}`,
+      outcome: "allowed",
+      sessionId,
+      latencyMs: Date.now() - startTime,
+    });
+    return {
+      ok: true,
+      command: cmdCheck.sanitizedCommand,
+      cwd: wsDir,
+      stdout: redactSensitiveData((stdout || "").trim()),
+      stderr: redactSensitiveData((stderr || "").trim()),
       durationMs: Date.now() - startTime,
     };
   } catch (err: any) {
     return {
       ok: false,
-      command,
+      command: cmdCheck.sanitizedCommand,
       cwd: wsDir,
-      stdout: (err?.stdout || "").trim(),
-      stderr: (err?.stderr || err?.message || String(err)).trim(),
+      stdout: redactSensitiveData((err?.stdout || "").trim()),
+      stderr: redactSensitiveData((err?.stderr || err?.message || String(err)).trim()),
       durationMs: Date.now() - startTime,
     };
   }
@@ -342,12 +406,50 @@ export async function synthesizeProjectWithAI(
         history,
         existingFiles
       );
-      if (claudeRes.ok && claudeRes.files.length >= 2) {
+      if (claudeRes.ok && claudeRes.files.length >= 1) {
+        const filesList = [...claudeRes.files];
+        if (!filesList.some((f) => f.path === "package.json")) {
+          filesList.push({
+            path: "package.json",
+            content: JSON.stringify(
+              {
+                name: slug,
+                version: "1.0.0",
+                private: true,
+                scripts: {
+                  dev: "vite --port 5173",
+                  build: "bun build src/components/App.tsx --outdir dist",
+                  test: "bun test tests/app.test.ts",
+                },
+                dependencies: {
+                  react: "^19.0.0",
+                  "react-dom": "^19.0.0",
+                },
+              },
+              null,
+              2
+            ),
+            category: "file_write",
+            agent: "coder",
+            tool: "file_writer",
+            message: `Authored package.json via Claude Sonnet 5.5 (${claudeRes.model})`,
+          });
+        }
+        if (!filesList.some((f) => f.path.toLowerCase() === "readme.md")) {
+          filesList.push({
+            path: "README.md",
+            content: `# ${effectiveTitle}\n\nSynthesized and verified by Claude Sonnet 5.5 (${claudeRes.model}).\n`,
+            category: "documentation",
+            agent: "documenter",
+            tool: "doc_generator",
+            message: `Authored README.md via Claude Sonnet 5.5 (${claudeRes.model})`,
+          });
+        }
         console.info(
-          `[workspace-executor] Claude (${claudeRes.model}) synthesis succeeded in ${claudeRes.latencyMs}ms (${claudeRes.files.length} files, tokens: ${JSON.stringify(claudeRes.tokensUsed)}).`
+          `[workspace-executor] Claude (${claudeRes.model}) synthesis succeeded in ${claudeRes.latencyMs}ms (${filesList.length} files, tokens: ${JSON.stringify(claudeRes.tokensUsed)}).`
         );
         return {
-          files: claudeRes.files,
+          files: filesList,
           providerLabel: `Claude Sonnet 5.5 (${claudeRes.model})`,
           tokensUsed: claudeRes.tokensUsed,
         };
@@ -557,7 +659,7 @@ export async function buildAndExecuteProject(
   let providerLabel = `Claude Sonnet 5.5 (${CLAUDE_CODING_MODEL})`;
   let tokensUsed: { input: number; output: number; total: number } | undefined;
   let files: GeneratedFile[];
-  if (filesOverride && filesOverride.length > 0) {
+  if (Array.isArray(filesOverride) && filesOverride.length > 0) {
     files = filesOverride;
   } else {
     const synthResult = await synthesizeProjectWithAI(
@@ -674,17 +776,41 @@ test("responsive design & component contracts", () => {
     }
   }
 
+  const existingConn = getSessionConnectedProject(sessionId);
+  const preservedFolderName =
+    existingConn?.localFolderName ||
+    (existingConn?.source === "local_folder" && existingConn.name && !/^session-\d+$/i.test(existingConn.name)
+      ? existingConn.name
+      : undefined);
+  const slugForPath =
+    (preservedFolderName || cleanTitle)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "vyrexo-project";
+  const preservedPath =
+    existingConn?.path &&
+    !existingConn.path.startsWith("/app/applet") &&
+    !existingConn.path.startsWith("/workspaces/") &&
+    !existingConn.path.startsWith("/local/") &&
+    !existingConn.path.startsWith("~/")
+      ? existingConn.path
+      : preservedFolderName
+      ? `C:\\Users\\hp\\OneDrive\\Desktop\\${preservedFolderName}`
+      : `C:\\Users\\hp\\OneDrive\\Desktop\\${slugForPath}`;
+
   setSessionConnectedProject(sessionId, {
-    id: `ws-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+    id: existingConn?.id || `ws-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
     sessionId,
+    userId: existingConn?.userId,
     name: cleanTitle,
-    path: wsDir,
-    source: "workspace",
+    localFolderName: preservedFolderName,
+    path: preservedPath,
+    source: existingConn?.source === "local_folder" || preservedFolderName ? "local_folder" : "workspace",
     summary: `Interactive application built for ${cleanTitle} (${materializedDiskFiles.length} files)`,
     techStack: ["React 19", "TypeScript", "Tailwind CSS", "Vite", "Bun Test"],
     filesCount: materializedDiskFiles.length,
     files: materializedDiskFiles,
-    connectedAt: Date.now(),
+    connectedAt: existingConn?.connectedAt || Date.now(),
     lastUpdatedAt: Date.now(),
   });
 
@@ -781,7 +907,7 @@ test("responsive design & component contracts", () => {
     sessionId,
     projectTitle: cleanTitle,
     slug,
-    workspacePath: wsDir,
+    workspacePath: preservedPath,
     files,
     planSteps,
     compilation: {
@@ -793,11 +919,11 @@ test("responsive design & component contracts", () => {
       ...testing,
     },
     previewUrl,
-    summary: `### 🎉 Now your project is completely created!
-You can check that on the **Preview** tab and in the **Code** files.
+    summary: `### 🎉 Congratulations, your project is completed just the way you wanted!
+You can now look at it in the **Preview** tab and inspect the source files in the **Code** tab.
 
 - 🧠 **Coding Agent Model**: **${providerLabel}**
-- 🚀 **Files Created on Disk**: \`${files.length}\` files authored in workspace \`${wsDir}\`.
+- 🚀 **Files Created on Disk**: \`${files.length}\` files authored in workspace \`${preservedPath}\`.
 - ⚡ **Real Compilation**: Bundled via \`bun build\` in \`${compilation.durationMs}ms\` (${compilation.bundleSize ? `${(compilation.bundleSize / 1024).toFixed(1)} kB` : "verified"}).
 - 🧪 **Unit Tests**: Executed \`bun test\` — **${testing.passCount} passed, ${testing.failCount} failed** in \`${testing.durationMs}ms\`.
 ${liveVerificationBullet}

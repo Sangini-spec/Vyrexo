@@ -4,8 +4,11 @@
  * for each user session, ensuring persistent cognitive context across turns.
  */
 
+import { isBlockedLegacySessionId, getSessionOwner } from "./session-persistent-storage";
+
 export interface SessionProject {
   id: string;
+  userId?: string;
   type: "investment_advisor" | "ecommerce" | "cosmetics_ecommerce" | "room_canvas" | "calculator" | "rest_api" | "custom";
   title: string;
   summary: string;
@@ -27,7 +30,9 @@ export interface ProjectFile {
 export interface ConnectedProject {
   id: string;
   sessionId: string;
+  userId?: string;
   name: string;
+  localFolderName?: string;
   path: string;
   source: "local_folder" | "workspace" | "preset";
   summary: string;
@@ -36,6 +41,26 @@ export interface ConnectedProject {
   files: ProjectFile[];
   connectedAt: number;
   lastUpdatedAt: number;
+}
+
+export function verifySessionProjectOwnership(sessionId: string, userId?: string | null): boolean {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return false;
+  const sessionOwner = getSessionOwner(sessionId);
+  const inMemProj = sessionProjects.get(sessionId);
+  const inMemConn = connectedSessionProjects.get(sessionId);
+  const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
+  const recordedOwner =
+    sessionOwner ||
+    inMemProj?.userId ||
+    inMemConn?.userId ||
+    diskMeta?.project?.userId ||
+    diskMeta?.connected?.userId ||
+    null;
+
+  if (recordedOwner && userId) {
+    return recordedOwner === userId;
+  }
+  return true;
 }
 
 // Map sessionId -> SessionProject (for high-level cognitive context)
@@ -175,24 +200,47 @@ export const PRESET_PROJECTS: Record<string, Omit<SessionProject, "id" | "create
 };
 
 function getWorkspacesRoot(): string {
+  const fs = require("fs");
+  const os = require("os");
   const path = require("path");
-  return process.cwd().endsWith("frontend")
+  const candidate = process.cwd().endsWith("frontend")
     ? path.resolve(process.cwd(), "..", "workspaces")
     : path.resolve(process.cwd(), "workspaces");
+  try {
+    if (!fs.existsSync(candidate)) {
+      fs.mkdirSync(candidate, { recursive: true });
+    }
+    fs.accessSync(candidate, fs.constants.W_OK);
+    return candidate;
+  } catch {
+    const fallback = path.join(os.tmpdir(), "vyrexo-workspaces");
+    try {
+      fs.mkdirSync(fallback, { recursive: true });
+    } catch {}
+    return fallback;
+  }
 }
 
 function getDataRoot(): string {
   const fs = require("fs");
+  const os = require("os");
   const path = require("path");
   const dir = process.cwd().endsWith("frontend")
     ? path.resolve(process.cwd(), "..", ".data")
     : path.resolve(process.cwd(), ".data");
-  if (!fs.existsSync(dir)) {
-    try {
+  try {
+    if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.accessSync(dir, fs.constants.W_OK);
+    return dir;
+  } catch {
+    const fallback = path.join(os.tmpdir(), "vyrexo-data");
+    try {
+      fs.mkdirSync(fallback, { recursive: true });
     } catch {}
+    return fallback;
   }
-  return dir;
 }
 
 function cleanWorkspaceFolderName(sessionId: string): string {
@@ -254,6 +302,7 @@ function saveSessionProjectMetadataToDisk(
 function loadSessionProjectMetadataFromDisk(
   sessionId: string
 ): { project?: SessionProject; connected?: ConnectedProject } | null {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
   try {
     const fs = require("fs");
     const path = require("path");
@@ -304,6 +353,7 @@ export function materializeCompleteWorkspaceOnDisk(
   title: string,
   coreFiles: Array<{ path: string; content: string }>
 ): ProjectFile[] {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return [];
   try {
     const fs = require("fs");
     const path = require("path");
@@ -312,7 +362,7 @@ export function materializeCompleteWorkspaceOnDisk(
     fs.mkdirSync(wsDir, { recursive: true });
 
     const slug =
-      (title || "railgo-app")
+      (title || "vyrexo-app")
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "")
@@ -434,12 +484,20 @@ export function materializeCompleteWorkspaceOnDisk(
   }
 }
 
-export function setSessionProject(sessionId: string, project: SessionProject): void {
-  sessionProjects.set(sessionId, project);
-  saveSessionProjectMetadataToDisk(sessionId, project);
+export function setSessionProject(sessionId: string, project: SessionProject, userId?: string): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
+  const owner = userId || project.userId || getSessionOwner(sessionId) || undefined;
+  const enriched: SessionProject = owner ? { ...project, userId: owner } : project;
+  sessionProjects.set(sessionId, enriched);
+  saveSessionProjectMetadataToDisk(sessionId, enriched);
 }
 
-export function getSessionProject(sessionId: string): SessionProject | null {
+export function getSessionProject(sessionId: string, userId?: string | null): SessionProject | null {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
+  if (userId !== undefined && !verifySessionProjectOwnership(sessionId, userId)) {
+    return null;
+  }
+
   const existing = sessionProjects.get(sessionId);
   if (existing) return existing;
 
@@ -465,8 +523,10 @@ export function getSessionProject(sessionId: string): SessionProject | null {
       } catch {}
     }
 
+    const owner = getSessionOwner(sessionId) || undefined;
     const reconstructed: SessionProject = {
       id: sessionId,
+      userId: owner,
       type: "custom",
       title: detectedTitle,
       summary: `Interactive software application for ${detectedTitle}.`,
@@ -492,24 +552,30 @@ export function updateSessionProjectType(
   sessionId: string,
   type: "investment_advisor" | "ecommerce" | "cosmetics_ecommerce" | "room_canvas" | "calculator" | "rest_api" | "custom",
   customTitle?: string,
-  customSummary?: string
+  customSummary?: string,
+  userId?: string
 ): SessionProject {
+  const owner = userId || getSessionOwner(sessionId) || undefined;
   const preset = PRESET_PROJECTS[type];
   if (preset) {
     const proj: SessionProject = {
       ...preset,
       id: sessionId,
+      userId: owner,
       previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
       createdAt: Date.now(),
     };
-    sessionProjects.set(sessionId, proj);
-    saveSessionProjectMetadataToDisk(sessionId, proj);
+    if (!isBlockedLegacySessionId(sessionId)) {
+      sessionProjects.set(sessionId, proj);
+      saveSessionProjectMetadataToDisk(sessionId, proj);
+    }
     return proj;
   }
 
   const title = customTitle || "Custom Web Application";
   const customProj: SessionProject = {
     id: sessionId,
+    userId: owner,
     type: "custom",
     title,
     summary: customSummary || `Interactive software application for ${title}.`,
@@ -534,18 +600,24 @@ export function updateSessionProjectType(
     previewUrl: `/api/preview?session=${encodeURIComponent(sessionId)}`,
     createdAt: Date.now(),
   };
-  sessionProjects.set(sessionId, customProj);
-  saveSessionProjectMetadataToDisk(sessionId, customProj);
+  if (!isBlockedLegacySessionId(sessionId)) {
+    sessionProjects.set(sessionId, customProj);
+    saveSessionProjectMetadataToDisk(sessionId, customProj);
+  }
   return customProj;
 }
 
 // ── Connected Projects (Local folder or workspace bound to specific session) ──
 
-export function setSessionConnectedProject(sessionId: string, project: ConnectedProject): void {
-  connectedSessionProjects.set(sessionId, project);
+export function setSessionConnectedProject(sessionId: string, project: ConnectedProject, userId?: string): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
+  const owner = userId || project.userId || getSessionOwner(sessionId) || undefined;
+  const enrichedConn: ConnectedProject = owner ? { ...project, userId: owner } : project;
+  connectedSessionProjects.set(sessionId, enrichedConn);
 
   const cognitiveProj: SessionProject = {
     id: sessionId,
+    userId: owner,
     type: "custom",
     title: project.name,
     summary: project.summary,
@@ -560,41 +632,75 @@ export function setSessionConnectedProject(sessionId: string, project: Connected
     createdAt: project.connectedAt,
   };
   sessionProjects.set(sessionId, cognitiveProj);
-  saveSessionProjectMetadataToDisk(sessionId, cognitiveProj, project);
+  saveSessionProjectMetadataToDisk(sessionId, cognitiveProj, enrichedConn);
 }
 
-export function getSessionConnectedProject(sessionId: string): ConnectedProject | null {
-  const existing = connectedSessionProjects.get(sessionId);
-  if (existing && existing.files && existing.files.length > 0) return existing;
+export function getSessionConnectedProject(sessionId: string, userId?: string | null): ConnectedProject | null {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
+  if (userId !== undefined && !verifySessionProjectOwnership(sessionId, userId)) {
+    return null;
+  }
 
+  const existing = connectedSessionProjects.get(sessionId);
+  if (existing && ((existing.files && existing.files.length > 0) || existing.source === "local_folder")) {
+    return existing;
+  }
+
+  const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
   const wsFiles = getSessionWorkspaceFiles(sessionId);
-  if (wsFiles.length > 0) {
-    const diskMeta = loadSessionProjectMetadataFromDisk(sessionId);
+  if (wsFiles.length > 0 || diskMeta?.connected?.source === "local_folder") {
     let projectName = diskMeta?.project?.title || diskMeta?.connected?.name || "";
-    if (!projectName) {
+    if (!projectName || /^session-\d+$/i.test(projectName)) {
       const readme = wsFiles.find((f) => f.path.toLowerCase() === "readme.md");
       if (readme) {
         const m = readme.content.match(/^#\s+(.+)$/m);
         if (m && m[1]) projectName = m[1].trim();
       }
     }
-    if (!projectName) projectName = `Workspace (${sessionId})`;
+    if (!projectName || /^session-\d+$/i.test(projectName)) {
+      projectName = diskMeta?.connected?.localFolderName || `Workspace (${sessionId})`;
+    }
 
-    const path = require("path");
     const cleanId = cleanWorkspaceFolderName(sessionId);
-    const absWorkspacePath = path.join(getWorkspacesRoot(), cleanId);
+    const owner = diskMeta?.connected?.userId || diskMeta?.project?.userId || getSessionOwner(sessionId) || undefined;
+    const savedPath = diskMeta?.connected?.path || "";
+    const isContainerPath =
+      !savedPath ||
+      savedPath.startsWith("/app/applet") ||
+      savedPath.startsWith("/workspaces/") ||
+      savedPath.startsWith("/local/") ||
+      savedPath.startsWith("~/") ||
+      savedPath.startsWith("~\\") ||
+      savedPath === ".";
+    const localFolderName =
+      diskMeta?.connected?.localFolderName ||
+      (savedPath.startsWith("/local/") ? savedPath.replace(/^\/local\/+/, "") : undefined) ||
+      (savedPath.startsWith("~/") || savedPath.startsWith("~\\")
+        ? savedPath.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "")
+        : undefined);
+    const cleanSlug =
+      (localFolderName || projectName)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 45) || cleanId;
+    const displayPath = !isContainerPath
+      ? savedPath
+      : `C:\\Users\\hp\\OneDrive\\Desktop\\${localFolderName || cleanSlug}`;
 
     const conn: ConnectedProject = {
       id: `ws-${cleanId}`,
       sessionId,
+      userId: owner,
       name: projectName,
-      path: absWorkspacePath,
-      source: diskMeta?.connected?.source || "workspace",
-      summary: diskMeta?.project?.summary || `${projectName} sandbox workspace (${wsFiles.length} files)`,
-      techStack: diskMeta?.project?.techStack || ["React", "TypeScript", "Tailwind CSS", "Vite"],
+      localFolderName,
+      path: displayPath,
+      source: diskMeta?.connected?.source || (localFolderName ? "local_folder" : "workspace"),
+      summary: diskMeta?.project?.summary || diskMeta?.connected?.summary || `${projectName} workspace (${wsFiles.length} files)`,
+      techStack: diskMeta?.project?.techStack || diskMeta?.connected?.techStack || ["React", "TypeScript", "Tailwind CSS", "Vite"],
       filesCount: wsFiles.length,
       files: wsFiles,
-      connectedAt: diskMeta?.project?.createdAt || Date.now(),
+      connectedAt: diskMeta?.project?.createdAt || diskMeta?.connected?.connectedAt || Date.now(),
       lastUpdatedAt: Date.now(),
     };
     connectedSessionProjects.set(sessionId, conn);
@@ -605,7 +711,21 @@ export function getSessionConnectedProject(sessionId: string): ConnectedProject 
 }
 
 export function removeSessionConnectedProject(sessionId: string): boolean {
-  return connectedSessionProjects.delete(sessionId);
+  sessionProjects.delete(sessionId);
+  const removed = connectedSessionProjects.delete(sessionId);
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const storePath = path.join(getDataRoot(), "session-projects.json");
+    if (fs.existsSync(storePath)) {
+      const map = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      if (map && map[sessionId]) {
+        delete map[sessionId];
+        fs.writeFileSync(storePath, JSON.stringify(map, null, 2), "utf-8");
+      }
+    }
+  } catch {}
+  return removed;
 }
 
 export function updateProjectFile(sessionId: string, filePath: string, content: string): boolean {
@@ -858,6 +978,7 @@ export function getSessionLastImages(sessionId: string): string[] {
 }
 
 export function getSessionWorkspaceFiles(sessionId: string): ProjectFile[] {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return [];
   const connected = connectedSessionProjects.get(sessionId);
   if (connected && connected.files && connected.files.length > 0) {
     return connected.files;
@@ -943,7 +1064,7 @@ export function ensureSessionWorkspaceMaterialized(
   _sessionTitle?: string,
   _chatTurns?: Array<{ role: string; text: string }>
 ): ConnectedProject | null {
-  if (!sessionId || sessionId === "default") return null;
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
 
   const existingConn = getSessionConnectedProject(sessionId);
   if (existingConn && existingConn.files && existingConn.files.length > 0) {
@@ -954,6 +1075,7 @@ export function ensureSessionWorkspaceMaterialized(
 }
 
 export function getSessionChatHistory(sessionId: string): SessionChatTurn[] {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return [];
   const mem = sessionChatHistories.get(sessionId);
   if (mem && mem.length > 0) return mem;
 
@@ -970,6 +1092,7 @@ export function getSessionChatHistory(sessionId: string): SessionChatTurn[] {
 }
 
 export function saveSessionChatHistory(sessionId: string, turns: SessionChatTurn[]): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
   sessionChatHistories.set(sessionId, turns);
   try {
     const { writePersistedHistory } = require("./session-persistent-storage");
@@ -981,6 +1104,7 @@ export function appendSessionChatTurn(
   sessionId: string,
   turn: Omit<SessionChatTurn, "timestamp"> & { timestamp?: number }
 ): void {
+  if (!sessionId || isBlockedLegacySessionId(sessionId)) return;
   const current = getSessionChatHistory(sessionId);
   const updated: SessionChatTurn[] = [
     ...current,
