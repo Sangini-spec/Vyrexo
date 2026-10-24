@@ -1,6 +1,11 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
+import {
+  registerLocalDirectoryHandle,
+  writeFilesToDirectoryHandle,
+  getSessionFilesFromCache,
+} from "@/lib/local-fs-sync";
 
 export interface ProjectOption {
   id?: string;
@@ -271,9 +276,12 @@ export function ConnectProjectModal({
           await traverse(dirHandle, "");
 
           const targetSessionId = sessionId || (onEnsureSession ? onEnsureSession() : `session-${Date.now()}`);
-          if (typeof window !== "undefined") {
-            (window as any).__localDirHandles = (window as any).__localDirHandles || {};
-            (window as any).__localDirHandles[targetSessionId] = dirHandle;
+          await registerLocalDirectoryHandle(targetSessionId, dirHandle.name, dirHandle);
+
+          // If this session already has generated files in cache, write them into the connected folder right away
+          const existingCached = getSessionFilesFromCache(targetSessionId);
+          if (existingCached && existingCached.files.length > 0 && scannedFiles.length === 0) {
+            await writeFilesToDirectoryHandle(dirHandle, existingCached.files);
           }
 
           await connectLocalFolderToBackend(dirHandle.name, scannedFiles, `/local/${dirHandle.name}`);

@@ -108,7 +108,7 @@ async function synthesizeWithElevenLabs(
 
   try {
     const abortCtrl = new AbortController();
-    const timeout = setTimeout(() => abortCtrl.abort(), 12000);
+    const timeout = setTimeout(() => abortCtrl.abort(), 38000);
 
     const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}`, {
       method: "POST",
@@ -190,10 +190,10 @@ async function synthesizeWithEdgeTTS(
       if (!resolved) {
         resolved = true;
         try { proc.kill("SIGKILL"); } catch {}
-        console.warn("[VoiceSpeak] EdgeTTS worker timed out after 7s");
+        console.warn("[VoiceSpeak] EdgeTTS worker timed out after 18s");
         resolve(null);
       }
-    }, 7000);
+    }, 18000);
 
     proc.stdout.on("data", (chunk: Buffer) => {
       chunks.push(chunk);
@@ -306,8 +306,8 @@ function mapVoiceName(voiceId?: string): string {
   return "Puck";
 }
 
-// Trim gracefully to 1-2 complete conversational sentences for snappy, natural speech
-function trimToConversationalSpeech(input: string, maxLen = 320): string {
+// Trim gracefully at sentence boundaries only if exceeding maximum synthesis payload size
+function trimToConversationalSpeech(input: string, maxLen = 4800): string {
   const trimmed = input.trim();
   if (trimmed.length <= maxLen) return trimmed;
   const sub = trimmed.slice(0, maxLen);
@@ -331,16 +331,17 @@ function trimToConversationalSpeech(input: string, maxLen = 320): string {
 
 /**
  * Prepares natural spoken dialogue by stripping technical artifacts, markdown, and code blocks
+ * while preserving the complete conversational response, story, poem, song, or joke.
  */
 function cleanSpokenTextForTTS(raw: string): string {
   if (!raw) return "";
 
   const cleaned = raw
     .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`[^`]+`/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
     // Convert asterisks stage directions into natural comma micro-pauses
     .replace(/\*+(?:takes?\s+(?:a\s+)?(?:deep\s+|little\s+|quick\s+|gentle\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ")
-    .replace(/\*+[^*]+?\*+/g, ", ")
+    .replace(/\*+([^*]+?)\*+/g, "$1")
     // Convert parenthetical stage directions into natural commas
     .replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat|laugh|smile)[^)]*\)/gi, ", ")
     // Strip XML/HTML style breath tags
@@ -350,6 +351,9 @@ function cleanSpokenTextForTTS(raw: string): string {
     .replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ")
     // Remove markdown symbols
     .replace(/[_#~|]/g, "")
+    // Convert line breaks in poems/songs/paragraphs into natural spoken pauses
+    .replace(/([^\s.,!?;:\-])\s*\n+\s*/g, "$1. ")
+    .replace(/\n+/g, " ")
     // Normalize commas and punctuation so voice never drags
     .replace(/\s*,\s*,\s*/g, ", ")
     .replace(/\s*,\s*\.\.\.\s*,?/g, ", ")
@@ -358,7 +362,7 @@ function cleanSpokenTextForTTS(raw: string): string {
     .replace(/^\s*[,.\s]+/, "")
     .trim();
 
-  return trimToConversationalSpeech(cleaned, 320);
+  return trimToConversationalSpeech(cleaned, 4800);
 }
 
 /**
@@ -383,6 +387,35 @@ function injectHumanEmotionAndBreaths(text: string, emotion?: string): string {
   return humanized;
 }
 
+/**
+ * Splits long text into sentence-aligned segments for Gemini TTS so even multi-paragraph
+ * stories, songs, poems, and discussions are synthesized completely without truncation.
+ */
+function splitTextForGeminiSegments(text: string, maxSegmentLen = 750): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  if (trimmed.length <= maxSegmentLen) return [trimmed];
+
+  const sentences = trimmed.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [trimmed];
+  const segments: string[] = [];
+  let current = "";
+
+  for (const s of sentences) {
+    const cleanS = s.trim();
+    if (!cleanS) continue;
+    if ((current + " " + cleanS).trim().length > maxSegmentLen && current.length > 0) {
+      segments.push(current.trim());
+      current = cleanS;
+    } else {
+      current = current ? `${current} ${cleanS}` : cleanS;
+    }
+  }
+  if (current.trim()) {
+    segments.push(current.trim());
+  }
+  return segments;
+}
+
 // Synthesizes speech using Google Gemini Neural TTS (Direct, seamless fallback when ElevenLabs credits exceeded)
 async function synthesizeWithGeminiTTS(
   text: string,
@@ -395,48 +428,64 @@ async function synthesizeWithGeminiTTS(
 
   const prebuiltVoice = mapVoiceName(voiceId);
   const expressiveSpeechText = injectHumanEmotionAndBreaths(text, emotion);
+  const segments = splitTextForGeminiSegments(expressiveSpeechText, 750);
+  if (segments.length === 0) return { buffer: null };
 
-  // Fast model sequence for reliable, low-latency TTS fallback
+  // Fast model sequence for reliable, low-latency TTS
   const candidateModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
 
   for (const model of candidateModels) {
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                text: expressiveSpeechText,
-              },
-            ],
-          },
-        ] as any,
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: prebuiltVoice,
+      const pcmBuffers: Buffer[] = [];
+      let allSucceeded = true;
+
+      for (const seg of segments) {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: seg,
+                },
+              ],
+            },
+          ] as any,
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: prebuiltVoice,
+                },
               },
             },
           },
-        },
-      });
+        });
 
-      const candidate = response.candidates?.[0];
-      const parts = candidate?.content?.parts || [];
-      const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
-      if (found?.inlineData?.data) {
-        const base64Data = found.inlineData.data;
-        const rawBuffer = Buffer.from(base64Data, "base64");
+        const candidate = response.candidates?.[0];
+        const parts = candidate?.content?.parts || [];
+        const found = parts.find((p: any) => p.inlineData && p.inlineData.data);
+        if (found?.inlineData?.data) {
+          const rawBuffer = Buffer.from(found.inlineData.data, "base64");
+          const hasRiffHeader =
+            rawBuffer.length >= 44 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
+          const pcmSlice = hasRiffHeader ? rawBuffer.subarray(44) : rawBuffer;
+          if (pcmSlice.length > 0) {
+            pcmBuffers.push(pcmSlice);
+          }
+        } else {
+          allSucceeded = false;
+          break;
+        }
+      }
 
-        const hasRiffHeader = rawBuffer.length >= 12 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
-        const finalWavBytes = hasRiffHeader
-          ? rawBuffer
-          : Buffer.from(pcm16ToWav(new Uint8Array(rawBuffer), 24000, 1));
-
+      if (pcmBuffers.length > 0 && (allSucceeded || pcmBuffers.length >= 1)) {
+        const combinedPcm = Buffer.concat(pcmBuffers);
+        const finalWavBytes = Buffer.from(
+          pcm16ToWav(new Uint8Array(combinedPcm), 24000, 1)
+        );
         return { buffer: finalWavBytes, modelUsed: model };
       }
     } catch (err: any) {

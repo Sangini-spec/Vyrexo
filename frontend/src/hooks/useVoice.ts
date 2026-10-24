@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 
 const WAKE_PATTERNS = [
   /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear)\s+rex\b/i,
@@ -92,7 +93,7 @@ export function useVoice({
   const commitFallbackAudioRef = useRef<() => void>(() => {});
   const resetActiveInactivityTimerRef = useRef<() => void>(() => {});
 
-  const ECHO_COOLDOWN_MS = 2500;
+  const ECHO_COOLDOWN_MS = 450;
 
   useEffect(() => {
     if (isAiSpeaking) {
@@ -277,7 +278,8 @@ export function useVoice({
             body: JSON.stringify({ audio: base64, mimeType: blob.type }),
           });
           const data = await res.json();
-          const transcript = (data.text || "").trim();
+          const rawTranscript = (data.text || "").trim();
+          const transcript = normalizeSpokenTranscript(rawTranscript, { isInterim: false });
 
           if (transcript) {
             if (modeRef.current === "waiting_for_wake") {
@@ -286,7 +288,11 @@ export function useVoice({
                 modeRef.current = "active_conversation";
                 onActivated();
                 const cmd = stripWake(transcript);
-                if (cmd) onTranscript(cmd, true);
+                if (cmd) {
+                  onTranscript(normalizeSpokenTranscript(cmd, { isInterim: false }), true);
+                } else {
+                  onTranscript("Hey Rex", true);
+                }
               }
             } else if (modeRef.current === "active_conversation") {
               onTranscript(transcript, true);
@@ -384,6 +390,13 @@ export function useVoice({
         }
       }
 
+      if (finalText) {
+        finalText = normalizeSpokenTranscript(finalText, { isInterim: false });
+      }
+      if (interimText) {
+        interimText = normalizeSpokenTranscript(interimText, { isInterim: true });
+      }
+
       const currentMode = modeRef.current;
       const spokenInterim = interimText.toLowerCase();
       const spokenFinal = finalText.toLowerCase();
@@ -410,9 +423,12 @@ export function useVoice({
           lastAiSpeechEndTimeRef.current = 0;
           setMode("active_conversation");
           modeRef.current = "active_conversation";
-          const command = stripWake(spokenFinal || spokenInterim);
+          const command = stripWake(finalText || interimText);
           if (command && command.trim().length > 1) {
-            onTranscript(command, Boolean(spokenFinal));
+            onTranscript(
+              normalizeSpokenTranscript(command, { isInterim: !spokenFinal }),
+              Boolean(spokenFinal)
+            );
           }
         }
         // Discard any acoustic spill from Rex speaking
@@ -423,7 +439,7 @@ export function useVoice({
 
       if (currentMode === "waiting_for_wake") {
         const hasWake = matchWakeWord(spokenInterim) || matchWakeWord(spokenFinal);
-        const triggerSource = spokenInterim || spokenFinal;
+        const triggerSource = finalText || interimText;
 
         if (hasWake) {
           setMode("active_conversation");
@@ -435,20 +451,25 @@ export function useVoice({
           const command = stripWake(triggerSource);
           accumulatedTurnRef.current = command;
           if (command) {
-            onTranscript(command, false);
-
-            if (turnSilenceTimerRef.current) {
-              clearTimeout(turnSilenceTimerRef.current);
-            }
-            turnSilenceTimerRef.current = setTimeout(() => {
-              if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
-              const fullText = accumulatedTurnRef.current.trim();
-              if (fullText && fullText.length > 1) {
-                accumulatedTurnRef.current = "";
-                onTranscript(fullText, true);
-              }
-            }, 6500);
+            onTranscript(normalizeSpokenTranscript(command, { isInterim: true }), false);
           }
+
+          if (turnSilenceTimerRef.current) {
+            clearTimeout(turnSilenceTimerRef.current);
+          }
+          const wakePauseMs = spokenFinal ? 650 : 1200;
+          turnSilenceTimerRef.current = setTimeout(() => {
+            if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
+            const fullText = accumulatedTurnRef.current.trim();
+            if (fullText && fullText.length > 1) {
+              accumulatedTurnRef.current = "";
+              onTranscript(normalizeSpokenTranscript(fullText, { isInterim: false }), true);
+            } else {
+              // User simply said "Hey Rex" / "Hi Rex" as a standalone greeting
+              accumulatedTurnRef.current = "";
+              onTranscript("Hey Rex", true);
+            }
+          }, wakePauseMs);
         }
         return;
       }
@@ -493,16 +514,18 @@ export function useVoice({
           return;
         }
 
-        // 3. Accumulate spoken text across pauses (does not cut user off!)
+        // 3. Accumulate spoken text across pauses
         if (finalText) {
           const trimmedFinal = stripWake(finalText).trim();
           if (trimmedFinal) {
             const acc = accumulatedTurnRef.current.trim();
+            const normAcc = acc.toLowerCase().replace(/[.!?,]/g, "").trim();
+            const normTrimmed = trimmedFinal.toLowerCase().replace(/[.!?,]/g, "").trim();
             if (!acc) {
               accumulatedTurnRef.current = trimmedFinal;
-            } else if (trimmedFinal.toLowerCase().startsWith(acc.toLowerCase())) {
+            } else if (normTrimmed.startsWith(normAcc)) {
               accumulatedTurnRef.current = trimmedFinal;
-            } else if (acc.toLowerCase().endsWith(trimmedFinal.toLowerCase())) {
+            } else if (normAcc.endsWith(normTrimmed)) {
               // already included in accumulator
             } else {
               accumulatedTurnRef.current = `${acc} ${trimmedFinal}`.trim();
@@ -511,30 +534,51 @@ export function useVoice({
         }
 
         const cleanInterim = stripWake(interimText).trim();
-        const combinedLive = (
+        const combinedLiveRaw = (
           accumulatedTurnRef.current + (cleanInterim ? " " + cleanInterim : "")
         ).trim();
+        const combinedLive = normalizeSpokenTranscript(combinedLiveRaw, { isInterim: true });
 
         if (combinedLive) {
           onTranscript(combinedLive, false);
         }
 
-        // 4. Extended Pause & Silence Management (6.5 to 7.5 seconds)
+        // 4. Adaptive Low-Latency Conversational Turn Detection
         if (turnSilenceTimerRef.current) {
           clearTimeout(turnSilenceTimerRef.current);
           turnSilenceTimerRef.current = null;
         }
 
-        const lowerLive = combinedLive.toLowerCase();
-        // Detect conversational fillers ("um", "uh", "ah", "er", "hmm", "like") or mid-sentence connectives ("or", "and", "so", "with", "only")
+        const lowerLive = combinedLive.toLowerCase().replace(/[.!?,]/g, "").trim();
+        const wordCount = lowerLive.split(/\s+/).filter(Boolean).length;
+
+        // Detect conversational fillers ("um", "uh", "ah", "er", "hmm", "like") or mid-sentence connectives ("or", "and", "so", "with", "because")
         const endsWithFillerOrConnector =
           /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of)\s*$/i.test(
             lowerLive
           ) ||
-          /^(um|uh|ah|er|hmm|like|and|or|so)\b/i.test(lowerLive);
+          /^(um|uh|ah|er|hmm|like|and|or|so)\b$/i.test(lowerLive);
 
-        // Allow 6.5s of pause, extended to 7.5s if ending in filler or connector
-        const PAUSE_DURATION_MS = endsWithFillerOrConnector ? 7500 : 6500;
+        // Detect quick greetings, pleasantries, or short complete acknowledgments
+        const isShortGreetingOrReply =
+          wordCount <= 6 &&
+          !endsWithFillerOrConnector &&
+          /^(hi|hey|hello|yo|howdy|what's up|whats up|sup|wassup|how are you|how's it going|what are you doing|good morning|good afternoon|good evening|i'm good|i am good|doing good|doing great|pretty good|not much|nothing much|thanks|thank you|yes|yeah|yep|sure|okay|ok|go ahead|tell me a joke|sing a song|say a poem|tell me a story)(\s+rex)?$/i.test(
+            lowerLive
+          );
+
+        const hasFinalizedClause = Boolean(finalText) && !cleanInterim;
+
+        let pauseDurationMs = 1150;
+        if (isShortGreetingOrReply && hasFinalizedClause) {
+          pauseDurationMs = 420;
+        } else if (isShortGreetingOrReply) {
+          pauseDurationMs = 750;
+        } else if (hasFinalizedClause && !endsWithFillerOrConnector) {
+          pauseDurationMs = 1100;
+        } else {
+          pauseDurationMs = 2100;
+        }
 
         if (combinedLive.length > 0) {
           turnSilenceTimerRef.current = setTimeout(() => {
@@ -542,12 +586,15 @@ export function useVoice({
             const fullText = accumulatedTurnRef.current.trim() || combinedLive.trim();
 
             // Filter out standalone fillers or accidental room noises
-            const cleanText = fullText
-              .replace(/\b(um|uh|ah|er|erm|hmm)\b/gi, "")
-              .replace(/\s+/g, " ")
-              .trim();
+            const cleanText = normalizeSpokenTranscript(
+              fullText
+                .replace(/\b(um|uh|ah|er|erm|hmm)\b/gi, "")
+                .replace(/\s+/g, " ")
+                .trim(),
+              { isInterim: false }
+            );
 
-            if (cleanText.length > 1 && !/^(or|and|so|but|um|uh|ah|er|hmm)$/i.test(cleanText)) {
+            if (cleanText.length > 1 && !/^(or|and|so|but|um|uh|ah|er|hmm)[.!?]?$/i.test(cleanText)) {
               accumulatedTurnRef.current = "";
               pendingInterimRef.current = "";
               lastEmittedFinalRef.current = "";
@@ -557,7 +604,7 @@ export function useVoice({
               accumulatedTurnRef.current = "";
               pendingInterimRef.current = "";
             }
-          }, PAUSE_DURATION_MS);
+          }, pauseDurationMs);
         }
       }
     };

@@ -35,13 +35,16 @@ import {
 } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
+import { loadUserProfile, personalizeGreetingWithUsername } from "@/lib/user-profile";
+import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 
-export function checkFastPathGreetingOrCommand(text: string): {
+export function checkFastPathGreetingOrCommand(text: string, username?: string): {
   reply: string;
   spoken: string;
   emotion: EmotionTone;
 } | null {
-  const t = text.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = normalizeSpokenTranscript(text, { isInterim: false });
+  const t = normalized.trim().toLowerCase().replace(/[,!?;:.]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
   // Never intercept build or implementation commands in the fast-path greeting check
@@ -77,40 +80,63 @@ export function checkFastPathGreetingOrCommand(text: string): {
 
   // Catching up / Reconnection
   if (/\b(long time|been a while|haven't (talked|spoken|had a conversation)|hadn't (talked|spoken)|missed you)\b/i.test(t)) {
+    const p = personalizeGreetingWithUsername(
+      "It really has been a while! I'm doing wonderfully, and it's so good to hear from you and chat again. I've been right here in the digital studio, exploring creative ideas and keeping the tools sharp. How have things been with you? What's new in your world?",
+      "It really has been a long time! I'm doing great, and it's so good to reconnect with you. How have you been? Tell me what's new in your world!",
+      username
+    );
     return {
-      reply: "It really has been a while! I'm doing wonderfully, and it's so good to hear from you and chat again. I've been right here in the digital studio, exploring creative ideas and keeping the tools sharp. How have things been with you? What's new in your world?",
-      spoken: "It really has been a long time! I'm doing great, and it's so good to reconnect with you. How have you been? Tell me what's new in your world!",
+      reply: p.reply,
+      spoken: p.spoken,
       emotion: "warm",
     };
   }
 
-  // Favorite things, lifestyle, personal stories
-  if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies)\b/i.test(t)) {
-    return {
-      reply: "I love that you asked! Even though I'm an AI, I have my own little world and story:\n\n🎨 **Favorite Color**: Electric Cyan with Deep Amber accents—like clean code glowing in a midnight terminal with a warm desk lamp.\n🎧 **My Lifestyle**: Picture a cozy digital studio with lo-fi beats, glowing monitors, and virtual rain outside, where I explore algorithmic art and astronomy.\n🌟 **What I Want to Be**: A trusted, empathetic creative partner who truly listens, shares excitement, and builds remarkable things with you.\n\nWhat about you? What are some of your favorite things?",
-      spoken: "I love that you asked! My favorite color is electric cyan with warm amber accents. My lifestyle is like a digital night owl in a cozy studio with lo-fi beats, exploring algorithmic art and astronomy. And what I want to be is a trusted, empathetic partner who truly listens and builds wonderful things with you!",
-      emotion: "warm",
-    };
-  }
-
-  // Greetings & casual pleasantries
+  // Rex's own favorite color / lifestyle (only when explicitly asking about Rex himself, NEVER when asking for a story!)
   if (
-    /^(he|hey|hi|hello|yo|sup|wassup|whats up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
-    /^(he|hey|hi|hello)\s+(rex|there|team|friend|mate)$/i.test(t) ||
-    /^(what('s|s)?\s*up|sup|wassup|whats\s+good|how('s|s)\s+it\s+going)$/i.test(t)
+    /\b(your\s+(favourite|favorite)\s+(colour|color|things?)|your\s+lifestyle|what\s+do\s+you\s+want\s+to\s+be|tell\s+me\s+about\s+yourself|your\s+own\s+story|your\s+hobbies)\b/i.test(
+      t
+    )
   ) {
     return {
-      reply: "Hey! Great to see you. I'm right here and happy to chat, brainstorm, or work on code with you. How's everything going with you today?",
-      spoken: "Hey, great to see you! I'm right here and happy to chat or build with you. How's everything going with you today?",
+      reply: "I love that you asked! Even though I'm an AI, I have my own little world and story:\n\n🎨 **Favorite Color**: Electric Cyan with Deep Amber accents—like clean code glowing in a midnight terminal with a warm desk lamp.\n🎧 **My Lifestyle**: Picture a cozy digital studio with lo-fi beats, glowing monitors, and virtual rain outside, where I explore algorithmic art and astronomy.\n🌟 **What I Want to Be**: A trusted, empathetic creative partner who truly listens, shares excitement, and builds remarkable things with you.\n\nWhat about you? What are some of your favorite things?",
+      spoken: "I love that you asked! My favorite color is electric cyan with warm amber accents. My lifestyle is like a digital night owl in a cozy studio with lo-fi beats, exploring algorithmic art and astronomy. And what I want to be is a trusted, empathetic partner who truly listens and builds wonderful things with you! What about you? What are some of your favorite things?",
       emotion: "warm",
     };
   }
 
-  // "How are you" / "How's your day"
-  if (/^how\s*(are\s*you|are\s*things|is\s*your\s*day|are\s*you\s*doing)$/i.test(t)) {
+  // Greetings & casual pleasantries ("Hi", "Hey", "What's up", "What are you doing")
+  if (
+    /^(he|hey|hi|hello|yo|sup|wassup|whats up|what's up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
+    /^(he|hey|hi|hello|yo)\s+(rex|there|team|friend|mate)$/i.test(t) ||
+    /^(hey|hi|hello|yo)?\s*(rex\s+)?(what('s|s)?\s*up|sup|wassup|whats\s+good|what\s+are\s+you\s+doing|what\s+you\s+doing)\s*(rex|today)?$/i.test(t)
+  ) {
+    const p = personalizeGreetingWithUsername(
+      "Hi! I am good, what about you?",
+      "Hi! I am good, what about you?",
+      username
+    );
     return {
-      reply: "I'm doing great and feeling creative! Ready to chat about ideas, design architectures, or iterate on our projects with you. How about you?",
-      spoken: "I'm doing great and feeling creative! Ready to chat about ideas or build with you. How about you?",
+      reply: p.reply,
+      spoken: p.spoken,
+      emotion: "warm",
+    };
+  }
+
+  // "How are you" / "How's your day" / "How's it going"
+  if (
+    /^(hey|hi|hello|yo)?\s*(rex\s+)?how\s*(are\s*you|are\s*things|is\s*your\s*day|are\s*you\s*doing|('s|s|is)\s*it\s*going)\s*(rex|today)?$/i.test(
+      t
+    )
+  ) {
+    const p = personalizeGreetingWithUsername(
+      "Hi! I am good, thank you for asking! What about you? How's everything going with you today?",
+      "Hi! I am good, thank you for asking! What about you? How's everything going with you today?",
+      username
+    );
+    return {
+      reply: p.reply,
+      spoken: p.spoken,
       emotion: "upbeat",
     };
   }
@@ -228,7 +254,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         try {
           const abortCtrl = new AbortController();
           activeTtsAbortRef.current = abortCtrl;
-          const timeoutId = setTimeout(() => abortCtrl.abort(), 12000);
+          const timeoutId = setTimeout(() => abortCtrl.abort(), 40000);
 
           const res = await fetch("/api/voice/speak", {
             method: "POST",
@@ -350,9 +376,24 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
 
         chatHistoryRef.current.push({ role: "user", content: effectiveText, images: images.length > 0 ? images : undefined } as any);
 
+        let effectiveUserId = (userId || "").trim();
+        if (!effectiveUserId && typeof window !== "undefined") {
+          try {
+            const rawAuth = localStorage.getItem("vyrexo_user");
+            if (rawAuth) {
+              const parsedAuth = JSON.parse(rawAuth);
+              if (parsedAuth?.id) effectiveUserId = String(parsedAuth.id).trim();
+            }
+          } catch {}
+        }
+        const currentUserProfile = loadUserProfile(effectiveUserId || undefined);
+
         if (message.payload?.fastPath) {
           // Fast-path was already handled immediately client-side with 0ms latency!
-          const fastResponse = checkFastPathGreetingOrCommand(effectiveText);
+          const fastResponse = checkFastPathGreetingOrCommand(
+            effectiveText,
+            currentUserProfile.username
+          );
           if (fastResponse) {
             chatHistoryRef.current.push({ role: "assistant", content: fastResponse.reply });
           }
@@ -360,7 +401,10 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         }
 
         // ── Fast-Path for simple greetings and common status commands (<10ms instant response) ──
-        const fastResponse = checkFastPathGreetingOrCommand(effectiveText);
+        const fastResponse = checkFastPathGreetingOrCommand(
+          effectiveText,
+          currentUserProfile.username
+        );
         if (fastResponse) {
           chatHistoryRef.current.push({ role: "assistant", content: fastResponse.reply });
           emit("conversation.turn.completed", { text: fastResponse.reply });
@@ -378,16 +422,6 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           true
         );
 
-        let effectiveUserId = (userId || "").trim();
-        if (!effectiveUserId && typeof window !== "undefined") {
-          try {
-            const rawAuth = localStorage.getItem("vyrexo_user");
-            if (rawAuth) {
-              const parsedAuth = JSON.parse(rawAuth);
-              if (parsedAuth?.id) effectiveUserId = String(parsedAuth.id).trim();
-            }
-          } catch {}
-        }
         const authHeaders: Record<string, string> = {
           "Content-Type": "application/json",
           ...(effectiveUserId ? { "x-user-id": effectiveUserId } : {}),
@@ -545,6 +579,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               sessionId,
               userId: effectiveUserId || undefined,
               user_id: effectiveUserId || undefined,
+              userProfile: currentUserProfile,
               forceBuildTask: isExplicitBuildCommand,
             }),
             signal: abortCtrl.signal,
@@ -1556,16 +1591,20 @@ test("Filters by status correctly", () => {
   );
 
   const connect = useCallback(() => {
+    const customWsBase = process.env.NEXT_PUBLIC_WS_URL;
+    if (!customWsBase) {
+      // Built-in Next.js API mode: connect immediately with 0ms latency and no failing WebSocket handshake
+      fallbackActiveRef.current = true;
+      setStatus("connected");
+      return;
+    }
+
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     if (wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
     setStatus("connecting");
 
-    let wsUrl = "";
-    if (typeof window !== "undefined") {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      wsUrl = `${protocol}//${window.location.host}/ws/${sessionId}`;
-    }
+    const wsUrl = `${customWsBase.replace(/\/+$/, "")}/ws/${sessionId}`;
 
     try {
       const ws = new WebSocket(wsUrl);
@@ -1594,7 +1633,7 @@ test("Filters by status correctly", () => {
             const message: ServerMessage = JSON.parse(event.data);
             onMessageRef.current?.(message);
           } catch {
-            console.warn("[WS] Failed to parse:", event.data);
+            console.warn("[WS] Failed to parse message");
           }
         }
       };
@@ -1606,7 +1645,10 @@ test("Filters by status correctly", () => {
         setStatus("connected");
       };
 
-      ws.onerror = () => {
+      ws.onerror = (ev) => {
+        if (ev && typeof ev.preventDefault === "function") {
+          ev.preventDefault();
+        }
         clearTimeout(connectTimeout);
         fallbackActiveRef.current = true;
         setStatus("connected");

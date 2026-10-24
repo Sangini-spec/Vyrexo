@@ -2,6 +2,11 @@
 
 import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import {
+  getSessionFilesFromCache,
+  saveSessionFilesToCache,
+  syncSessionFilesToLocalDisk,
+} from "@/lib/local-fs-sync";
 
 interface TreeNode {
   name: string;
@@ -128,29 +133,53 @@ function VSCodeServerWorkbench() {
   const loadWorkspace = useCallback(async () => {
     setLoading(true);
     try {
+      const cached = getSessionFilesFromCache(sessionId);
       const res = await fetch("/api/projects/vscode", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(userIdParam ? { "x-user-id": userIdParam } : {}),
         },
-        body: JSON.stringify({ sessionId, userId: userIdParam || undefined }),
+        body: JSON.stringify({
+          sessionId,
+          userId: userIdParam || undefined,
+          files: cached?.files && cached.files.length > 0 ? cached.files : undefined,
+          title: cached?.projectName || undefined,
+          path: cached?.targetPath || undefined,
+        }),
       });
       const data = await res.json();
-      if (data?.ok && Array.isArray(data.files)) {
-        setProjectName(data.projectName || "Workspace");
-        setWorkspacePath(data.targetPath || data.sandboxPath || `~/VyrexoWorkspaces/${data.projectSlug || sessionId}`);
-        setVscodeDesktopUri(data.vscodeUri || "");
+      const rawFiles =
+        Array.isArray(data?.files) && data.files.length > 0
+          ? data.files
+          : cached?.files || [];
+      if (data?.ok || rawFiles.length > 0) {
+        const resolvedName = data?.projectName || cached?.projectName || "Workspace";
+        const resolvedPath =
+          data?.targetPath ||
+          data?.sandboxPath ||
+          cached?.targetPath ||
+          `C:\\Users\\hp\\OneDrive\\Desktop\\${data?.localFolderName || data?.projectSlug || "amaze"}`;
+        setProjectName(resolvedName);
+        setWorkspacePath(resolvedPath);
+        setVscodeDesktopUri(data?.vscodeUri || `vscode://file/${resolvedPath.replace(/\\/g, "/").replace(/^\/+/, "")}`);
 
         const nextMap: Record<string, string> = {};
         const fileList: WorkspaceFile[] = [];
-        for (const f of data.files) {
+        for (const f of rawFiles) {
           const clean = String(f.path || "").replace(/^\/+/, "");
           if (!clean || clean.endsWith(".code-workspace")) continue;
           nextMap[clean] = String(f.content ?? "");
           fileList.push({ path: clean, content: String(f.content ?? "") });
         }
         setFilesMap(nextMap);
+        if (fileList.length > 0) {
+          saveSessionFilesToCache(sessionId, fileList, {
+            projectName: resolvedName,
+            localFolderName: data?.localFolderName,
+            targetPath: resolvedPath,
+          });
+        }
 
         const builtTree = buildTreeFromFiles(fileList);
         setTree(builtTree);
@@ -471,13 +500,41 @@ function VSCodeServerWorkbench() {
             {showPreview ? "Hide Live Preview" : "Split Live Preview"}
           </button>
           {vscodeDesktopUri && (
-            <a
-              href={vscodeDesktopUri}
-              className="px-2.5 py-1 rounded bg-[#252526] hover:bg-[#2a2d2e] border border-[#3c3c3c] text-[#cccccc] text-[11px] font-medium transition-colors"
-              title="Launch local Desktop VS Code via vscode:// protocol"
+            <button
+              type="button"
+              onClick={async () => {
+                const fileList = Object.entries(filesMap).map(([path, content]) => ({ path, content }));
+                const folderName =
+                  workspacePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ||
+                  projectName.toLowerCase().replace(/[^a-z0-9]+/g, "-") ||
+                  "amaze";
+                const syncResult = await syncSessionFilesToLocalDisk({
+                  sessionId,
+                  folderName,
+                  targetPath: workspacePath,
+                  files: fileList,
+                  promptIfMissing: true,
+                });
+                const finalPath = syncResult.actualTargetPath || workspacePath;
+                const normalized = finalPath.replace(/\\/g, "/").replace(/\/+$/, "");
+                const formatted = normalized.startsWith("/") ? normalized : `/${normalized}`;
+                const uri = `vscode://file${formatted}`;
+                const a = document.createElement("a");
+                a.href = uri;
+                a.style.display = "none";
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => {
+                  try {
+                    document.body.removeChild(a);
+                  } catch {}
+                }, 300);
+              }}
+              className="px-2.5 py-1 rounded bg-[#252526] hover:bg-[#2a2d2e] border border-[#3c3c3c] text-[#cccccc] text-[11px] font-medium transition-colors cursor-pointer"
+              title="Sync files to local folder and launch Desktop VS Code"
             >
               Open Desktop App
-            </a>
+            </button>
           )}
           <a
             href={`/api/projects/download?sessionId=${encodeURIComponent(sessionId)}`}

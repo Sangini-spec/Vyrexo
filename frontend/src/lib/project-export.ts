@@ -742,6 +742,22 @@ export function materializeProjectOnDisk(
     }
   } catch {}
 
+  // Determine if localTargetPath is directly accessible on this host OS
+  const canWriteLocalTargetOnHost =
+    (process.platform === "win32" && /^[A-Za-z]:[\\/]/.test(localTargetPath)) ||
+    (process.platform !== "win32" &&
+      localTargetPath.startsWith("/") &&
+      !localTargetPath.startsWith("/app/applet") &&
+      !localTargetPath.startsWith("/workspaces/") &&
+      !localTargetPath.startsWith("/local/") &&
+      fs.existsSync(path.dirname(localTargetPath)));
+
+  if (canWriteLocalTargetOnHost) {
+    try {
+      fs.mkdirSync(localTargetPath, { recursive: true });
+    } catch {}
+  }
+
   const files: ProjectExportFile[] = [];
   for (const [relPath, content] of Array.from(fileMap.entries())) {
     if (/^session-\d+\.code-workspace$/i.test(relPath)) continue;
@@ -751,6 +767,13 @@ export function materializeProjectOnDisk(
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, content, "utf-8");
     } catch {}
+    if (canWriteLocalTargetOnHost && !relPath.endsWith(".code-workspace")) {
+      try {
+        const hostFullPath = path.join(localTargetPath, relPath);
+        fs.mkdirSync(path.dirname(hostFullPath), { recursive: true });
+        fs.writeFileSync(hostFullPath, content, "utf-8");
+      } catch {}
+    }
   }
 
   return {

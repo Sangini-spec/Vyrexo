@@ -34,23 +34,36 @@ export function useAudioPlayer() {
     }
     if (audioElementRef.current && !audioElementRef.current.paused) return;
     const blob = queueRef.current.shift();
-    if (!blob) {
+    if (!blob || blob.size === 0) {
       isPlayingRef.current = false;
       setIsPlaying(false);
       return;
     }
 
     const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    // Lower latency: preload aggressively, don't wait on full buffer
+    const audio = new Audio();
     audio.preload = "auto";
     audioElementRef.current = audio;
     isPlayingRef.current = true;
     setIsPlaying(true);
 
+    let cleanedUp = false;
     const cleanup = () => {
-      URL.revokeObjectURL(url);
-      audioElementRef.current = null;
+      if (cleanedUp) return;
+      cleanedUp = true;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.oncanplay = null;
+      try {
+        audio.pause();
+        audio.removeAttribute("src");
+      } catch {}
+      try {
+        URL.revokeObjectURL(url);
+      } catch {}
+      if (audioElementRef.current === audio) {
+        audioElementRef.current = null;
+      }
       if (queueRef.current.length === 0) {
         isPlayingRef.current = false;
         setIsPlaying(false);
@@ -60,18 +73,18 @@ export function useAudioPlayer() {
     };
 
     audio.onended = cleanup;
-    audio.onerror = cleanup;
-
-    // canplay fires very early in MP3 decoding; start as soon as it does
-    audio.oncanplay = () => {
-      audio.play().catch(() => cleanup());
+    audio.onerror = (ev) => {
+      if (ev && typeof (ev as Event).preventDefault === "function") {
+        (ev as Event).preventDefault();
+      }
+      cleanup();
     };
 
-    // Some browsers won't fire canplay until play() is called
+    audio.src = url;
     audio.play().catch(() => {
-      // If autoplay was blocked or some other immediate failure, retry once
-      // shortly. After that, give up and move on so we don't deadlock the queue.
+      if (cleanedUp || mutedRef.current) return;
       setTimeout(() => {
+        if (cleanedUp || mutedRef.current) return;
         audio.play().catch(() => cleanup());
       }, 30);
     });
@@ -127,9 +140,15 @@ export function useAudioPlayer() {
     queueRef.current = [];
     currentChunksRef.current = [];
     if (audioElementRef.current) {
-      audioElementRef.current.pause();
-      audioElementRef.current.currentTime = 0;
+      const el = audioElementRef.current;
       audioElementRef.current = null;
+      el.onended = null;
+      el.onerror = null;
+      el.oncanplay = null;
+      try {
+        el.pause();
+        el.currentTime = 0;
+      } catch {}
     }
     isPlayingRef.current = false;
     setIsPlaying(false);

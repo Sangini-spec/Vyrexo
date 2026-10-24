@@ -637,8 +637,11 @@ export function speakHumanizedText(
       }
     };
 
-    utterance.onerror = (e) => {
-      console.warn("[VoiceSynthesizer] Utterance error:", e);
+    utterance.onerror = (e: any) => {
+      const errCode = e?.error || "speech_error";
+      if (errCode !== "canceled" && errCode !== "interrupted") {
+        console.warn("[VoiceSynthesizer] Utterance notice:", String(errCode));
+      }
       window.__rexActiveUtterances?.delete(utterance);
       if (isCancelled) return;
 
@@ -655,8 +658,8 @@ export function speakHumanizedText(
       if (synth.paused) synth.resume();
       synth.resume();
       synth.speak(utterance);
-    } catch (err) {
-      console.error("[VoiceSynthesizer] synth.speak error:", err);
+    } catch (err: any) {
+      console.warn("[VoiceSynthesizer] synth.speak notice:", err?.message || "speak_failed");
       cleanup();
       options?.onEnd?.();
     }

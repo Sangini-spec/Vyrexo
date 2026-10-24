@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -13,93 +14,11 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 /**
- * Fast deterministic heuristic normalizer for common speech recognition glitches
- * and technical homophones in the software domain.
+ * Fast deterministic heuristic normalizer for common speech recognition glitches,
+ * "WhatsApp" -> "What's up" disambiguation, and technical homophones.
  */
 function applyHeuristicCorrections(raw: string): string {
-  let text = raw.trim();
-  if (!text) return "";
-
-  // 1. Common acoustic homophones & colloquialisms
-  text = text
-    // "Lyrics" / "Lex" / "Wrecks" at start -> Rex
-    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
-    .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2")
-    // "he" -> "Hey," when used as opening salutation
-    .replace(/^he\s+(whatever|rex|can\s+you|could\s+you|what|how|show|run|build|tell|i\s+want)/i, "Hey, $1")
-    .replace(/^he$/i, "Hey")
-    .replace(/\bbed\s+for\b/gi, "built for")
-    .replace(/\bbill\s+for\b/gi, "built for")
-    .replace(/\bbed\s+it\b/gi, "built it")
-    .replace(/\bor\s+a\s+mart\b/gi, "AuraMart")
-    .replace(/\baura\s*mart\b/gi, "AuraMart")
-    .replace(/\baura\s*beauty\b/gi, "AuraBeauty")
-    .replace(/\bapex\s*wealth\b/gi, "ApexWealth")
-    .replace(/\broom\s*canvas\b/gi, "RoomCanvas")
-    .replace(/\bsky\s*wings\b/gi, "SkyWings")
-    .replace(/\bflight\s*booking\b/gi, "flight booking")
-    .replace(/\bseat\s*map\b/gi, "seat map")
-    .replace(/\bcan\s*was\b/gi, "canvas")
-    .replace(/\bto\s*do\s*list\b/gi, "todo list")
-    .replace(/\btype\s*script\b/gi, "TypeScript")
-    .replace(/\bjava\s*script\b/gi, "JavaScript")
-    .replace(/\bnext\s*js\b/gi, "Next.js")
-    .replace(/\breact\s*js\b/gi, "React")
-    .replace(/\btail\s*wind\b/gi, "Tailwind")
-    .replace(/\bpreview\s*tab\b/gi, "preview tab")
-    .replace(/\bcode\s*tab\b/gi, "code tab")
-    .replace(/\bi\s*d\s*e\b/gi, "IDE")
-    .replace(/\ba\s*p\s*i\b/gi, "API")
-    .replace(/\bu\s*i\b/gi, "UI")
-    .replace(/\bu\s*x\b/gi, "UX")
-    .replace(/\bd\s*b\b/gi, "DB")
-    .replace(/\bg\s*i\s*t\b/gi, "Git");
-
-  // 2. Contractions with apostrophes
-  text = text
-    .replace(/\bcant\b/gi, "can't")
-    .replace(/\bdont\b/gi, "don't")
-    .replace(/\bwont\b/gi, "won't")
-    .replace(/\bthats\b/gi, "that's")
-    .replace(/\bwhats\b/gi, "what's")
-    .replace(/\bhows\b/gi, "how's")
-    .replace(/\btheres\b/gi, "there's")
-    .replace(/\bheres\b/gi, "here's")
-    .replace(/\blets\b/gi, "let's")
-    .replace(/\bim\b/gi, "I'm")
-    .replace(/\bive\b/gi, "I've")
-    .replace(/\byoure\b/gi, "you're")
-    .replace(/\bweve\b/gi, "we've")
-    .replace(/\btheyre\b/gi, "they're")
-    .replace(/\bisnt\b/gi, "isn't")
-    .replace(/\barent\b/gi, "aren't")
-    .replace(/\bwasnt\b/gi, "wasn't");
-
-  // 3. Sentence capitalization
-  if (text.length > 0) {
-    text = text.charAt(0).toUpperCase() + text.slice(1);
-  }
-
-  // 4. Intelligent terminal punctuation
-  const lower = text.toLowerCase();
-  const isQuestion =
-    /^(can|could|would|will|is|are|was|were|do|does|did|how|what|why|where|when|who|which)\b/i.test(
-      lower
-    ) ||
-    /\b(can\s+you|could\s+you|would\s+you|please\s+show|is\s+it|what\s+do\s+you\s+think|do\s+you\s+know)\b/i.test(
-      lower
-    ) ||
-    /\b(in\s+the\s+preview\s+tab|in\s+preview|on\s+screen)\s*$/i.test(lower);
-
-  if (!/[.!?]$/.test(text)) {
-    if (isQuestion) {
-      text += "?";
-    } else {
-      text += ".";
-    }
-  }
-
-  return text;
+  return normalizeSpokenTranscript(raw, { finalizePunctuation: true });
 }
 
 export async function POST(request: NextRequest) {

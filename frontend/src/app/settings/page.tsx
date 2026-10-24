@@ -12,6 +12,12 @@ import {
   speakHumanizedText,
   cancelHumanizedSpeech,
 } from "@/lib/voice-synthesizer";
+import {
+  type UserProfile,
+  loadUserProfile,
+  saveUserProfile,
+  personalizeGreetingWithUsername,
+} from "@/lib/user-profile";
 
 // Curated voices (3 male, 3 female)
 const VOICE_OPTIONS = [
@@ -74,14 +80,65 @@ const SPEED_OPTIONS = [
   { value: "fast", label: "Fast", rate: "+15%" },
 ];
 
+const OCCUPATION_PRESETS = [
+  "Student",
+  "Computer Science Student",
+  "Software Engineer",
+  "Full-Stack Developer",
+  "Frontend Engineer",
+  "Product Designer",
+  "Data Scientist",
+  "Founder",
+];
+
+const GENDER_OPTIONS = [
+  "",
+  "Female",
+  "Male",
+  "Non-binary",
+  "Prefer not to say",
+];
+
+const ABOUT_USER_SNIPPETS = [
+  "I'm a student working on full-stack web projects and learning system design.",
+  "I primarily code in TypeScript, React, Next.js, and Python.",
+  "I'm building production SaaS applications and value clean, maintainable code.",
+  "I love learning the 'why' behind architectural decisions and best practices.",
+];
+
+const RESPONSE_STYLE_SNIPPETS = [
+  "Be warm, encouraging, and talk like a collaborative teammate.",
+  "Keep explanations clear and concise, and lead with working code examples.",
+  "When debugging, explain the root cause briefly before fixing it.",
+  "Tailor explanations to my background and avoid unnecessary jargon.",
+];
+
 export default function SettingsPage() {
   const { user, loading, signOut } = useAuth();
   const router = useRouter();
 
+  const [activeTab, setActiveTab] = useState<"profile" | "voice">("profile");
+
+  // Profile state
+  const [profile, setProfile] = useState<UserProfile>({
+    username: "",
+    fullName: "",
+    occupation: "",
+    age: "",
+    dateOfBirth: "",
+    gender: "",
+    aboutUserInstructions: "",
+    responseStyleInstructions: "",
+  });
+  const [profileSaved, setProfileSaved] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [testingGreeting, setTestingGreeting] = useState(false);
+
+  // Voice state
   const [selectedVoice, setSelectedVoice] = useState("adam");
   const [speed, setSpeed] = useState<"slow" | "normal" | "fast">("normal");
   const [voiceFilter, setVoiceFilter] = useState<"all" | "male" | "female">("all");
-  const [saved, setSaved] = useState(false);
+  const [voiceSaved, setVoiceSaved] = useState(false);
   const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
 
   const cancelPreviewRef = useRef<(() => void) | null>(null);
@@ -92,12 +149,67 @@ export default function SettingsPage() {
   }, [user, loading, router]);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam === "voice") {
+        setActiveTab("voice");
+      } else if (tabParam === "profile") {
+        setActiveTab("profile");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const localProf = loadUserProfile(user.id, user);
+    if (!localProf.fullName && user.user_metadata?.full_name) {
+      localProf.fullName = user.user_metadata.full_name;
+    }
+    setProfile(localProf);
+
+    fetch(`/api/profile?user_id=${encodeURIComponent(user.id)}`, {
+      headers: { "x-user-id": user.id },
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.ok && data.profile) {
+          const srv = data.profile as Partial<UserProfile>;
+          if (
+            srv.username ||
+            srv.occupation ||
+            srv.aboutUserInstructions ||
+            srv.responseStyleInstructions ||
+            srv.age ||
+            srv.dateOfBirth ||
+            srv.gender
+          ) {
+            const merged: UserProfile = {
+              username: srv.username || localProf.username || "",
+              fullName: srv.fullName || localProf.fullName || user.user_metadata?.full_name || "",
+              occupation: srv.occupation || localProf.occupation || "",
+              age: srv.age || localProf.age || "",
+              dateOfBirth: srv.dateOfBirth || localProf.dateOfBirth || "",
+              gender: srv.gender || localProf.gender || "",
+              aboutUserInstructions:
+                srv.aboutUserInstructions || localProf.aboutUserInstructions || "",
+              responseStyleInstructions:
+                srv.responseStyleInstructions || localProf.responseStyleInstructions || "",
+            };
+            setProfile(merged);
+            saveUserProfile(merged, user.id);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [user]);
+
+  useEffect(() => {
     const stored = localStorage.getItem("vyrexo_voice");
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
         if (parsed.voice) {
-          // Normalize legacy voice ids if present
           if (parsed.voice === "ava") setSelectedVoice("rachel");
           else if (parsed.voice === "ryan") setSelectedVoice("brian");
           else if (parsed.voice === "sonia") setSelectedVoice("charlotte");
@@ -108,7 +220,6 @@ export default function SettingsPage() {
     }
   }, []);
 
-  // Clean up any preview audio on unmount
   useEffect(() => {
     return () => {
       if (currentAudioRef.current) {
@@ -119,6 +230,65 @@ export default function SettingsPage() {
       cancelHumanizedSpeech();
     };
   }, []);
+
+  const handleDateOfBirthChange = (dob: string) => {
+    let computedAge = profile.age;
+    if (dob) {
+      const birthDate = new Date(dob);
+      if (!isNaN(birthDate.getTime())) {
+        const today = new Date();
+        let years = today.getFullYear() - birthDate.getFullYear();
+        const m = today.getMonth() - birthDate.getMonth();
+        if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+          years--;
+        }
+        if (years >= 1 && years <= 120) {
+          computedAge = String(years);
+        }
+      }
+    }
+    setProfile((prev) => ({
+      ...prev,
+      dateOfBirth: dob,
+      age: computedAge,
+    }));
+  };
+
+  const handleSaveProfile = async () => {
+    if (!user) return;
+    setSavingProfile(true);
+    const savedLocal = saveUserProfile(profile, user.id);
+    setProfile(savedLocal);
+
+    try {
+      await fetch("/api/profile", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": user.id,
+        },
+        body: JSON.stringify({
+          user_id: user.id,
+          profile: savedLocal,
+        }),
+      });
+    } catch {}
+
+    setSavingProfile(false);
+    setProfileSaved(true);
+    setTimeout(() => setProfileSaved(false), 3000);
+  };
+
+  const handleTestGreeting = async () => {
+    const sample = personalizeGreetingWithUsername(
+      "Hey! Great to see you. How's everything going with you today?",
+      "Hey, great to see you! How's everything going with you today?",
+      profile.username
+    );
+    setTestingGreeting(true);
+    await handlePreview(selectedVoice, sample.spoken);
+    setTestingGreeting(false);
+  };
 
   const handlePreview = async (voiceId: string, previewScript: string) => {
     if (previewingVoice === voiceId) {
@@ -172,9 +342,7 @@ export default function SettingsPage() {
         await audio.play();
         return;
       }
-    } catch {
-      // Fall through to browser speech synthesis
-    }
+    } catch {}
 
     const settings: VoiceSettings = {
       voice: voiceId,
@@ -188,16 +356,21 @@ export default function SettingsPage() {
     });
   };
 
-  const handleSave = () => {
+  const handleSaveVoice = () => {
     localStorage.setItem(
       "vyrexo_voice",
       JSON.stringify({ voice: selectedVoice, speed, emotion: "auto" })
     );
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    setVoiceSaved(true);
+    setTimeout(() => setVoiceSaved(false), 3000);
   };
 
   if (loading || !user) return null;
+
+  const displayFullName =
+    profile.fullName || user.user_metadata?.full_name || user.email?.split("@")[0] || "User";
+  const avatarInitial =
+    (profile.username || displayFullName || user.email || "U")[0]?.toUpperCase() || "U";
 
   return (
     <div
@@ -206,14 +379,14 @@ export default function SettingsPage() {
         background: "radial-gradient(ellipse at center, var(--app-grad-from) 0%, var(--app-grad-to) 65%)",
       }}
     >
-      {/* Header */}
-      <div className="w-full flex items-center justify-between px-6 sm:px-10 py-4 border-b border-[var(--border)]">
+      {/* Top Navigation Header */}
+      <div className="w-full flex items-center justify-between px-6 sm:px-10 py-4 border-b border-[var(--border)] bg-[var(--surface)]/70 backdrop-blur-xl sticky top-0 z-30">
         <div className="flex items-center gap-4">
-          <a href="/" className="flex items-center group">
+          <a href="/app" className="flex items-center group">
             <VyrexoLogo size="md" />
           </a>
           <span className="text-[var(--muted)] text-sm">/</span>
-          <span className="text-sm font-medium text-[var(--text3)]">Voice Settings</span>
+          <span className="text-sm font-medium text-[var(--text3)]">Settings</span>
         </div>
         <div className="flex items-center gap-2.5">
           <button
@@ -239,194 +412,497 @@ export default function SettingsPage() {
           <ThemeToggle />
           <a
             href="/app"
-            className="text-xs font-medium text-[var(--muted2)] hover:text-[var(--text)] transition-colors"
+            className="px-3 py-1.5 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-xs font-medium text-[var(--text)] hover:border-[var(--steel)] transition-colors shadow-sm"
           >
             Back to app
           </a>
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto px-6 py-10">
-        {/* Top Header */}
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--text)]">Voice Settings</h1>
-            <p className="text-sm text-[var(--muted2)] mt-1 max-w-xl leading-relaxed">
-              Choose Rex&apos;s vocal identity. Emotional cadence, tone, and inflection adapt automatically in real time
-              based on your conversation.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-xs font-medium flex-shrink-0">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Emotion Adaptation Active</span>
-          </div>
-        </div>
-
-        {/* ── AUTONOMOUS EMOTION STATUS BANNER ── */}
-        <div className="mt-6 p-4 rounded-xl border border-[#3B599833] bg-[#3B599812] backdrop-blur-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/20 to-blue-500/20 border border-indigo-500/30 flex items-center justify-center text-lg flex-shrink-0">
-              🎙️
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-[var(--text)]">
-                  Autonomous Emotional Awareness Engine Active
-                </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  ElevenLabs Primary • Gemini TTS Fallback
-                </span>
-              </div>
-              <div className="text-[11.5px] text-[var(--muted2)] mt-1 leading-relaxed">
-                Rex automatically senses your mood: shifting to excited enthusiasm when you celebrate a win, deep empathy and calm support when you&apos;re frustrated or sharing a personal concern, and focused clarity during complex system design. Powered continuously by ElevenLabs with instant automated fallback to Gemini API TTS if monthly credits are exceeded.
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ── VOICE LIBRARY (6 VOICES) ── */}
-        <div className="mt-8">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">
-              Voice Library
-            </label>
-            <span className="text-xs text-[var(--muted)]">6 curated voices (3 male, 3 female)</span>
-          </div>
-
-          {/* Filters */}
-          <div className="flex gap-2 mt-3 mb-4">
-            {(
-              [
-                { id: "all", label: "All Voices (6)" },
-                { id: "male", label: "Male (3)" },
-                { id: "female", label: "Female (3)" },
-              ] as const
-            ).map((filter) => (
-              <button
-                key={filter.id}
-                onClick={() => setVoiceFilter(filter.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                  voiceFilter === filter.id
-                    ? "bg-[var(--steel)] text-white shadow-sm"
-                    : "bg-[var(--surface)] border border-[var(--border2)] text-[var(--muted2)] hover:border-[var(--muted)]"
-                }`}
-              >
-                {filter.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Voice Cards */}
-          <div className="flex flex-col gap-3">
-            {VOICE_OPTIONS.filter((voice) => {
-              if (voiceFilter === "male") return voice.gender === "Male";
-              if (voiceFilter === "female") return voice.gender === "Female";
-              return true;
-            }).map((voice) => {
-              const isSelected = selectedVoice === voice.id;
-              const isPlaying = previewingVoice === voice.id;
-
-              return (
-                <div
-                  key={voice.id}
-                  onClick={() => setSelectedVoice(voice.id)}
-                  className={`flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all ${
-                    isSelected
-                      ? "border-[var(--steel)] bg-[#3B59981A] ring-1 ring-[var(--steel)]"
-                      : "border-[var(--border2)] bg-[var(--surface)] hover:border-[var(--muted)]"
-                  }`}
-                >
-                  <div className="flex items-center gap-3.5">
-                    {/* Audio preview button */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handlePreview(voice.id, voice.previewText);
-                      }}
-                      className={`w-10 h-10 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer ${
-                        isPlaying
-                          ? "bg-[var(--steel)] text-white animate-pulse shadow-md"
-                          : "bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--steel)] hover:border-[var(--steel)]"
-                      }`}
-                      title={`Listen to ${voice.name}`}
-                    >
-                      {isPlaying ? (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                          <rect x="6" y="5" width="4" height="14" rx="1" />
-                          <rect x="14" y="5" width="4" height="14" rx="1" />
-                        </svg>
-                      ) : (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                          <polygon points="6 4 20 12 6 20 6 4" />
-                        </svg>
-                      )}
-                    </button>
-
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-[var(--text)]">{voice.name}</span>
-                        <span className="text-[10px] px-2 py-0.5 rounded font-medium bg-[var(--border)] text-[var(--muted2)] border border-[var(--border2)]">
-                          {voice.gender}
-                        </span>
-                        <span className="text-[10px] px-2 py-0.5 rounded font-medium bg-[#3B59981A] text-[var(--steel)] border border-[var(--steel)]/30">
-                          {voice.accent}
-                        </span>
-                      </div>
-                      <div className="text-xs text-[var(--muted)] mt-1">{voice.vibe}</div>
-                    </div>
-                  </div>
-
-                  {isSelected && (
-                    <div className="flex items-center gap-1.5 text-xs text-[var(--steel)] flex-shrink-0 font-medium">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                      <span>Selected</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* ── SPEAKING CADENCE (SPEED) ── */}
-        <div className="mt-8">
-          <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider block mb-2">
-            Speaking Cadence
-          </label>
-          <div className="flex gap-2">
-            {SPEED_OPTIONS.map((s) => (
-              <button
-                key={s.value}
-                onClick={() => setSpeed(s.value as any)}
-                className={`px-4 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                  speed === s.value
-                    ? "bg-[var(--midnight)] text-white shadow-sm"
-                    : "bg-[var(--surface)] border border-[var(--border2)] text-[var(--muted2)] hover:border-[var(--muted)]"
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ── SAVE BUTTON ── */}
-        <div className="mt-8 flex items-center gap-3">
+      <div className="max-w-3xl mx-auto px-6 py-8">
+        {/* Segmented Tab Bar */}
+        <div className="flex items-center gap-2 p-1.5 rounded-xl bg-[var(--surface)] border border-[var(--border2)] mb-8 w-fit">
           <button
-            onClick={handleSave}
-            className="px-6 py-2.5 bg-[var(--midnight)] text-white text-sm font-medium rounded-lg hover:bg-[var(--steel)] transition-all cursor-pointer shadow-sm"
+            type="button"
+            onClick={() => setActiveTab("profile")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeTab === "profile"
+                ? "bg-[var(--midnight)] text-white shadow-sm"
+                : "text-[var(--muted2)] hover:text-[var(--text)]"
+            }`}
           >
-            Save Settings
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            <span>Profile</span>
           </button>
-          {saved && (
-            <span className="text-xs text-[#4ade80]">
-              Settings saved! Rex will use your chosen voice and adapt his emotional tone automatically.
-            </span>
-          )}
+          <button
+            type="button"
+            onClick={() => setActiveTab("voice")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeTab === "voice"
+                ? "bg-[var(--midnight)] text-white shadow-sm"
+                : "text-[var(--muted2)] hover:text-[var(--text)]"
+            }`}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+            <span>Voice Settings</span>
+          </button>
         </div>
+
+        {activeTab === "profile" ? (
+          <div className="space-y-6">
+            {/* Page Heading */}
+            <div>
+              <h1 className="text-2xl font-bold text-[var(--text)]">Profile</h1>
+              <p className="text-sm text-[var(--muted2)] mt-1">
+                Manage your profile details, preferred name, and custom preferences for Rex.
+              </p>
+            </div>
+
+            {/* Compact User Summary Card */}
+            <div className="p-4 rounded-2xl border border-[var(--border2)] bg-[var(--surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div
+                  className="w-12 h-12 rounded-full flex items-center justify-center text-lg font-bold text-white flex-shrink-0 shadow-sm"
+                  style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
+                >
+                  {avatarInitial}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-sm font-bold text-[var(--text)]">{displayFullName}</h2>
+                    {profile.username && (
+                      <span className="text-xs text-[var(--ice)] font-medium">
+                        @{profile.username}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-[var(--muted2)] mt-0.5 flex items-center gap-2 flex-wrap">
+                    <span>{user.email}</span>
+                    {profile.occupation && (
+                      <>
+                        <span>·</span>
+                        <span className="text-[var(--text3)]">{profile.occupation}</span>
+                      </>
+                    )}
+                    {profile.age && (
+                      <>
+                        <span>·</span>
+                        <span>{profile.age} yrs</span>
+                      </>
+                    )}
+                    {profile.gender && (
+                      <>
+                        <span>·</span>
+                        <span>{profile.gender}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleTestGreeting}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-[#3B599844] bg-[#3B599818] hover:bg-[#3B599828] text-xs font-medium text-[var(--ice)] transition-all cursor-pointer flex-shrink-0 w-fit"
+              >
+                <span>{testingGreeting || previewingVoice ? "⏹️" : "🔊"}</span>
+                <span>{testingGreeting || previewingVoice ? "Stop Preview" : "Test Greeting"}</span>
+              </button>
+            </div>
+
+            {/* Section 1: Identification & Username */}
+            <div className="p-6 rounded-2xl border border-[var(--border2)] bg-[var(--surface)] space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-[var(--text)]">Identification</h3>
+                <p className="text-xs text-[var(--muted2)] mt-0.5">
+                  Set the username Rex will use to address you in conversation.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    value={profile.username}
+                    onChange={(e) => setProfile((prev) => ({ ...prev, username: e.target.value }))}
+                    placeholder="e.g. Sangini"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                    Full Name
+                  </label>
+                  <input
+                    type="text"
+                    value={profile.fullName}
+                    onChange={(e) => setProfile((prev) => ({ ...prev, fullName: e.target.value }))}
+                    placeholder="e.g. Sangini Tripathi"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Role, Occupation & Personal Details */}
+            <div className="p-6 rounded-2xl border border-[var(--border2)] bg-[var(--surface)] space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-[var(--text)]">Role & Personal Details</h3>
+                <p className="text-xs text-[var(--muted2)] mt-0.5">
+                  Add what you do and optional personal details.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                  Occupation / Role
+                </label>
+                <input
+                  type="text"
+                  value={profile.occupation}
+                  onChange={(e) => setProfile((prev) => ({ ...prev, occupation: e.target.value }))}
+                  placeholder="e.g. Student, Software Engineer, Product Designer..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2.5">
+                  {OCCUPATION_PRESETS.map((preset) => {
+                    const active = profile.occupation.toLowerCase() === preset.toLowerCase();
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setProfile((prev) => ({ ...prev, occupation: preset }))}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                          active
+                            ? "bg-[var(--steel)] text-white shadow-sm"
+                            : "bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--text)] hover:border-[var(--steel)]"
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                    Date of Birth <span className="text-[var(--muted)] font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={profile.dateOfBirth}
+                    onChange={(e) => handleDateOfBirthChange(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                    Age <span className="text-[var(--muted)] font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={profile.age}
+                    onChange={(e) => setProfile((prev) => ({ ...prev, age: e.target.value }))}
+                    placeholder="e.g. 21"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                    Gender <span className="text-[var(--muted)] font-normal">(Optional)</span>
+                  </label>
+                  <select
+                    value={
+                      GENDER_OPTIONS.includes(profile.gender) ? profile.gender : profile.gender ? "Custom" : ""
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val !== "Custom") {
+                        setProfile((prev) => ({ ...prev, gender: val }));
+                      }
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] focus:outline-none focus:border-[var(--steel)] transition-colors"
+                  >
+                    <option value="">Select gender</option>
+                    <option value="Female">Female</option>
+                    <option value="Male">Male</option>
+                    <option value="Non-binary">Non-binary</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3: Custom Instructions */}
+            <div className="p-6 rounded-2xl border border-[var(--border2)] bg-[var(--surface)] space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-[var(--text)]">Custom Instructions</h3>
+                <p className="text-xs text-[var(--muted2)] mt-0.5">
+                  Customize how Rex interacts with you and what context it should keep in mind.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                  What would you like Rex to know about you?
+                </label>
+                <textarea
+                  rows={3}
+                  value={profile.aboutUserInstructions}
+                  onChange={(e) =>
+                    setProfile((prev) => ({ ...prev, aboutUserInstructions: e.target.value }))
+                  }
+                  placeholder="e.g. I'm a computer science student building full-stack projects with Next.js and TypeScript..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors resize-y"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {ABOUT_USER_SNIPPETS.map((snippet) => (
+                    <button
+                      key={snippet}
+                      type="button"
+                      onClick={() =>
+                        setProfile((prev) => ({
+                          ...prev,
+                          aboutUserInstructions: prev.aboutUserInstructions
+                            ? `${prev.aboutUserInstructions.trim()} ${snippet}`
+                            : snippet,
+                        }))
+                      }
+                      className="text-[11px] px-2.5 py-1 rounded-lg bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--text)] hover:border-[var(--steel)] transition-all cursor-pointer text-left"
+                    >
+                      + {snippet}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[var(--text3)] mb-1.5">
+                  How would you like Rex to respond?
+                </label>
+                <textarea
+                  rows={3}
+                  value={profile.responseStyleInstructions}
+                  onChange={(e) =>
+                    setProfile((prev) => ({ ...prev, responseStyleInstructions: e.target.value }))
+                  }
+                  placeholder="e.g. Keep your tone friendly and collaborative, give concise explanations, and lead with working code..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors resize-y"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {RESPONSE_STYLE_SNIPPETS.map((snippet) => (
+                    <button
+                      key={snippet}
+                      type="button"
+                      onClick={() =>
+                        setProfile((prev) => ({
+                          ...prev,
+                          responseStyleInstructions: prev.responseStyleInstructions
+                            ? `${prev.responseStyleInstructions.trim()} ${snippet}`
+                            : snippet,
+                        }))
+                      }
+                      className="text-[11px] px-2.5 py-1 rounded-lg bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--text)] hover:border-[var(--steel)] transition-all cursor-pointer text-left"
+                    >
+                      + {snippet}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Save Profile Button */}
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={handleSaveProfile}
+                disabled={savingProfile}
+                className="px-6 py-2.5 bg-[var(--midnight)] text-white text-sm font-semibold rounded-xl hover:bg-[var(--steel)] transition-all cursor-pointer shadow-sm disabled:opacity-60"
+              >
+                {savingProfile ? "Saving..." : "Save Profile"}
+              </button>
+              {profileSaved && (
+                <span className="text-xs font-medium text-emerald-400">
+                  Profile saved!
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div>
+            {/* Top Header for Voice Settings */}
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-bold text-[var(--text)]">Voice Settings</h1>
+                <p className="text-sm text-[var(--muted2)] mt-1">
+                  Choose Rex&apos;s vocal identity and speaking cadence.
+                </p>
+              </div>
+              <span className="px-3 py-1 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-[var(--text3)] text-xs font-medium flex-shrink-0">
+                Autonomous Voice Engine
+              </span>
+            </div>
+
+            {/* ── VOICE LIBRARY (6 VOICES) ── */}
+            <div className="mt-7">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider">
+                  Voice Library
+                </label>
+                <span className="text-xs text-[var(--muted)]">6 curated voices</span>
+              </div>
+
+              {/* Filters */}
+              <div className="flex gap-2 mt-3 mb-4">
+                {(
+                  [
+                    { id: "all", label: "All Voices (6)" },
+                    { id: "male", label: "Male (3)" },
+                    { id: "female", label: "Female (3)" },
+                  ] as const
+                ).map((filter) => (
+                  <button
+                    key={filter.id}
+                    onClick={() => setVoiceFilter(filter.id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      voiceFilter === filter.id
+                        ? "bg-[var(--steel)] text-white shadow-sm"
+                        : "bg-[var(--surface)] border border-[var(--border2)] text-[var(--muted2)] hover:border-[var(--muted)]"
+                    }`}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Voice Cards */}
+              <div className="flex flex-col gap-3">
+                {VOICE_OPTIONS.filter((voice) => {
+                  if (voiceFilter === "male") return voice.gender === "Male";
+                  if (voiceFilter === "female") return voice.gender === "Female";
+                  return true;
+                }).map((voice) => {
+                  const isSelected = selectedVoice === voice.id;
+                  const isPlaying = previewingVoice === voice.id;
+
+                  return (
+                    <div
+                      key={voice.id}
+                      onClick={() => setSelectedVoice(voice.id)}
+                      className={`flex items-center justify-between p-4 rounded-xl border cursor-pointer transition-all ${
+                        isSelected
+                          ? "border-[var(--steel)] bg-[#3B59981A] ring-1 ring-[var(--steel)]"
+                          : "border-[var(--border2)] bg-[var(--surface)] hover:border-[var(--muted)]"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3.5">
+                        {/* Audio preview button */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handlePreview(voice.id, voice.previewText);
+                          }}
+                          className={`w-10 h-10 rounded-full flex items-center justify-center transition-all flex-shrink-0 cursor-pointer ${
+                            isPlaying
+                              ? "bg-[var(--steel)] text-white shadow-md"
+                              : "bg-[var(--border)] border border-[var(--border2)] text-[var(--muted2)] hover:text-[var(--steel)] hover:border-[var(--steel)]"
+                          }`}
+                          title={`Listen to ${voice.name}`}
+                        >
+                          {isPlaying ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                              <rect x="6" y="5" width="4" height="14" rx="1" />
+                              <rect x="14" y="5" width="4" height="14" rx="1" />
+                            </svg>
+                          ) : (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                              <polygon points="6 4 20 12 6 20 6 4" />
+                            </svg>
+                          )}
+                        </button>
+
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-[var(--text)]">{voice.name}</span>
+                            <span className="text-xs text-[var(--muted2)]">
+                              {voice.gender} · {voice.accent}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[var(--muted)] mt-0.5">{voice.vibe}</div>
+                        </div>
+                      </div>
+
+                      {isSelected && (
+                        <div className="flex items-center gap-1.5 text-xs text-[var(--steel)] flex-shrink-0 font-medium">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          <span>Selected</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ── SPEAKING CADENCE (SPEED) ── */}
+            <div className="mt-8">
+              <label className="text-xs font-medium text-[var(--text3)] uppercase tracking-wider block mb-2">
+                Speaking Cadence
+              </label>
+              <div className="flex gap-2">
+                {SPEED_OPTIONS.map((s) => (
+                  <button
+                    key={s.value}
+                    onClick={() => setSpeed(s.value as any)}
+                    className={`px-4 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                      speed === s.value
+                        ? "bg-[var(--midnight)] text-white shadow-sm"
+                        : "bg-[var(--surface)] border border-[var(--border2)] text-[var(--muted2)] hover:border-[var(--muted)]"
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── SAVE BUTTON ── */}
+            <div className="mt-8 flex items-center gap-3">
+              <button
+                onClick={handleSaveVoice}
+                className="px-6 py-2.5 bg-[var(--midnight)] text-white text-sm font-medium rounded-lg hover:bg-[var(--steel)] transition-all cursor-pointer shadow-sm"
+              >
+                Save Voice Settings
+              </button>
+              {voiceSaved && (
+                <span className="text-xs text-[#4ade80]">
+                  Voice settings saved!
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

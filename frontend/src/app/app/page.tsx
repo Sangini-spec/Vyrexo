@@ -22,6 +22,19 @@ import {
   isPlaceholderOrBadSessionName,
   resolveSemanticSessionName,
 } from "@/lib/project-spec";
+import {
+  syncSessionFilesToLocalDisk,
+  saveSessionFilesToCache,
+  getSessionFilesFromCache,
+} from "@/lib/local-fs-sync";
+import {
+  loadUserProfile,
+  saveUserProfile,
+  personalizeGreetingWithUsername,
+  DEFAULT_USER_PROFILE,
+  type UserProfile,
+} from "@/lib/user-profile";
+import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 
 // A persisted, renamable chat session. Stored in localStorage so they survive
 // reloads; grouped/labelled for the Sidebar at render time.
@@ -100,16 +113,79 @@ interface FastPathResponse {
   emotion?: "warm" | "upbeat" | "calm" | "empathetic";
 }
 
-function checkClientFastPath(rawText: string): FastPathResponse | null {
-  const t = rawText.trim().toLowerCase().replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
+function checkClientFastPath(rawText: string, username?: string): FastPathResponse | null {
+  const normalizedInput = normalizeSpokenTranscript(rawText, { isInterim: false });
+  const t = normalizedInput.trim().toLowerCase().replace(/[,!?;:.]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // Single word greetings only — allow all deeper conversational remarks to route to Rex's personality
-  if (/^(he|hey|hi|hello|yo|howdy)$/i.test(t) || /^(he|hey|hi|hello)\s+rex$/i.test(t)) {
+  // Instant greetings ("Hi", "Hey", "Hello", "Hey Rex", "Good morning", etc.)
+  if (
+    /^(he|hey|hi|hello|yo|howdy|good morning|good afternoon|good evening)$/i.test(t) ||
+    /^(he|hey|hi|hello|yo|good morning|good afternoon|good evening)\s+(rex|there|friend|mate|buddy)$/i.test(t)
+  ) {
+    const personalized = personalizeGreetingWithUsername(
+      "Hi! I am good, what about you?",
+      "Hi! I am good, what about you?",
+      username
+    );
     return {
-      reply: "Hey! Great to see you. How's everything going with you today?",
-      spoken: "Hey, great to see you! How's everything going with you today?",
+      reply: personalized.reply,
+      spoken: personalized.spoken,
       emotion: "warm",
+    };
+  }
+
+  // "What's up" / "What are you doing" / "Wassup"
+  if (
+    /^(hey|hi|hello|yo)?\s*(rex\s+)?(what('s|s)?\s+up|whats\s+up|sup|wassup|what('s|s)?\s+good|what\s+are\s+you\s+doing|what\s+you\s+doing)\s*(rex|today|right now)?$/i.test(
+      t
+    )
+  ) {
+    const personalized = personalizeGreetingWithUsername(
+      "Hi! I am good, just right here and ready to chat or build with you. What about you?",
+      "Hi! I am good, just right here and ready to chat or build with you. What about you?",
+      username
+    );
+    return {
+      reply: personalized.reply,
+      spoken: personalized.spoken,
+      emotion: "warm",
+    };
+  }
+
+  // "How are you" / "How's it going"
+  if (
+    /^(hey|hi|hello|yo)?\s*(rex\s+)?(how\s+are\s+you|how\s+are\s+you\s+doing|how('s|s)\s+it\s+going|how\s+is\s+it\s+going|how('s|s)\s+your\s+day|how\s+are\s+things)\s*(rex|today)?$/i.test(
+      t
+    )
+  ) {
+    const personalized = personalizeGreetingWithUsername(
+      "Hi! I am good, thank you for asking! What about you? How's everything going with you today?",
+      "Hi! I am good, thank you for asking! What about you? How's everything going with you today?",
+      username
+    );
+    return {
+      reply: personalized.reply,
+      spoken: personalized.spoken,
+      emotion: "warm",
+    };
+  }
+
+  // Quick user status replies ("I'm good", "Doing great", "Not much")
+  if (
+    /^(i'm\s+good|i\s+am\s+good|doing\s+good|i'm\s+doing\s+good|doing\s+great|i'm\s+great|pretty\s+good|all\s+good|not\s+much|nothing\s+much)(\s+thanks|\s+thank\s+you|\s+too)?$/i.test(
+      t
+    )
+  ) {
+    const personalized = personalizeGreetingWithUsername(
+      "Glad to hear that! What's on your mind today?",
+      "Glad to hear that! What's on your mind today?",
+      username
+    );
+    return {
+      reply: personalized.reply,
+      spoken: personalized.spoken,
+      emotion: "upbeat",
     };
   }
 
@@ -433,6 +509,58 @@ export default function App() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const docInputRef = useRef<HTMLInputElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ── User Profile & Rex Personalization ──────────────────────
+  const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
+
+  useEffect(() => {
+    if (!user) return;
+    const loaded = loadUserProfile(user.id, user);
+    setUserProfile(loaded);
+
+    fetch(`/api/profile?user_id=${encodeURIComponent(user.id)}`, {
+      headers: { "x-user-id": user.id },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok && d.profile) {
+          const srv = d.profile as Partial<UserProfile>;
+          if (
+            srv.username ||
+            srv.occupation ||
+            srv.aboutUserInstructions ||
+            srv.responseStyleInstructions ||
+            srv.age ||
+            srv.dateOfBirth ||
+            srv.gender
+          ) {
+            const merged = saveUserProfile(
+              {
+                username: srv.username || loaded.username || "",
+                fullName: srv.fullName || loaded.fullName || user.user_metadata?.full_name || "",
+                occupation: srv.occupation || loaded.occupation || "",
+                age: srv.age || loaded.age || "",
+                dateOfBirth: srv.dateOfBirth || loaded.dateOfBirth || "",
+                gender: srv.gender || loaded.gender || "",
+                aboutUserInstructions:
+                  srv.aboutUserInstructions || loaded.aboutUserInstructions || "",
+                responseStyleInstructions:
+                  srv.responseStyleInstructions || loaded.responseStyleInstructions || "",
+              },
+              user.id
+            );
+            setUserProfile(merged);
+          }
+        }
+      })
+      .catch(() => {});
+
+    const onProfileUpdated = () => {
+      setUserProfile(loadUserProfile(user.id, user));
+    };
+    window.addEventListener("vyrexo-profile-updated", onProfileUpdated);
+    return () => window.removeEventListener("vyrexo-profile-updated", onProfileUpdated);
+  }, [user]);
 
   // ── Sessions (persisted + renamable, strictly scoped per user) ──────────────
   const [sessions, setSessions] = useState<StoredSession[]>([]);
@@ -782,9 +910,10 @@ export default function App() {
       setOrbState("thinking");
     } else {
       setOrbState((prev) => (prev === "thinking" ? (voiceListeningRef.current ? "listening" : "idle") : prev));
-      const isReport = text.length > 180 || text.includes("\n");
-      if (isReport) {
-        setNarration("Done — the details are in the Chat tab.");
+      const isLongText = text.length > 180 || text.includes("\n");
+      if (isLongText) {
+        const firstLine = text.replace(/^[#*>\-\s]+/, "").split("\n")[0].slice(0, 140);
+        setNarration(firstLine || "Speaking...");
         setActiveRightTab("chat");
       } else {
         setNarration(text);
@@ -977,28 +1106,30 @@ export default function App() {
           oldContent: msg.payload.old_content as string,
         });
 
-        // Real-time local disk write-back if user connected a local folder handle via File System Access API
+        // Real-time local disk write-back & client cache persistence
         if (filePath && typeof fileContent === "string" && typeof window !== "undefined") {
           const curSess = activeSessionRef.current || "default";
-          const dirHandle = (window as any).__localDirHandles?.[curSess];
-          if (dirHandle) {
-            (async () => {
-              try {
-                const cleanRel = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
-                if (!cleanRel || cleanRel.includes("..")) return;
-                const parts = cleanRel.split("/").filter(Boolean);
-                const fileName = parts.pop()!;
-                let targetDir = dirHandle;
-                for (const part of parts) {
-                  targetDir = await targetDir.getDirectoryHandle(part, { create: true });
-                }
-                const fHandle = await targetDir.getFileHandle(fileName, { create: true });
-                const writable = await fHandle.createWritable();
-                await writable.write(fileContent);
-                await writable.close();
-              } catch {}
-            })();
-          }
+          const proj = activeProjectRef.current;
+          const folderName =
+            proj?.path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ||
+            proj?.name ||
+            "amaze";
+          saveSessionFilesToCache(
+            curSess,
+            [{ path: filePath, content: fileContent }],
+            {
+              projectName: proj?.name,
+              localFolderName: folderName,
+              targetPath: proj?.path,
+            }
+          );
+          syncSessionFilesToLocalDisk({
+            sessionId: curSess,
+            folderName,
+            targetPath: proj?.path || `C:\\Users\\hp\\OneDrive\\Desktop\\${folderName}`,
+            files: [{ path: filePath, content: fileContent }],
+            promptIfMissing: false,
+          }).catch(() => {});
         }
         break;
       }
@@ -1122,7 +1253,7 @@ export default function App() {
         setOrbState("idle");
         break;
     }
-  }, [beginUtterance, endUtterance, unmuteAudio, flushPendingRex, activeSession, recordAiSpeech, queueCodeEvent]);
+  }, [beginUtterance, endUtterance, unmuteAudio, flushPendingRex, activeSession, recordAiSpeech, queueCodeEvent, userStorageKeys.sessionProjects]);
 
   const onAudioMessage = useCallback((data: ArrayBuffer) => {
     if (audioMutedRef.current) return; // discard audio that arrives after an interrupt
@@ -1214,8 +1345,9 @@ export default function App() {
   // ── Voice: wake word "Rex" + continuous conversation ────────
   const handleVoiceTranscript = useCallback(
     (text: string, isFinal: boolean) => {
-      setTranscript(text);
-      const raw = text.trim();
+      const normalizedLive = normalizeSpokenTranscript(text, { isInterim: !isFinal });
+      setTranscript(normalizedLive);
+      const raw = normalizedLive.trim();
       if (!raw) return;
       const lower = raw.toLowerCase().replace(/[.!?,]/g, "").trim();
       const isStop = isStopPhrase(lower);
@@ -1256,11 +1388,11 @@ export default function App() {
         return;
       }
 
-      // 3. Suppress acoustic spill in the post-speech cooldown (reverberation & speech-recognition delay)
+      // 3. Suppress acoustic spill in the short post-speech hardware drain window (450ms)
       const now = Date.now();
       const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
       const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(raw);
-      if (timeSinceRexSpoke < 2500 && !hasExplicitWake) {
+      if (timeSinceRexSpoke < 450 && !hasExplicitWake) {
         console.debug("[voice] Suppressing transcript received in echo cooldown:", raw);
         setTranscript("");
         return;
@@ -1280,32 +1412,10 @@ export default function App() {
       setOrbState("thinking");
       setNarration("Thinking...");
 
-      // Heuristic fast-correction for zero perceived lag
-      let cleanText = raw.trim()
-        .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
-        .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2")
-        .replace(/^he\s+(whatever|rex|can\s+you|could\s+you|what|how|show|run|build|tell|i\s+want)/i, "Hey, $1")
-        .replace(/^he\s+how\s+are\s+you/i, "Hey, how are you?")
-        .replace(/^he$/i, "Hey")
-        .replace(/^he\s+/i, "Hey ")
-        .replace(/\bbed\s+for\b/gi, "built for")
-        .replace(/\bbill\s+for\b/gi, "built for")
-        .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|that|this|my|our|me|new)\b/gi, "build $2")
-        .replace(/\b(bill|bil)\s+(finance|financial|calc|calculator|caculator|project|app|application|software|todo|to-do)\b/gi, "build $2")
-        .replace(/\b(cacu|cacula|caculator|calcualtor|calculater|calcultor|calcutor)\b/gi, "calculator")
-        .replace(/\bor\s+a\s+mart\b/gi, "AuraMart")
-        .replace(/\baura\s*mart\b/gi, "AuraMart")
-        .replace(/\baura\s*beauty\b/gi, "AuraBeauty")
-        .replace(/\bapex\s*wealth\b/gi, "ApexWealth")
-        .replace(/\broom\s*canvas\b/gi, "RoomCanvas")
-        .replace(/\bto\s*do\s*list\b/gi, "todo list");
-
-      if (cleanText.length > 0) {
-        cleanText = cleanText.charAt(0).toUpperCase() + cleanText.slice(1);
-      }
+      const cleanText = normalizeSpokenTranscript(raw, { isInterim: false });
 
       // Check lightweight client fast-path for simple greetings or common commands (<10ms instant response)
-      const fastResult = checkClientFastPath(cleanText);
+      const fastResult = checkClientFastPath(cleanText, userProfile.username);
       if (fastResult) {
         if (fastResult.action === "preview") {
           setActiveRightTab("preview");
@@ -1343,7 +1453,7 @@ export default function App() {
       sendMessage({ type: "text.input", payload: { text: cleanText } });
       setTranscript("");
     },
-    [sendMessage, muteAudio, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice]
+    [sendMessage, muteAudio, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, userProfile.username]
   );
 
   const handleActivated = useCallback(() => {
@@ -1453,7 +1563,23 @@ export default function App() {
       }
       setChatLog(initialTurns);
 
-      setCodeEvents([]);
+      const initialCached = getSessionFilesFromCache(id);
+      if (initialCached?.files && initialCached.files.length > 0) {
+        const cachedEvents: CodeEvent[] = initialCached.files
+          .filter((f) => f?.path && typeof f.content === "string" && !String(f.path).endsWith(".code-workspace"))
+          .map((f) => ({
+            kind: "action" as const,
+            agent: "coder",
+            tool: "file_writer",
+            category: "file_write",
+            path: String(f.path).replace(/^\/+/, ""),
+            content: String(f.content),
+            message: `Restored ${f.path}`,
+          }));
+        setCodeEvents(cachedEvents);
+      } else {
+        setCodeEvents([]);
+      }
       setTranscript("");
       const sessionUrl = sessionPreviewsRef.current[id] || "";
       setPreviewUrl(sessionUrl);
@@ -1517,8 +1643,17 @@ export default function App() {
             sessionProjectsRef.current[id] = p;
 
             // Populate codeEvents immediately so the Files tab and VS Code modal have all session files ready
-            if (Array.isArray(d.project.files) && d.project.files.length > 0 && activeSessionRef.current === id) {
-              const restoredFileEvents: CodeEvent[] = d.project.files
+            const serverFiles = Array.isArray(d.project.files) ? d.project.files : [];
+            const cachedSession = getSessionFilesFromCache(id);
+            const effectiveFiles =
+              serverFiles.length > 0 ? serverFiles : cachedSession?.files || [];
+            if (effectiveFiles.length > 0 && activeSessionRef.current === id) {
+              saveSessionFilesToCache(id, effectiveFiles, {
+                projectName: p.name,
+                localFolderName: p.path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p.name,
+                targetPath: p.path,
+              });
+              const restoredFileEvents: CodeEvent[] = effectiveFiles
                 .filter((f: any) => f?.path && typeof f.content === "string" && !String(f.path).endsWith(".code-workspace"))
                 .map((f: any) => ({
                   kind: "action" as const,
@@ -1532,6 +1667,15 @@ export default function App() {
               if (restoredFileEvents.length > 0) {
                 setCodeEvents(restoredFileEvents);
               }
+              const folderLabel =
+                p.path?.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p.name || "amaze";
+              syncSessionFilesToLocalDisk({
+                sessionId: id,
+                folderName: folderLabel,
+                targetPath: p.path || `C:\\Users\\hp\\OneDrive\\Desktop\\${folderLabel}`,
+                files: effectiveFiles,
+                promptIfMissing: false,
+              }).catch(() => {});
             }
 
             if (!sessionPreviewsRef.current[id] && (d.project.filesCount > 0 || (d.project.files && d.project.files.length > 0))) {
@@ -1603,10 +1747,15 @@ export default function App() {
     sentProjectPathRef.current = "";
     setPreviewUrl("");
     const icon = SESSION_ICONS[sessions.length % SESSION_ICONS.length];
+    const personalizedInit = personalizeGreetingWithUsername(
+      "Hey! Rex here. What would you like to explore, discuss, or build together?",
+      "Hey, Rex here! What would you like to explore, discuss, or build together?",
+      userProfile.username
+    );
     const initialGreeting = [
       {
         role: "assistant",
-        text: "Hey! Rex here. What would you like to explore, discuss, or build together?",
+        text: personalizedInit.reply,
       },
     ];
     setChatLog(initialGreeting);
@@ -1628,7 +1777,7 @@ export default function App() {
     }
     handleSessionClick(id);
     return id;
-  }, [handleSessionClick, user?.id, sessions.length, userStorageKeys]);
+  }, [handleSessionClick, user?.id, sessions.length, userStorageKeys, userProfile.username]);
 
   const handleRenameSession = useCallback(
     (id: string, name: string) => {
@@ -2022,10 +2171,12 @@ export default function App() {
 
   const handleOpenVSCode = useCallback(async () => {
     try {
-      const currentFiles = codeEvents
+      const eventFiles = codeEvents
         .filter((e) => e.kind === "action" && e.path && typeof e.content === "string" && !e.path.endsWith(".code-workspace"))
         .map((e) => ({ path: e.path!, content: e.content! }));
-      const rawActivePath = activeProject?.path || "";
+      const cached = getSessionFilesFromCache(activeSession || "");
+      const currentFiles = eventFiles.length > 0 ? eventFiles : cached?.files || [];
+      const rawActivePath = activeProject?.path || cached?.targetPath || "";
       const safeProjectPath =
         rawActivePath &&
         rawActivePath !== "." &&
@@ -2036,6 +2187,7 @@ export default function App() {
           : undefined;
       const rawTitle =
         activeProject?.name ||
+        cached?.projectName ||
         sessions.find((s) => s.id === activeSession)?.name ||
         undefined;
       const sessionTitle =
@@ -2072,31 +2224,55 @@ export default function App() {
             folderLabel;
           resolvedLocalPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail}`;
         }
-        let bridgeConnected = false;
-        let autoSyncedMsg: string | undefined;
+        const resolvedFiles =
+          Array.isArray(data.files) && data.files.length > 0 ? data.files : currentFiles;
 
-        // Proactively check if Local Desktop Bridge (127.0.0.1:4040) is running and auto-sync all session files to disk!
+        if (activeSession && resolvedFiles.length > 0) {
+          saveSessionFilesToCache(activeSession, resolvedFiles, {
+            projectName: data.projectName || sessionTitle,
+            localFolderName: folderLabel,
+            targetPath: resolvedLocalPath,
+          });
+        }
+
+        let bridgeConnected = false;
+
+        // 1. Background sync via FileSystemDirectoryHandle if already granted in IndexedDB/memory
+        try {
+          const fsSync = await syncSessionFilesToLocalDisk({
+            sessionId: activeSession || "default",
+            folderName: folderLabel,
+            targetPath: resolvedLocalPath,
+            files: resolvedFiles,
+            promptIfMissing: false,
+          });
+          if (fsSync.synced) {
+            resolvedLocalPath = fsSync.actualTargetPath;
+            bridgeConnected = true;
+          }
+        } catch {}
+
+        // 2. Proactively check if Local Desktop Bridge (127.0.0.1:4040) is running and auto-sync all session files to disk
         try {
           const syncRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               path: resolvedLocalPath,
-              localFolderName: data.localFolderName || sessions.find((s) => s.id === activeSession)?.name,
+              localFolderName: folderLabel,
               projectSlug: data.projectSlug,
               projectName: data.projectName,
               sessionId: activeSession || "default",
-              files: data.files || [],
+              files: resolvedFiles,
               openIde: false,
             }),
-            signal: AbortSignal.timeout(1500),
+            signal: AbortSignal.timeout(1200),
           });
           if (syncRes.ok) {
             const syncData = await syncRes.json().catch(() => null);
             if (syncData?.ok && syncData.targetPath) {
               resolvedLocalPath = syncData.targetPath;
               bridgeConnected = true;
-              autoSyncedMsg = `Synced all ${data.files?.length || data.filesCount || 0} project files directly to ${syncData.targetPath}`;
             }
           }
         } catch {}
@@ -2111,15 +2287,14 @@ export default function App() {
           message: data.message,
           projectName: data.projectName,
           projectSlug: data.projectSlug,
-          localFolderName: data.localFolderName,
-          filesCount: data.filesCount,
-          files: data.files || [],
+          localFolderName: folderLabel,
+          filesCount: resolvedFiles.filter((f: any) => !String(f.path).endsWith(".code-workspace")).length || data.filesCount,
+          files: resolvedFiles,
           downloadUrl: data.downloadUrl,
           vscodeServerUrl:
             data.vscodeServerUrl ||
             `/vscode?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`,
           bridgeConnected,
-          savedLocally: autoSyncedMsg,
         });
         setIdeTargetPathInput(resolvedLocalPath);
         setVsCodeModalOpen(true);
@@ -2327,12 +2502,20 @@ export default function App() {
         rawTarget === "." || rawTarget.startsWith("/app/applet") || rawTarget.startsWith("/workspaces/")
           ? ""
           : rawTarget;
-      const currentFiles = codeEvents
+      const eventFiles = codeEvents
         .filter((e) => e.kind === "action" && e.path && typeof e.content === "string" && !e.path.endsWith(".code-workspace"))
         .map((e) => ({ path: e.path!, content: e.content! }));
+      const cached = getSessionFilesFromCache(activeSession || "");
+      const currentFiles =
+        (vsCodeDetails.files && vsCodeDetails.files.length > 0
+          ? vsCodeDetails.files
+          : eventFiles.length > 0
+          ? eventFiles
+          : cached?.files) || [];
       const rawTitle =
         activeProject?.name ||
         vsCodeDetails.projectName ||
+        cached?.projectName ||
         sessions.find((s) => s.id === activeSession)?.name ||
         undefined;
       const sessionTitle =
@@ -2340,13 +2523,39 @@ export default function App() {
           ? rawTitle
           : undefined;
 
+      const initialFolderName =
+        targetPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ||
+        vsCodeDetails.localFolderName ||
+        sessions.find((s) => s.id === activeSession)?.name ||
+        vsCodeDetails.projectSlug ||
+        "amaze";
+      let resolvedFolderPath = (
+        targetPath ||
+        vsCodeDetails.targetPath ||
+        `C:\\Users\\hp\\OneDrive\\Desktop\\${initialFolderName}`
+      ).trim();
+
       try {
-        // 1. Assemble all session files from the backend
+        // 1. Immediately sync files to local folder on user's disk while user-gesture activation is fresh!
+        // This handles BOTH existing empty local folders (e.g. "amaze") AND cloud-generated projects that don't exist locally yet.
+        const initialSync = await syncSessionFilesToLocalDisk({
+          sessionId: activeSession || "default",
+          folderName: initialFolderName,
+          targetPath: resolvedFolderPath,
+          files: currentFiles,
+          promptIfMissing: true,
+        });
+        if (initialSync.actualTargetPath) {
+          resolvedFolderPath = initialSync.actualTargetPath;
+          setIdeTargetPathInput(resolvedFolderPath);
+        }
+
+        // 2. Fetch full materialized file tree from backend (includes package.json, tsconfig.json, README.md, tests, etc.)
         const res = await fetch("/api/projects/vscode", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(user?.id ? { "x-user-id": user.id } : {}) },
           body: JSON.stringify({
-            path: targetPath || undefined,
+            path: resolvedFolderPath || undefined,
             sessionId: activeSession || "",
             user_id: user?.id,
             title: sessionTitle,
@@ -2356,20 +2565,47 @@ export default function App() {
           }),
         });
         const data = await res.json();
-        const filesToSync = data?.files || vsCodeDetails.files || currentFiles || [];
+        const filesToSync =
+          (Array.isArray(data?.files) && data.files.length > 0 ? data.files : currentFiles) || [];
         const projectName = data?.projectName || vsCodeDetails.projectName || sessionTitle || "Project Workspace";
         const localFolderName =
+          initialSync.actualFolderName ||
           data?.localFolderName ||
           vsCodeDetails.localFolderName ||
-          sessions.find((s) => s.id === activeSession)?.name;
+          sessions.find((s) => s.id === activeSession)?.name ||
+          data?.projectSlug ||
+          "amaze";
 
-        // 2. Client-side Desktop Bridge (127.0.0.1:4040): writes all session files into the user's real local folder (e.g. "amaze") and opens Desktop VS Code!
+        if (activeSession && filesToSync.length > 0) {
+          saveSessionFilesToCache(activeSession, filesToSync, {
+            projectName,
+            localFolderName,
+            targetPath: resolvedFolderPath,
+          });
+        }
+
+        // Ensure any additional scaffold files returned by the backend (tsconfig.json, README.md, package.json) are also written to the local folder handle
+        if (filesToSync.length > 0) {
+          const finalSync = await syncSessionFilesToLocalDisk({
+            sessionId: activeSession || "default",
+            folderName: localFolderName,
+            targetPath: resolvedFolderPath,
+            files: filesToSync,
+            promptIfMissing: false,
+          });
+          if (finalSync.actualTargetPath) {
+            resolvedFolderPath = finalSync.actualTargetPath;
+            setIdeTargetPathInput(resolvedFolderPath);
+          }
+        }
+
+        // 3. Also attempt Local Desktop Bridge (127.0.0.1:4040) if running
         try {
           const agentRes = await fetch("http://127.0.0.1:4040/api/vscode/open", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              path: targetPath || data?.targetPath,
+              path: resolvedFolderPath || data?.targetPath,
               localFolderName,
               projectSlug: data?.projectSlug || vsCodeDetails.projectSlug,
               sessionId: activeSession || "default",
@@ -2379,7 +2615,7 @@ export default function App() {
               reuseWindow: false,
               openIde: true,
             }),
-            signal: AbortSignal.timeout(3000),
+            signal: AbortSignal.timeout(1500),
           });
           if (agentRes.ok) {
             const agentData = await agentRes.json().catch(() => null);
@@ -2402,19 +2638,16 @@ export default function App() {
                 ...prev,
                 bridgeConnected: true,
                 targetPath: syncedLocalPath || prev.targetPath,
-                savedLocally: `Synced all ${filesToSync.length} files to "${syncedLocalPath}" and opened ${ideDisplayName} with the full file tree!`,
               }));
               setNarration(
-                `Opened full directory structure of ${projectName} (${filesToSync.length} files) in ${ideDisplayName} at ${syncedLocalPath}.`
+                `Opened ${projectName} (${filesToSync.length} files) in ${ideDisplayName}.`
               );
               return;
             }
           }
-        } catch {
-          // Local Desktop Bridge not running yet on 127.0.0.1:4040
-        }
+        } catch {}
 
-        // 3. Helper to trigger the native desktop IDE URI scheme without navigating the current page away
+        // 4. Trigger native desktop IDE URI scheme to open the populated folder directly
         const triggerDesktopUriScheme = (uriToOpen: string) => {
           if (typeof document === "undefined") return;
           const anchor = document.createElement("a");
@@ -2430,17 +2663,6 @@ export default function App() {
         };
 
         const schemeName = ide === "vscode-insiders" ? "vscode-insiders" : ide;
-        const folderFallback =
-          localFolderName ||
-          data?.projectSlug ||
-          vsCodeDetails.projectSlug ||
-          "amaze";
-        let resolvedFolderPath = (
-          targetPath ||
-          data?.targetPath ||
-          `C:\\Users\\hp\\OneDrive\\Desktop\\${folderFallback}`
-        ).trim();
-
         if (
           !resolvedFolderPath ||
           resolvedFolderPath.startsWith("~/") ||
@@ -2451,36 +2673,22 @@ export default function App() {
           const tail = resolvedFolderPath.startsWith("~")
             ? resolvedFolderPath.replace(/^~[\\/]+(?:Desktop|VyrexoWorkspaces)?[\\/]?/i, "")
             : "";
-          resolvedFolderPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail || folderFallback}`;
+          resolvedFolderPath = `C:\\Users\\hp\\OneDrive\\Desktop\\${tail || localFolderName}`;
         }
 
         setIdeTargetPathInput(resolvedFolderPath);
 
-        // Always pass the full folder path to vscode://file/... so VS Code opens the folder directly (never bare vscode://)
         const normalizedLocal = resolvedFolderPath.replace(/\\/g, "/").replace(/\/+$/, "");
         const formattedPath = normalizedLocal.startsWith("/") ? normalizedLocal : `/${normalizedLocal}`;
         const fullFolderUri = `${schemeName}://file${formattedPath}`;
         triggerDesktopUriScheme(fullFolderUri);
 
-        // Also copy the Windows/Cross-platform 1-Click Sync command to clipboard so the user can paste it in VS Code Terminal (Ctrl+~) if the folder is empty
-        if (typeof window !== "undefined") {
-          const origin = window.location.origin;
-          const bridgeUrl = `${origin}/api/projects/vscode/bridge?sessionId=${encodeURIComponent(
-            activeSession || ""
-          )}&ide=${encodeURIComponent(ide)}&path=${encodeURIComponent(resolvedFolderPath)}`;
-          const oneLiner = `node -e "fetch('${bridgeUrl}').then(r=>r.text()).then(eval)"`;
-          try {
-            navigator.clipboard.writeText(oneLiner);
-          } catch {}
-        }
-
         setVsCodeDetails((prev) => ({
           ...prev,
           targetPath: resolvedFolderPath,
-          bridgeCmdCopied: true,
-          savedLocally: `Opening "${resolvedFolderPath}" in ${ideDisplayName}! (Also copied the 1-Click Sync command to your clipboard — press Ctrl+\` in VS Code Terminal and paste, or click "Download & Run Windows Sync (.cmd)" below to write all ${filesToSync.length} files into "${resolvedFolderPath}"!)`,
+          bridgeConnected: initialSync.synced || prev.bridgeConnected,
         }));
-        setNarration(`Opening folder "${resolvedFolderPath}" in ${ideDisplayName}...`);
+        setNarration(`Opened "${resolvedFolderPath}" in ${ideDisplayName}.`);
       } catch (err) {
         console.error("Failed to launch IDE:", err);
       } finally {
@@ -2572,7 +2780,7 @@ export default function App() {
 
     // Lightweight client fast-path for text input (<10ms instant response)
     if (images.length === 0 && docs.length === 0 && !video) {
-      const fastResult = checkClientFastPath(text);
+      const fastResult = checkClientFastPath(text, userProfile.username);
       if (fastResult) {
         if (fastResult.action === "preview") {
           setActiveRightTab("preview");
@@ -2623,7 +2831,7 @@ export default function App() {
     setAttachedVideo(null);
     setOrbState("thinking");
     setActiveRightTab("chat");
-  }, [textInput, attachedImages, attachedDocs, attachedVideo, sendMessage, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice]);
+  }, [textInput, attachedImages, attachedDocs, attachedVideo, sendMessage, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, userProfile.username]);
 
   // Answer a yes/no proposal from Rex (e.g. "implement these fixes?").
   const respondToProposal = useCallback(
@@ -2717,17 +2925,28 @@ export default function App() {
               </svg>
               <span>Sign out</span>
             </button>
-            <div className="flex items-center gap-2 px-2.5 py-1 rounded-full border border-[var(--border2)] bg-[var(--surface)] shadow-sm">
+            <a
+              href="/settings?tab=profile"
+              className="flex items-center gap-2 px-2.5 py-1 rounded-full border border-[var(--border2)] bg-[var(--surface)] hover:border-[var(--steel)] hover:bg-[#3B599812] transition-all cursor-pointer shadow-sm group"
+              title="Open Profile & Rex Personalization Settings"
+            >
               <div
                 className="w-[26px] h-[26px] rounded-full flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0 shadow-sm"
                 style={{ background: "linear-gradient(135deg, #3B5998, #7B93B0)" }}
               >
-                {user.user_metadata?.full_name?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || "U"}
+                {(
+                  userProfile.username?.[0] ||
+                  userProfile.fullName?.[0] ||
+                  user.user_metadata?.full_name?.[0] ||
+                  user.email?.[0] ||
+                  "U"
+                ).toUpperCase()}
               </div>
-              <span className="text-xs text-[var(--text)] font-medium pr-1">
-                {user.user_metadata?.full_name || user.email?.split("@")[0]}
+              <span className="text-xs text-[var(--text)] font-medium pr-1 group-hover:text-[var(--ice)] transition-colors">
+                {userProfile.fullName || user.user_metadata?.full_name || user.email?.split("@")[0]}
+                {userProfile.username ? ` (${userProfile.username})` : ""}
               </span>
-            </div>
+            </a>
           </div>
 
           <Orb state="idle" onClick={createSession} />
@@ -2761,7 +2980,7 @@ export default function App() {
           </button>
 
           <a href="/settings" className="mt-4 text-xs text-[var(--muted)] hover:text-[var(--steel)] transition-colors">
-            Voice Settings
+            Settings
           </a>
 
           <div className="absolute bottom-4 right-5 text-[10px] text-[var(--border2)]">Vyrexo v0.1.0</div>
@@ -2886,7 +3105,7 @@ export default function App() {
             </button>
 
             <a href="/settings" className="w-[30px] h-[30px] rounded-[7px] border border-[var(--border2)] bg-[var(--border)] flex items-center justify-center hover:border-[var(--steel)] hover:bg-[var(--steel-dim)] transition-all flex-shrink-0 cursor-pointer" title="Settings">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text4)" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </a>
 
             <button
@@ -3106,53 +3325,49 @@ export default function App() {
         }
       />
 
-      {/* VS Code & Desktop IDE Bridge Dialog */}
+      {/* VS Code & Desktop IDE Bridge Dialog — Compact */}
       {vsCodeModalOpen && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
           onClick={() => setVsCodeModalOpen(false)}
         >
           <div
-            className="w-[520px] max-w-[95vw] rounded-2xl border border-[var(--border2)] bg-[var(--surface)] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+            className="w-[440px] max-w-[92vw] rounded-2xl border border-[var(--border2)] bg-[var(--surface)] p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between pb-3 border-b border-[var(--border2)]">
+            <div className="flex items-center justify-between pb-2.5 border-b border-[var(--border2)]">
               <div className="flex items-center gap-2.5">
-                <span className="p-2 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/20 text-[#007ACC]">
-                  <svg width="22" height="22" viewBox="0 0 100 100" fill="none">
+                <span className="p-1.5 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/20 text-[#007ACC]">
+                  <svg width="18" height="18" viewBox="0 0 100 100" fill="none">
                     <path d="M71.6 99.1l22.8-11.1c3.4-1.7 5.6-5.1 5.6-8.9V20.9c0-3.8-2.2-7.3-5.6-8.9L71.6.9c-4.3-2.1-9.3-.5-11.8 2.8L27.5 33.5 11.3 21.2c-2.4-1.8-5.8-1.6-7.9.5L.6 24.5c-2.4 2.4-.8 6.5 2.5 6.5h.1l20.3 15.8L3.2 62.6h-.1c-3.3 0-4.9 4.1-2.5 6.5l2.8 2.8c2.1 2.1 5.5 2.3 7.9.5L27.5 60l32.3 29.7c1.8 2.4 4.8 3.6 7.8 3.6 1.3 0 2.7-.3 4-1zM71.6 27.8L44.9 46.8l26.7 19v-38z" fill="#007ACC"/>
                   </svg>
                 </span>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-[var(--text)]">IDE & Local Workspace Sync</h3>
+                    <h3 className="text-xs font-semibold text-[var(--text)]">Open in IDE</h3>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1e6fff18] text-[#1e6fff] border border-[#1e6fff30] font-medium">
-                      {vsCodeDetails.filesCount || (vsCodeDetails.files?.length || 0)} files in session
+                      {vsCodeDetails.filesCount || (vsCodeDetails.files?.length || 0)} files
                     </span>
                   </div>
-                  <p className="text-[11px] text-[var(--muted2)]">
+                  <p className="text-[10.5px] text-[var(--muted2)]">
                     Session: <span className="text-[var(--text2)] font-mono">{sessions.find(s => s.id === activeSession)?.name || activeSession || "Current"}</span>
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setVsCodeModalOpen(false)}
-                className="w-7 h-7 rounded-lg border border-[var(--border2)] bg-[var(--surface2)] text-[var(--muted2)] hover:text-[var(--text)] flex items-center justify-center text-xs"
+                className="w-6 h-6 rounded-lg border border-[var(--border2)] bg-[var(--surface2)] text-[var(--muted2)] hover:text-[var(--text)] flex items-center justify-center text-xs cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <div className="mt-4 space-y-4">
+            <div className="mt-3 space-y-3">
               <div>
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-medium text-[var(--muted2)]">Local Folder / Workspace Path</label>
-                  <span className={`text-[10px] flex items-center gap-1 font-medium ${vsCodeDetails.bridgeConnected ? "text-emerald-400" : "text-[var(--muted)]"}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${vsCodeDetails.bridgeConnected ? "bg-emerald-400 animate-pulse" : "bg-sky-400"}`} />
-                    {vsCodeDetails.bridgeConnected ? "Desktop Bridge Connected (Auto-Synced)" : "Opens full folder structure"}
-                  </span>
+                  <label className="text-[10.5px] font-medium text-[var(--muted2)]">Local Folder Path</label>
                 </div>
-                <div className="mt-1 flex items-center gap-2 p-2 rounded-lg bg-[var(--input)] border border-[var(--border2)] font-mono text-[11px] text-[var(--text)]">
+                <div className="mt-1 flex items-center gap-2 p-1.5 rounded-lg bg-[var(--input)] border border-[var(--border2)] font-mono text-[11px] text-[var(--text)]">
                   <input
                     type="text"
                     value={ideTargetPathInput}
@@ -3166,7 +3381,7 @@ export default function App() {
                       setVsCodeDetails((prev) => ({ ...prev, copied: true }));
                       setTimeout(() => setVsCodeDetails((prev) => ({ ...prev, copied: false })), 2000);
                     }}
-                    className="px-2 py-1 bg-[var(--surface2)] hover:bg-[var(--border2)] text-[10px] rounded border border-[var(--border2)] text-[var(--text3)] flex-shrink-0 cursor-pointer"
+                    className="px-2 py-0.5 bg-[var(--surface2)] hover:bg-[var(--border2)] text-[10px] rounded border border-[var(--border2)] text-[var(--text3)] flex-shrink-0 cursor-pointer"
                   >
                     {vsCodeDetails.copied ? "Copied!" : "Copy"}
                   </button>
@@ -3174,16 +3389,16 @@ export default function App() {
               </div>
 
               <div>
-                <label className="text-[11px] font-medium text-[var(--muted2)]">
-                  Launch Entire Directory in Chosen IDE (1-Click)
+                <label className="text-[10.5px] font-medium text-[var(--muted2)]">
+                  Select IDE
                 </label>
-                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {/* VS Code */}
                   <button
                     type="button"
                     onClick={() => handleLaunchIDE("vscode")}
                     disabled={launchingIde !== null}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#007ACC] hover:bg-[#007ACC]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
+                    className="flex flex-col items-center justify-center p-2.5 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#007ACC] hover:bg-[#007ACC]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
                     <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#007ACC] flex items-center gap-1">
                       {launchingIde === "vscode" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#007ACC] border-t-transparent rounded-full" />}
@@ -3199,7 +3414,7 @@ export default function App() {
                     type="button"
                     onClick={() => handleLaunchIDE("cursor")}
                     disabled={launchingIde !== null}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#7c3aed] hover:bg-[#7c3aed]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
+                    className="flex flex-col items-center justify-center p-2.5 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#7c3aed] hover:bg-[#7c3aed]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
                     <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#a78bfa] flex items-center gap-1">
                       {launchingIde === "cursor" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#a78bfa] border-t-transparent rounded-full" />}
@@ -3215,7 +3430,7 @@ export default function App() {
                     type="button"
                     onClick={() => handleLaunchIDE("windsurf")}
                     disabled={launchingIde !== null}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#06b6d4] hover:bg-[#06b6d4]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
+                    className="flex flex-col items-center justify-center p-2.5 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#06b6d4] hover:bg-[#06b6d4]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
                     <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#22d3ee] flex items-center gap-1">
                       {launchingIde === "windsurf" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#22d3ee] border-t-transparent rounded-full" />}
@@ -3231,7 +3446,7 @@ export default function App() {
                     type="button"
                     onClick={() => handleLaunchIDE("vscode-insiders")}
                     disabled={launchingIde !== null}
-                    className="flex flex-col items-center justify-center p-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#10b981] hover:bg-[#10b981]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
+                    className="flex flex-col items-center justify-center p-2.5 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:border-[#10b981] hover:bg-[#10b981]/10 transition-all text-center group cursor-pointer disabled:opacity-50"
                   >
                     <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[#10b981] flex items-center gap-1">
                       {launchingIde === "vscode-insiders" && <span className="animate-spin inline-block w-2.5 h-2.5 border border-[#10b981] border-t-transparent rounded-full" />}
@@ -3244,116 +3459,19 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Direct Workspace Utilities */}
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <a
-                  href={`/api/projects/vscode/bridge?sessionId=${encodeURIComponent(activeSession || "")}&format=cmd&path=${encodeURIComponent(ideTargetPathInput || vsCodeDetails.targetPath || "")}`}
-                  download={`Open-${vsCodeDetails.localFolderName || vsCodeDetails.projectSlug || "amaze"}-in-VSCode.cmd`}
-                  onClick={() => {
-                    setVsCodeDetails((prev) => ({
-                      ...prev,
-                      savedLocally: `Downloaded "Open-${prev.localFolderName || prev.projectSlug || "amaze"}-in-VSCode.cmd"! Open/double-click it to write all ${prev.filesCount || prev.files?.length || 11} files into "${ideTargetPathInput || prev.targetPath}" and open the full folder in VS Code!`,
-                    }));
-                  }}
-                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC] hover:bg-[#0062a3] text-xs text-white font-semibold transition-all cursor-pointer shadow-sm"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                    <line x1="12" y1="11" x2="12" y2="17" />
-                    <polyline points="9 14 12 17 15 14" />
-                  </svg>
-                  Sync &amp; Open Folder (.cmd)
-                </a>
-                <a
-                  href={
-                    vsCodeDetails.downloadUrl ||
-                    `/api/projects/download?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`
-                  }
-                  download
-                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[var(--border2)] bg-[var(--surface2)] hover:bg-[var(--border)] text-xs text-[var(--text)] font-medium transition-all"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  Download (.zip)
-                </a>
+              <div className="flex items-center justify-between gap-2 pt-1">
                 <a
                   href={
                     vsCodeDetails.vscodeServerUrl ||
                     `/vscode?sessionId=${encodeURIComponent(activeSession || "")}${user?.id ? `&user_id=${encodeURIComponent(user.id)}` : ""}`
                   }
-                  className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC]/20 hover:bg-[#007ACC]/30 text-xs text-[#38bdf8] font-semibold transition-all"
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-[#007ACC]/50 bg-[#007ACC]/20 hover:bg-[#007ACC]/30 text-xs text-[#38bdf8] font-semibold transition-all"
                 >
                   VS Code Server ({vsCodeDetails.filesCount || vsCodeDetails.files?.length || 0} files)
                 </a>
-              </div>
-
-              {/* 1-Click Local Desktop Bridge Auto-Sync Command (works on Windows PowerShell, CMD, macOS, and Linux) */}
-              {!vsCodeDetails.bridgeConnected && (
-                <div className="p-3 rounded-xl bg-[#007ACC]/10 border border-[#007ACC]/30 text-[11px] space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-[var(--ice)] flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-[#38bdf8] animate-pulse" />
-                      Populate Local Folder &amp; Open Full File Tree ({vsCodeDetails.localFolderName || sessions.find((s) => s.id === activeSession)?.name || "amaze"})
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const origin = typeof window !== "undefined" ? window.location.origin : "";
-                        const bridgeUrl = `${origin}/api/projects/vscode/bridge?sessionId=${encodeURIComponent(
-                          activeSession || ""
-                        )}&path=${encodeURIComponent(ideTargetPathInput || vsCodeDetails.targetPath || "")}`;
-                        const bridgeScript = `node -e "fetch('${bridgeUrl}').then(r=>r.text()).then(eval)"`;
-                        navigator.clipboard.writeText(bridgeScript);
-                        setVsCodeDetails((prev) => ({
-                          ...prev,
-                          bridgeCmdCopied: true,
-                          savedLocally:
-                            "Copied 1-Click Windows & Terminal Sync command! Paste & run it in VS Code's Terminal (Ctrl+`) or PowerShell/CMD — it immediately writes all session files into your local folder and opens the full file structure in VS Code!",
-                        }));
-                        setTimeout(() => setVsCodeDetails((prev) => ({ ...prev, bridgeCmdCopied: false })), 3500);
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-[#007ACC] hover:bg-[#0062a3] text-white font-semibold text-[10px] transition-all cursor-pointer shadow-sm flex-shrink-0"
-                    >
-                      {vsCodeDetails.bridgeCmdCopied ? "✓ Copied Command!" : "Copy Terminal Sync Command"}
-                    </button>
-                  </div>
-                  <p className="text-[10.5px] text-[var(--muted2)] leading-relaxed">
-                    Click <strong className="text-[var(--text)]">Sync &amp; Open Folder (.cmd)</strong> above or paste the copied command into VS Code Terminal (<code className="text-[var(--text2)] font-mono">Ctrl+`</code>) to write all{" "}
-                    <strong className="text-[var(--text)]">{vsCodeDetails.filesCount || vsCodeDetails.files?.length || 0} files</strong> directly into{" "}
-                    <strong className="text-[var(--text)] font-mono">{ideTargetPathInput || vsCodeDetails.targetPath || "C:\\Users\\hp\\OneDrive\\Desktop\\amaze"}</strong> and keep auto-sync active.
-                  </p>
-                </div>
-              )}
-
-              {vsCodeDetails.savedLocally && (
-                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium">
-                  ✓ {vsCodeDetails.savedLocally}
-                </div>
-              )}
-
-              <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--border2)] text-[11px] text-[var(--muted2)] space-y-1.5 leading-relaxed">
-                <div className="flex items-center gap-1.5 font-medium text-[var(--text)]">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#4ade80]" />
-                  Full Directory Structure & Local Persistence
-                </div>
-                <p>
-                  Every generated file for{" "}
-                  <strong className="text-[var(--text)]">
-                    {vsCodeDetails.localFolderName
-                      ? `${vsCodeDetails.localFolderName} (${vsCodeDetails.projectName || "Project"})`
-                      : vsCodeDetails.projectName || activeProject?.name || "this session"}
-                  </strong>{" "}
-                  (components, types, tests, package.json, and <span className="font-mono text-[10px]">.code-workspace</span>) is isolated in its own project workspace—never mixed with Vyrexo&apos;s own files.
-                </p>
-              </div>
-
-              <div className="pt-2 flex justify-end">
                 <button
                   onClick={() => setVsCodeModalOpen(false)}
-                  className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-lg hover:bg-[var(--steel)] transition-all cursor-pointer"
+                  className="px-4 py-2 bg-[var(--midnight)] text-white text-xs font-medium rounded-xl hover:bg-[var(--steel)] transition-all cursor-pointer"
                 >
                   Done
                 </button>

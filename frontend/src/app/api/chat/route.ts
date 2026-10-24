@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 import {
   getSessionProject,
   updateSessionProjectType,
@@ -61,6 +62,12 @@ import {
   executeLocalTerminalCommand,
   DEFAULT_LOCAL_AGENT_URL,
 } from "@/lib/local-agent-client";
+import {
+  personalizeGreetingWithUsername,
+  buildUserProfileSystemPrompt,
+  type UserProfile,
+} from "@/lib/user-profile";
+import { getServerUserProfile, setServerUserProfile } from "@/lib/server-profile-store";
 import fs from "fs";
 import path from "path";
 
@@ -143,16 +150,54 @@ function trimToSentenceBoundary(input: string, maxLen = 560): string {
   return sub.trim();
 }
 
+function isCreativeOrConversationalTopic(userPrompt: string, responseText: string): boolean {
+  const combined = `${userPrompt} ${responseText}`.toLowerCase();
+  // Explicit creative & storytelling requests: songs, poems, jokes, stories, riddles, speeches
+  if (
+    /\b(sing\b|song|lyrics|melody|chorus|verse|poem|poetry|rhyme|haiku|sonnet|stanza|story|stories|tale|fable|bedtime|narrative|once upon a time|joke|jokes|funny|laugh|humor|humour|riddle|monologue|rap\b)\b/i.test(
+      combined
+    )
+  ) {
+    return true;
+  }
+
+  // Philosophical, emotional, personal, life, beauty, human nature, or general non-coding conversations
+  if (
+    /\b(beauty|heart|soul|love|life|human|kindness|happiness|meaning|philosophy|emotion|feelings|friendship|wisdom|mindset|character|personality|mental health|motivation|inspiration|future|world|society)\b/i.test(
+      combined
+    ) &&
+    !/\b(package\.json|tsconfig|tailwind|next\.js|react component|api route|database schema|bun build)\b/i.test(
+      combined
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isProjectTechnicalBreakdown(userPrompt: string, responseText: string): boolean {
+  if (isCreativeOrConversationalTopic(userPrompt, responseText)) {
+    return false;
+  }
+  if (/```[\s\S]*?```/.test(responseText)) {
+    return true;
+  }
+  const combined = `${userPrompt} ${responseText}`.toLowerCase();
+  return /\b(tech stack|architecture|codebase|scaffold|component hierarchy|indexed files|endpoints|schema|repository|implementation|workspace|local folder|preview tab|code tab|react|typescript|next\.js|tailwind|e-commerce|application|project)\b/i.test(
+    combined
+  );
+}
+
 /**
- * Intelligent Spoken Summary Generator:
- * Preserves complete conversational thoughts without abrupt 2-line truncation.
- * When encountering lists (e.g. 5-6 products/ideas):
- * - Speaks the introductory thought
- * - Recites full details for the first 2-3 items
- * - Recites headline + concise summary for remaining items so all are represented
- * - Concludes with a natural teammate sign-off/closing question
+ * Intelligent Spoken Summary & Full-Conversation Voice Formatter:
+ * - Whenever a response is about a SOFTWARE PROJECT / technical breakdown and is long,
+ *   it summarizes the key points so Rex doesn't read raw code or 20 technical bullets verbatim.
+ * - Whenever a response is a CONVERSATION, philosophical/personal topic, singing a SONG,
+ *   reciting a POEM, telling a JOKE, or telling a STORY, Rex speaks the ENTIRE response
+ *   completely from start to finish without truncating after 4-5 lines.
  */
-function generateSpokenSummary(text: string): string {
+function generateSpokenSummary(text: string, userPrompt = ""): string {
   if (!text) return "";
 
   // 1. Remove raw code blocks and convert to spoken transitions
@@ -165,7 +210,33 @@ function generateSpokenSummary(text: string): string {
   // 3. Remove markdown links [text](url) -> text
   cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 
-  // 4. Parse lists (numbered or bulleted ideas, products, features)
+  const shouldSummarizeProjectDetails = isProjectTechnicalBreakdown(userPrompt, text);
+
+  // If this is a song, poem, story, joke, or general/philosophical/personal conversation:
+  // Speak the ENTIRE response completely with natural cadence!
+  if (!shouldSummarizeProjectDetails) {
+    let fullConversationalSpeech = cleaned
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/[*_`~#]/g, "")
+      .replace(/^\s*[-*+•]\s+/gm, "")
+      .replace(/^\s*(\d+)[\.\)]\s+/gm, "$1. ")
+      .replace(/\n{2,}/g, " ... ")
+      .replace(/\n/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    fullConversationalSpeech = fullConversationalSpeech
+      .replace(/(you can (see|view|review|test) (the|everything|details|every feature|all features) (in|on) (the )?(chat|preview)( tab| panel)?\.?)/gi, "")
+      .replace(/(the complete (detailed )?breakdown is (available|displayed) in (the )?(chat|preview)\.?)/gi, "")
+      .replace(/(done — the details are in the chat tab\.?)/gi, "")
+      .trim();
+
+    return trimToSentenceBoundary(cleanSpokenArtifacts(fullConversationalSpeech), 4800);
+  }
+
+  // Otherwise, this is a software project / technical breakdown: summarize if it has a long feature list
   const lines = cleaned.split("\n");
   const listItems: Array<{ title: string; detail: string }> = [];
   const introParagraphs: string[] = [];
@@ -223,23 +294,21 @@ function generateSpokenSummary(text: string): string {
     listItems.push(currentItem);
   }
 
-  // If a list of 3 or more items was found (e.g. 5-6 app ideas)
-  if (listItems.length >= 3) {
+  // If a project feature list of 3 or more items was found AND the total text is long (> 650 chars)
+  if (listItems.length >= 3 && cleaned.length > 650) {
     const spokenParts: string[] = [];
 
-    // Concise intro: use the relevant framing sentence
     if (introParagraphs.length > 0) {
       const fullIntro = introParagraphs.join(" ").trim();
       const introSentences = fullIntro.match(/[^.!?]+[.!?]+/g) || [fullIntro];
       const lastIntroSentence = introSentences[introSentences.length - 1].trim();
-      if (lastIntroSentence.length < 80) {
+      if (lastIntroSentence.length < 110) {
         spokenParts.push(lastIntroSentence);
       } else {
-        spokenParts.push("Here are several great application ideas:");
+        spokenParts.push(introSentences[0].trim());
       }
     }
 
-    // Detail first 2-3 items with their core value proposition, and crisp 1-liner for the rest
     const count = listItems.length;
     const detailedCount = count <= 3 ? count : count <= 5 ? 3 : 2;
 
@@ -252,9 +321,9 @@ function generateSpokenSummary(text: string): string {
         if (item.detail) {
           const sentences = item.detail.match(/[^.!?]+[.!?]+/g) || [item.detail];
           const first = sentences[0].trim();
-          if (first.length > 95) {
+          if (first.length > 110) {
             const match = first.match(/^([^,;]+[,;][^,;]+)[.!?]?/);
-            detail = match ? match[1].trim() + "." : first.slice(0, 90).replace(/\s+\S*$/, "") + ".";
+            detail = match ? match[1].trim() + "." : first.slice(0, 105).replace(/\s+\S*$/, "") + ".";
           } else {
             detail = first;
           }
@@ -264,27 +333,22 @@ function generateSpokenSummary(text: string): string {
         let brief = "";
         if (item.detail) {
           const firstClause = item.detail.split(/[.!?,;]/)[0].trim();
-          const shortClause = firstClause.length > 50 ? firstClause.slice(0, 48).replace(/\s+\S*$/, "") : firstClause;
+          const shortClause = firstClause.length > 55 ? firstClause.slice(0, 52).replace(/\s+\S*$/, "") : firstClause;
           brief = shortClause ? `— ${shortClause}.` : "";
         }
         spokenParts.push(`Then ${cleanTitle} ${brief}`);
       }
     });
 
-    // Conclude with natural teammate closing
     if (outroParagraphs.length > 0) {
       const outro = outroParagraphs.join(" ").trim();
       const outroSentences = outro.match(/[^.!?]+[.!?]+/g) || [outro];
       spokenParts.push(outroSentences[0].trim());
-    } else {
-      spokenParts.push("Which one of these sounds most exciting to you?");
     }
 
-    return trimToSentenceBoundary(cleanSpokenArtifacts(spokenParts.join(" ")), 580);
+    return trimToSentenceBoundary(cleanSpokenArtifacts(spokenParts.join(" ")), 750);
   }
 
-  // Not a long list: standard multi-paragraph conversational explanation
-  // Recite the complete thought naturally without arbitrary sentence cut-off!
   let fullSpoken = cleaned
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/[*_`~#]/g, "")
@@ -293,7 +357,6 @@ function generateSpokenSummary(text: string): string {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Remove any canned meta-commentary if present
   fullSpoken = fullSpoken
     .replace(/(you can (see|view|review|test) (the|everything|details|every feature|all features) (in|on) (the )?(chat|preview)( tab| panel)?\.?)/gi, "")
     .replace(/(the complete (detailed )?breakdown is (available|displayed) in (the )?(chat|preview)\.?)/gi, "")
@@ -301,7 +364,10 @@ function generateSpokenSummary(text: string): string {
     .replace(/(here is the (complete )?feature breakdown for [^.]+\.?)/gi, "")
     .trim();
 
-  return trimToSentenceBoundary(cleanSpokenArtifacts(fullSpoken), 560);
+  return trimToSentenceBoundary(
+    cleanSpokenArtifacts(fullSpoken),
+    shouldSummarizeProjectDetails ? 750 : 4800
+  );
 }
 
 /**
@@ -314,7 +380,8 @@ function generateSpokenSummary(text: string): string {
 function classifyIntent(
   text: string,
   history: Array<{ role: string; content: string }> = [],
-  sessionId?: string
+  sessionId?: string,
+  username?: string
 ): {
   isConversational: boolean;
   isExplicitTestRequest?: boolean;
@@ -331,12 +398,12 @@ function classifyIntent(
   spokenReply?: string;
   emotion?: "warm" | "upbeat" | "calm" | "empathetic";
 } {
-  const cleanedText = text
+  const cleanedText = normalizeSpokenTranscript(text, { finalizePunctuation: false })
     .trim()
     .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
     .replace(/\b(lyrics|lex|wrecks|rax)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you)\b/gi, "Rex, $2");
   const trimmed = cleanedText.trim().toLowerCase();
-  const normalized = trimmed.replace(/[,!?;:]/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = trimmed.replace(/[.,!?;:]/g, " ").replace(/\s+/g, " ").trim();
 
   const hasExistingSessionProject = sessionId
     ? Boolean(getSessionProject(sessionId)) ||
@@ -355,15 +422,21 @@ function classifyIntent(
   // Only match when the message is NOT a build/implementation command
   if (!isUnifiedBuildIntent) {
     const isWhatsUp =
-      /^(he|hey|hi|yo)?\s*(what('s|s)?\s*up|sup|wassup|whats\s+good|what('s|s)?\s+happening)\s*$/i.test(normalized) ||
+      /^(he|hey|hi|yo)?\s*(what('s|s)?\s*up|sup|wassup|whats\s+good|what('s|s)?\s+happening|what\s+are\s+you\s+doing)\s*(rex)?\s*$/i.test(normalized) ||
+      /^(he|hey|hi|yo)\s+rex\s+(what('s|s)?\s*up|what\s+are\s+you\s+doing)\s*$/i.test(normalized) ||
       /^(what('s|s)?\s*up|sup|wassup|whats\s+good)\s*$/i.test(normalized);
 
     if (isWhatsUp) {
+      const p = personalizeGreetingWithUsername(
+        "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
+        "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
+        username
+      );
       return {
         isConversational: true,
         emotion: "warm",
-        reply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
-        spokenReply: "Hey! Not much, just reviewing our code and ready to roll. How's everything going with you, and what are we working on today?",
+        reply: p.reply,
+        spokenReply: p.spoken,
       };
     }
 
@@ -418,11 +491,16 @@ function classifyIntent(
       /^(hey|hi|hello|heya|howdy|good morning|good afternoon|good evening|he rex|hey rex|hi rex|hello rex|yo rex|yo)\s*$/i.test(normalized);
 
     if (isGreetingOrSocial) {
+      const p = personalizeGreetingWithUsername(
+        "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
+        "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
+        username
+      );
       return {
         isConversational: true,
         emotion: "warm",
-        reply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
-        spokenReply: "I'm doing great, thank you! I'm fully online and ready. What would you like to explore, build, or discuss today?",
+        reply: p.reply,
+        spokenReply: p.spoken,
       };
     }
 
@@ -430,11 +508,16 @@ function classifyIntent(
       /\b(are you stuck|stuck with my question|did you freeze|are you frozen|are you there|you there|can you hear me|did you hear me|still thinking|why are you slow|taking so long|are you thinking)\b/i.test(trimmed);
 
     if (isStatusOrStuckInquiry) {
+      const p = personalizeGreetingWithUsername(
+        "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to do?",
+        "Not at all! I'm right here and ready. What would you like to explore or build?",
+        username
+      );
       return {
         isConversational: true,
         emotion: "warm",
-        reply: "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to do?",
-        spokenReply: "Not at all! I'm right here and ready. What would you like to explore or build?",
+        reply: p.reply,
+        spokenReply: p.spoken,
       };
     }
 
@@ -719,11 +802,16 @@ I have launched **${targetTitle}** in your **Preview** tab!
     /^(he|hey|hi|hello|heya|howdy|good morning|good afternoon|good evening)(\s+rex)?$/i.test(trimmed) ||
     /^(how are you|how's it going|how r u|how do you do)(\s+rex)?$/i.test(trimmed)
   ) {
+    const p = personalizeGreetingWithUsername(
+      "Hey! Rex here. Great to connect with you. How's everything going with you today?",
+      "Hey, Rex here! Great to connect with you. How's everything going with you today?",
+      username
+    );
     return {
       isConversational: true,
       emotion: "warm",
-      reply: "Hey! Rex here. Great to connect with you. How's everything going with you today?",
-      spokenReply: "Hey, Rex here! Great to connect with you. How's everything going with you today?",
+      reply: p.reply,
+      spokenReply: p.spoken,
     };
   }
 
@@ -998,7 +1086,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, error: "Empty message" }, { status: 400 });
     }
 
-    const intent = classifyIntent(text, history, sessionId);
+    // Sync or retrieve user profile for personalized username & ChatGPT-style instructions
+    let userProfile: UserProfile | null = null;
+    if (body.userProfile && typeof body.userProfile === "object") {
+      userProfile = setServerUserProfile(userId, body.userProfile);
+    } else {
+      userProfile = getServerUserProfile(userId);
+    }
+
+    const intent = classifyIntent(text, history, sessionId, userProfile?.username);
     const isCodingTask = forceBuildTask || !intent.isConversational;
     const routeDecision = recordAgentRouting({
       isCodingTask,
@@ -1510,9 +1606,11 @@ ${codeSnippets}
 `;
         }
 
+        const userProfileContext = buildUserProfileSystemPrompt(userProfile);
+
         const systemInstruction = `You are Rex, Vyrexo's voice-first AI engineering partner, creative confidant, and empathetic teammate.
 Your responses are spoken aloud over voice synthesis and rendered in the chat panel.
-
+${userProfileContext}
 ${projectContext}
 ${workspaceFilesContext}
 
@@ -1557,8 +1655,9 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
    - You have direct visibility into the "Code" tab files (listed above) and the running "Preview" tab.
    - When answering questions about the codebase, reference the actual files, types, and logic present in the workspace.
 
-4. VOICE & SUMMARY RULES:
+4. VOICE & CONVERSATIONAL COMPLETENESS RULES:
    - Provide a direct, articulate, senior-level response with authentic human vocal inflection.
+   - When the user asks you to sing a song, recite a poem, tell a joke, tell a story, or engages in philosophical, personal, or life conversations (such as inner beauty vs outer beauty, human connection, meaning, etc.), write with vivid, natural spoken rhythm so that the ENTIRE response sounds wonderful when spoken aloud from start to finish.
    - Avoid generic boilerplate or repetitive phrases like "you can see the features in the chat".`;
 
         const requiresSearch = Boolean(
@@ -1581,7 +1680,10 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
           try {
             const config: any = {
               systemInstruction,
-              maxOutputTokens: 1000,
+              maxOutputTokens: 2048,
+              ...(model.startsWith("gemini-3")
+                ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                : {}),
               ...(requiresSearch ? { tools: [{ googleSearch: {} }] } : {}),
             };
 
@@ -1591,9 +1693,9 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
               config,
             });
 
-            // 6s timeout per candidate model for ultra-fast failover if 3.8-flash has a temporary spike
+            // 6.5s timeout per candidate model for ultra-fast failover
             const timeoutPromise = new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("Timeout")), 6000)
+              setTimeout(() => reject(new Error("Timeout")), 6500)
             );
 
             response = await Promise.race([callPromise, timeoutPromise]);
@@ -1606,7 +1708,7 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
 
         if (response?.text) {
           const reply = response.text;
-          const spokenReply = generateSpokenSummary(reply);
+          const spokenReply = generateSpokenSummary(reply, text);
 
           const grounding = response.candidates?.[0]?.groundingMetadata;
           const searchQueries = grounding?.webSearchQueries || [];
@@ -1800,7 +1902,7 @@ It really has been a while! I'm doing wonderfully, and it brings genuine warmth 
 
 I've been right here in the digital studio, keeping the tools sharp and exploring new creative ideas. How have you been doing? Tell me what's been happening in your world lately!`;
           spokenReply = "It really has been a long time! I'm doing great, and it's so good to hear from you again. How have you been? Tell me what's new in your world!";
-        } else if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|story|hobbies|free time|relax)\b/i.test(lower)) {
+        } else if (/\b(favourite|favorite|colour|color|lifestyle|what do you like|what do you want to be|tell me about you|about yourself|your life|your story|hobbies|free time|relax)\b/i.test(lower)) {
           conversationalReply = `### ✨ About Me: Rex's Story & Favorites
 
 I love that you asked! Even though I'm an AI living in the digital realm, I have my own little world, personal style, and story:
@@ -1846,7 +1948,7 @@ Would you like me to start building this now, or would you like to refine any de
       isTask: false,
       chatTitle: generateChatTitle(text),
       reply: conversationalReply,
-      spokenReply: spokenReply || generateSpokenSummary(conversationalReply),
+      spokenReply: spokenReply || generateSpokenSummary(conversationalReply, text),
       emotion: dynamicEmotion,
     });
   } catch (err: unknown) {
