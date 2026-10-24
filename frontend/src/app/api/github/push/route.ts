@@ -264,6 +264,37 @@ export async function POST(request: NextRequest) {
     );
     let filesToPush = project.files.filter((f) => !isExcludedFromGitHubPush(f.path));
 
+    // If pushing to the main Vyrexo repository (or when no session mini-project files exist),
+    // include the root README.md and .env.example from the Vyrexo workspace root.
+    if (repoName.toLowerCase() === "vyrexo" || filesToPush.length === 0) {
+      try {
+        const fs = require("fs");
+        const path = require("path");
+        const repoRoot = process.cwd().endsWith("frontend")
+          ? path.resolve(process.cwd(), "..")
+          : process.cwd();
+        const rootReadmePath = path.join(repoRoot, "README.md");
+        if (fs.existsSync(rootReadmePath)) {
+          const rootReadmeContent = fs.readFileSync(rootReadmePath, "utf-8");
+          const existingIdx = filesToPush.findIndex(
+            (f) => f.path.replace(/^\/+/, "").toLowerCase() === "readme.md"
+          );
+          if (existingIdx >= 0) {
+            filesToPush[existingIdx] = { path: "README.md", content: rootReadmeContent };
+          } else {
+            filesToPush.unshift({ path: "README.md", content: rootReadmeContent });
+          }
+        }
+        const rootEnvExamplePath = path.join(repoRoot, ".env.example");
+        if (fs.existsSync(rootEnvExamplePath)) {
+          const envExampleContent = fs.readFileSync(rootEnvExamplePath, "utf-8");
+          if (!filesToPush.some((f) => f.path.replace(/^\/+/, "") === ".env.example")) {
+            filesToPush.push({ path: ".env.example", content: envExampleContent });
+          }
+        }
+      } catch {}
+    }
+
     // Ensure .gitignore is present and explicitly blocks .env files
     const existingGitignoreIdx = filesToPush.findIndex(
       (f) => f.path.replace(/^\/+/, "") === ".gitignore"

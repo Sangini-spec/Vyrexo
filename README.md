@@ -1,24 +1,26 @@
 # Vyrexo
 
-> A voice-first conversational AI coding assistant. Talk to it the way you would talk to a teammate, and it builds your software for you.
+> A voice-first conversational AI software engineering platform. Talk to Rex the way you would talk to a senior engineer teammate, and it plans, codes, debugs, previews, tests, and deploys your software in real time.
 
-Vyrexo turns software development into a conversation. Instead of typing prompts into a chat box or wrestling with text editors, you speak naturally, and a multi-agent AI system plans, codes, tests, reviews, and documents your project while narrating every step. Think of it as a JARVIS for developers, built entirely on free and open-source technology.
+Vyrexo turns full-stack software development into a natural, interruptible voice conversation backed by an interactive workspace studio. Instead of wrestling with text prompts across disconnected tools, you speak naturally to **Rex**—and a dual-engine, multi-agent AI architecture coordinates real-time voice dialogue, multi-file code synthesis, live debugging, interactive app previews, local VS Code synchronization, and one-click GitHub & Vercel deployments.
 
 ---
 
 ## Table of Contents
 
 - [What is Vyrexo](#what-is-vyrexo)
-- [Why It Exists](#why-it-exists)
+- [Dual-Engine AI Architecture](#dual-engine-ai-architecture)
+- [What We Have Achieved (Key Updates)](#what-we-have-achieved-key-updates)
 - [Core Features](#core-features)
 - [How It Works](#how-it-works)
 - [System Architecture](#system-architecture)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Roadmap](#roadmap)
+- [Configuration & Environment Variables](#configuration--environment-variables)
+- [Usage & Workflow](#usage--workflow)
+- [Local VS Code Integration](#local-vs-code-integration)
+- [GitHub & Vercel Deployment Pipeline](#github--vercel-deployment-pipeline)
 - [Design Philosophy](#design-philosophy)
 - [Contributing](#contributing)
 
@@ -26,336 +28,348 @@ Vyrexo turns software development into a conversation. Instead of typing prompts
 
 ## What is Vyrexo
 
-Vyrexo is a voice-driven AI coding assistant that lets developers build complete software projects through natural conversation. The system is activated by saying "Rex" (its assistant name), after which the developer can describe what they want, ask questions about their codebase, interrupt mid-task to redirect, or simply think out loud while Rex listens.
+Vyrexo is a voice-driven AI software engineering environment that lets developers build, debug, inspect, and ship complete software projects through natural spoken conversation. Activated by the wake word **"Rex"** (or push-to-talk), the developer can describe a product from scratch, ask architectural questions, attach screenshots or documents, debug live errors, or interrupt mid-execution to redirect the build.
 
-Behind the voice interface is a multi-agent orchestration system. Six specialized AI agents work together under the hood, each handling a different part of the development workflow. There is a Planner that breaks down high-level instructions into concrete steps, a Coder that writes the actual source files, an Executor that runs terminal commands and installs packages, a Tester that generates and runs test suites, a Reviewer that audits the code for security and quality issues, and a Documenter that produces README files and API documentation as you go.
+Behind the voice interface is a **six-agent engineering pipeline** (**Planner**, **Coder**, **Executor**, **Tester**, **Reviewer**, and **Documenter**) paired with a live **Replit-style Workspace Studio**. As Rex speaks with you, you can watch files materialize in the File Explorer, inspect and edit code, interact with a live rendered preview of your application, open the entire folder directly in your local **VS Code** desktop editor, or push the repository to **GitHub** and **Vercel**.
 
-What makes Vyrexo different from existing voice tools is that voice is the primary interface, not an afterthought. Tools like Wispr Flow or Willow are speech-to-text input layers that still rely on a text-based AI underneath. Cursor and Aider treat voice as a side feature on top of text-first products. Vyrexo flips this around. The voice layer drives everything, including a full multi-agent orchestrator with real-time interruption, narration, and emotion-aware adaptation.
+---
 
-## Why It Exists
+## Dual-Engine AI Architecture
 
-Modern AI coding assistants have made software development significantly faster, but they all share the same limitation. They are text-based. You type a prompt, you get code back, you type another prompt, you wait again. This works, but it does not feel collaborative. It does not feel like having a teammate.
+Vyrexo separates **real-time conversational intelligence & voice synthesis** from **deep code generation, debugging, and project implementation**, routing each workload to the best-in-class foundation model:
 
-Voice changes that. When you can talk to your coding agent the way you would talk to another developer, the interaction becomes natural. You can interrupt. You can think out loud. You can hear what the AI is doing and react in real time. The cognitive overhead drops, and software development starts to feel less like operating a tool and more like working with a partner.
+| Capability | Primary AI Engine | Role in Vyrexo |
+|---|---|---|
+| **Coding, Debugging & Project Implementation** | **Anthropic Claude API (`Claude Sonnet 5.5` / `claude-sonnet-5-5`)** | Synthesizes production multi-file applications (`React`, `Next.js`, `TypeScript`, `Tailwind CSS`), performs live code debugging, fixes build/deployment errors, writes automated unit tests (`bun:test`), and powers Vercel & in-studio live application implementations. |
+| **Conversational Intelligence & Reasoning** | **Google Gemini API (`Gemini 2.5 Flash` & `Gemini 2.5 Pro`)** | Drives real-time conversational dialogue, wake-word intent classification, multi-turn session memory, emotion-aware response adaptation, architectural whiteboarding, and continuous action narration. |
+| **Neural Voice Synthesis (TTS)** | **ElevenLabs API (`eleven_turbo_v2_5`)** + **Gemini / Edge-TTS Fallback** | Streams ultra-low-latency, human-like expressive voice responses across 8 curated voices and 4 accents (US, UK, Indian, Australian), automatically falling back to Gemini TTS / Microsoft Edge Neural TTS if quota is reached. |
+| **Speech Recognition (STT)** | **Web Speech API & OpenAI Whisper** | Captures continuous hands-free speech with wake-word detection (`"Rex"`), noise gating, and mid-sentence interruption handling. |
 
-Vyrexo was built to make that vision real, and to do it without requiring expensive subscriptions. Every component in the stack is free or open source, from the speech recognition to the AI reasoning to the database. The total API cost is zero.
+---
+
+## What We Have Achieved (Key Updates)
+
+Compared to the initial prototype, Vyrexo has evolved into a complete, production-ready voice-first software engineering studio:
+
+1. **Anthropic Claude Sonnet 5.5 (`claude-sonnet-5-5`) for Coding, Debugging & Vercel Implementation**
+   - Integrated dedicated server-side Anthropic Claude Sonnet 5.5 coding and debugging orchestration (`frontend/src/lib/claude/coding-agent.ts`).
+   - Synthesizes complete, self-contained, interactive applications (SaaS dashboards, e-commerce stores, food delivery platforms, scientific calculators, landing pages) rather than static placeholders.
+   - Handles iterative debugging, code refactoring, security auditing, and automated test generation.
+
+2. **Google Gemini + ElevenLabs Conversational Voice Pipeline**
+   - Combines **Google Gemini** for fast, context-aware conversational turns and intent routing with **ElevenLabs (`eleven_turbo_v2_5`)** for expressive, natural spoken responses.
+   - Includes automatic multi-provider voice failover (`ElevenLabs` $\rightarrow$ `Gemini TTS` $\rightarrow$ `Edge-TTS` $\rightarrow$ `Browser SpeechSynthesis`) so Rex never loses its voice during a session.
+
+3. **Interactive 4-Panel Workspace Studio (`Chat`, `Files`, `Task`, `Preview`)**
+   - **Chat Tab**: Full conversation transcript with Markdown formatting, image/document attachments, and high-contrast syntax-aware file and code chips optimized for both **Light Mode** and **Dark Mode**.
+   - **Files Tab**: Live collapsible file tree and code inspector showing every file written or modified by Claude in real time.
+   - **Task Tab**: Live multi-agent execution timeline tracking the **Planner**, **Coder**, **Executor**, **Tester**, **Reviewer**, and **Documenter**.
+   - **Preview Tab**: Built-in live application sandbox (`/api/preview/[sessionId]`) that compiles and renders the generated React/Tailwind project immediately inside the browser.
+
+4. **One-Click Local VS Code Folder Launch & Desktop Sync**
+   - Clicking **VS Code** smoothly opens the local VS Code desktop editor directly to the connected project directory (`vscode://file/C:/Users/hp/OneDrive/Desktop/<project-folder>`).
+   - Automatically materializes the entire project file tree and `.code-workspace` configuration onto disk, plus provides a one-click `.cmd` Desktop launcher and terminal sync command so the full folder structure appears immediately inside local VS Code.
+
+5. **Built-In GitHub Push & CI/CD Automation**
+   - Direct GitHub integration (`/api/github/push`) using the GitHub Git Trees REST API for atomic multi-file commits.
+   - Automatically strips `.env` secrets, generates a `.gitignore`, and scaffolds a production `.github/workflows/ci-cd.yml` pipeline alongside `Dockerfile`, `vercel.json`, and `render.yaml`.
+
+6. **Standalone Production Build & Cloud Deployment Readiness**
+   - Unified Next.js 15 App Router server runtime (`output: "standalone"`) with automated build-artifact verification (`prepare-standalone.mjs` & `ensure-build.mjs`), ready for zero-config deployment on **Vercel**, **Google Cloud Run**, **Render**, or **Docker**.
+
+---
 
 ## Core Features
 
-### Voice-First Interaction
-The developer activates Rex with the wake word "Rex" anywhere in their speech, then talks normally. The system listens continuously, transcribes through Whisper running locally on the developer's machine, and responds through Microsoft Edge's neural voices. There is no typing involved at any point in the core workflow.
+### Voice-First Interaction & Wake Word ("Rex")
+Activate Rex hands-free by saying **"Rex"** anywhere in your speech (`"Hey Rex"`, `"OK Rex"`, or `"Rex, build..."`), or use `Space` for push-to-talk. Rex listens continuously, filters background noise, and responds immediately with natural neural speech.
 
-### Multi-Agent Orchestration
-Six AI agents coordinate through LangGraph to handle different aspects of development. The Planner decomposes voice instructions into structured task plans. The Coder writes and modifies source code. The Executor runs commands and manages dependencies. The Tester generates test cases and runs them. The Reviewer audits for security vulnerabilities and quality issues. The Documenter creates README files and architecture summaries.
+### Claude-Powered Multi-File Coding & Live Debugging
+When you ask Rex to build a feature or fix a bug, **Anthropic Claude Sonnet 5.5 (`claude-sonnet-5-5`)** architects the domain model (`src/types/*`), builds interactive UI components (`src/components/App.tsx`), configures `package.json`, writes executable unit tests (`tests/app.test.ts`), and updates project documentation (`README.md`).
 
 ### Interruptible Execution
-At any point during a task, the developer can speak and the system stops what it is doing, re-plans based on the new input, and continues. If Rex is in the middle of writing authentication code and the developer says "Wait, use OAuth instead of JWT", the system pauses, updates the plan, and resumes with the new approach. This makes the interaction feel like real pair programming rather than rigid command execution.
+Speak at any point while Rex is working to redirect the task. Saying *"Wait, Rex—use OAuth instead of JWT"* or *"Add a dark mode toggle to the navbar"* pauses current execution, checkpoints state, updates the plan, and seamlessly incorporates your new instructions.
 
 ### Continuous Action Narration
-Rex narrates what it is doing as it does it. When it installs a dependency, it says so. When it runs a test, it announces the result. When it commits code, it tells the developer. There are no silent operations. The developer always knows what is happening, which builds trust and makes it easy to step in if something goes wrong.
-
-### Codebase Context Awareness
-The system indexes the entire project directory into a ChromaDB vector database using AST-aware chunking. This means when the developer asks "where is the authentication logic?", Rex returns the precise files and functions that handle authentication, even in a large codebase. Context retrieval is incremental, with a file watcher updating the index as files change.
+Every step—planning architecture, authoring components, running unit tests, auditing security, or pushing to GitHub—is narrated concisely by Rex through ElevenLabs neural TTS while updating the visual Agent Timeline.
 
 ### Emotion-Aware Adaptation
-Rex analyzes vocal cues and conversational patterns to detect frustration, confusion, or urgency, then adapts its response style accordingly. A frustrated developer gets clearer, more patient explanations. A developer in flow gets terse, fast responses. A confused developer gets step-by-step breakdowns. This is built into the conversation manager and applies across all agent interactions.
+Vyrexo analyzes conversational cues to detect frustration, confusion, urgency, or flow state:
+- **Frustrated / Stuck**: Patient, step-by-step debugging explanations.
+- **In Flow**: Concise, high-speed execution updates.
+- **Exploring / Brainstorming**: Collaborative architectural trade-off discussions.
 
-### Conversational Modes
-The interaction state machine supports five distinct modes that change how Rex behaves. Normal mode is the default conversational coding flow. Debug mode focuses on live troubleshooting. Rubber Duck mode has Rex listen silently while the developer thinks out loud, only interjecting on detected logical flaws. Ship It mode runs the full deployment pipeline end to end. Whiteboard mode generates architecture diagrams in real time as the developer describes the system.
+### Five Conversational Engineering Modes
+- **Normal Mode**: Default full-stack conversational coding and project generation.
+- **Debug Mode**: Focused root-cause analysis, stack-trace inspection, and live bug patching via Claude Sonnet 5.5 (`claude-sonnet-5-5`).
+- **Rubber Duck Mode**: Rex listens quietly while you think out loud, interjecting only when it spots a logical flaw or edge case.
+- **Ship It Mode**: Runs the end-to-end verification, security scan, test suite, and deployment pipeline.
+- **Whiteboard Mode**: Interactive system architecture design and component breakdown.
 
-### IDE Integration
-Vyrexo connects to VS Code so developers can visually inspect code as it is being written. Files open automatically, changes appear in real time, and the developer can switch fluidly between speaking to Rex and looking at the actual code.
+### Adaptive Light & Dark Themes
+Switch effortlessly between **Obsidian Dark Mode** and **High-Contrast Daylight Mode**. All chat bubbles, inline file references, code blocks, and workspace panels automatically adapt for crisp readability.
 
-### Git Workflow
-Voice commands handle all common git operations. Saying "commit the changes" creates a commit with a generated message. Saying "push to main" pushes the branch. Saying "review my changes" walks through the diff verbally. Branching, merging, and pull request creation all work the same way.
-
-### Automated Documentation
-As features are built, the Documenter agent generates README files, API documentation, and architecture summaries automatically. This means projects built with Vyrexo come with complete documentation by default rather than as an afterthought.
+---
 
 ## How It Works
 
-The user flow is simple. The developer launches the system, connects it to a project directory, and starts talking. Behind the scenes, the system goes through this loop on every voice command.
+1. **Voice Capture & Transcription**: Speech enters via the browser microphone (Web Speech API / Whisper STT) or text/multimodal input bar.
+2. **Intent & Emotion Analysis (Google Gemini)**: The Conversation Engine classifies whether the user is engaging in conversation, asking a codebase question, requesting a new software build, debugging an issue, or interrupting an active task.
+3. **Multi-Agent Orchestration**:
+   - **Planner Agent**: Deconstructs the user's request into a structured project specification and step-by-step execution plan.
+   - **Coder Agent (Anthropic Claude Sonnet 5.5 / `claude-sonnet-5-5`)**: Synthesizes and debugs production TypeScript/React/Next.js source files.
+   - **Executor Agent**: Materializes workspace files, manages dependencies, and updates the live preview runtime.
+   - **Tester Agent**: Generates and executes unit tests (`bun:test`) against the generated logic.
+   - **Reviewer Agent**: Runs static governance checks, secret redaction, and security audits (`/api/security`).
+   - **Documenter Agent**: Generates comprehensive `README.md`, `vercel.json`, `Dockerfile`, and CI/CD workflows.
+4. **Live Studio & Voice Feedback (ElevenLabs + Gemini)**: While files stream into the **Files** and **Preview** tabs, **Gemini** formulates a natural spoken update and **ElevenLabs** streams the neural audio back to the user, synchronized with the 3D animated Voice Orb.
 
-Speech enters through the microphone and is captured by the browser. The audio stream travels over a WebSocket to the FastAPI backend, where the Voice Pipeline runs it through Whisper for transcription. The transcribed text passes through a middleware chain that filters noise, detects emotional state, and checks for interruption signals.
-
-The Conversation Manager classifies the intent. Is this a command to build something, a question about the codebase, casual conversation, a mode switch, or an interrupt request? Based on intent, the system either responds directly or routes the request to the Agent Orchestrator.
-
-The Agent Orchestrator runs a LangGraph DAG. The Planner agent runs first, decomposing the request into a structured plan. A router examines each step in the plan and dispatches it to the appropriate specialized agent. Each agent calls Gemini through the LangChain integration, executes any required tools (file operations, shell commands, git actions), and returns updated state.
-
-As the agents work, the system publishes events to a central Event Bus. The frontend subscribes to these events through the WebSocket connection, updating the agent timeline, narration display, and orb animation in real time. The backend simultaneously generates a TTS response that streams back to the browser for playback.
-
-If the developer interrupts at any point, the InterruptMiddleware detects speech during execution, the Orchestrator checkpoints its current state, and the new instruction gets processed as a redirect. The system can resume from the checkpoint or replan entirely depending on how different the new instruction is.
+---
 
 ## System Architecture
 
-Vyrexo follows a layered, event-driven architecture designed to support all current features while remaining extensible for future enhancements without breaking existing code.
+Vyrexo is built on a hybrid **Next.js 15 Full-Stack App Router + Python FastAPI** architecture:
 
-At the highest level, the developer interacts with a Next.js frontend through voice. The frontend captures audio via the Web Speech API and maintains a persistent WebSocket connection to a Python FastAPI backend. The backend acts as the central coordinator, receiving voice input, managing sessions, and routing all communication through an asynchronous Event Bus that uses pub/sub semantics with pattern matching.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        VYREXO FRONTEND & STUDIO UI                          │
+│   Next.js 15 + React 19 + Tailwind CSS 4 + 3D Voice Orb + Light/Dark Theme  │
+├──────────────────┬──────────────────┬──────────────────┬────────────────────┤
+│  Voice Orb &     │  Chat Transcript │  File Explorer & │  Live App Preview  │
+│  Wake-Word ("Rex")│  + Attachments   │  VS Code Launcher│  + Deploy Center   │
+└────────┬─────────┴────────┬─────────┴────────┬─────────┴─────────┬──────────┘
+         │                  │                  │                   │
+         ▼                  ▼                  ▼                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    UNIFIED ORCHESTRATION & API LAYER                        │
+│  • /api/chat          (Conversation Routing + Multi-Agent Execution)        │
+│  • /api/voice/tts     (ElevenLabs Neural TTS + Gemini/Edge-TTS Failover)    │
+│  • /api/projects/*    (Workspace Materialization, Local VS Code & ZIP Sync) │
+│  • /api/preview/*     (Sandboxed Live React/Tailwind Application Runner)    │
+│  • /api/github/push   (Atomic Git Trees Push + Secret Guard + CI/CD Gen)    │
+│  • /api/deploy        (Vercel, Render, Docker & Cloud Run Deployment)       │
+└───────────────────┬─────────────────────────────────────┬───────────────────┘
+                    │                                     │
+                    ▼                                     ▼
+┌───────────────────────────────────────┐ ┌───────────────────────────────────┐
+│   CONVERSATION & VOICE INTELLIGENCE   │ │  CODING, DEBUGGING & EXECUTION    │
+│  • Google Gemini API (2.5 Flash/Pro)  │ │  • Anthropic Claude Sonnet 5.5    │
+│  • ElevenLabs API (eleven_turbo_v2_5) │ │  • Multi-File Project Synthesizer │
+│  • Emotion & Intent Classifier        │ │  • Automated Test & Security Audit│
+└───────────────────────────────────────┘ └───────────────────────────────────┘
+```
 
-Five core modules subscribe to events on the bus. The Voice Pipeline handles speech-to-text and text-to-speech with a composable middleware chain in between. The Conversation Manager tracks dialogue state, classifies intent, and maintains memory across turns. The Agent Orchestrator runs the LangGraph multi-agent pipeline. The Context Engine indexes the codebase and provides semantic search through ChromaDB. The Mode State Machine governs interaction modes.
-
-At the bottom of the stack, six specialized agents call out to Google's Gemini 2.5 model and operate through thirteen development tools that act on the developer's local machine. External services include Gemini for AI reasoning, Supabase for PostgreSQL persistence, ChromaDB for vector storage, and VS Code for IDE integration.
-
-The architecture's key insight is that components do not call each other directly. They communicate through the Event Bus, which means new features can be added by subscribing to events without modifying existing code. Agents register through a plugin decorator pattern, so adding a new agent type requires creating one Python file. The LLM provider is abstracted behind a factory, so swapping from Gemini to another model means changing one configuration variable.
+---
 
 ## Tech Stack
 
-The entire stack is free or open source. Total API cost is zero.
-
 | Layer | Technology |
-|-------|-----------|
-| AI Engine (heavy reasoning) | Gemini 2.5 Pro (free tier, 100 RPD) |
-| AI Engine (light tasks) | Gemini 2.5 Flash (free tier, 500 RPD) |
-| Agent Framework | LangGraph + langchain-google-genai |
-| Backend Framework | Python 3.11+, FastAPI, Uvicorn |
-| Speech-to-Text | Whisper (local) |
-| Text-to-Speech | Edge-TTS (Microsoft Neural Voices) |
-| Vector Database | ChromaDB |
-| Relational Database | Supabase PostgreSQL |
-| Frontend Framework | Next.js 15, React 19 |
-| Styling | Tailwind CSS 4 |
-| State Management | Zustand |
-| Authentication | Supabase Auth (Email + OAuth) |
-| Real-time Transport | WebSocket |
-| File Watching | watchdog |
-| Code Parsing | tree-sitter |
-| IDE Integration | VS Code CLI |
+|---|---|
+| **Coding & Debugging AI Engine** | **Anthropic Claude API (`Claude Sonnet 5.5` / `claude-sonnet-5-5`)** |
+| **Conversational AI Engine** | **Google Gemini API (`Gemini 2.5 Flash` & `Gemini 2.5 Pro`)** |
+| **Primary Text-to-Speech (TTS)** | **ElevenLabs API (`eleven_turbo_v2_5`)** |
+| **Fallback Text-to-Speech** | **Google Gemini TTS, Microsoft Edge-TTS & Web Speech API** |
+| **Speech-to-Text (STT)** | **Browser Web Speech API & OpenAI Whisper** |
+| **Frontend & Full-Stack Runtime** | **Next.js 15 (App Router, Standalone Build), React 19, TypeScript 5.7** |
+| **Python Multi-Agent Backend** | **Python 3.11+, FastAPI, LangGraph, Uvicorn** |
+| **Styling & Theme System** | **Tailwind CSS 4 (Adaptive Dark & Light Themes)** |
+| **Database & Authentication** | **Supabase (PostgreSQL + Supabase Auth with Email & OAuth)** |
+| **Vector Context & RAG** | **ChromaDB + Tree-sitter AST Chunking** |
+| **IDE Integration** | **VS Code (`vscode://` URI + `.code-workspace` + 1-Click Local Desktop Sync)** |
+| **Deployment & CI/CD** | **Vercel, GitHub Actions CI/CD, Docker, Render, Google Cloud Run** |
+
+---
 
 ## Project Structure
 
-```
-vyrexo/
-├── backend/
-│   └── src/vyrexo/
-│       ├── main.py                          # FastAPI app entry point
-│       ├── config.py                        # Pydantic settings
-│       ├── api/
-│       │   ├── routes/                      # REST endpoints
-│       │   └── websocket/                   # WebSocket handler + protocol
-│       ├── voice/
-│       │   ├── pipeline.py                  # Voice pipeline orchestrator
-│       │   ├── stt/                         # Whisper STT provider
-│       │   ├── tts/                         # Edge-TTS provider
-│       │   └── middleware/                  # Noise gate, emotion, interrupt
-│       ├── conversation/
-│       │   ├── manager.py                   # Conversation manager
-│       │   ├── intent.py                    # Intent classifier
-│       │   └── memory/                      # Memory store implementations
-│       ├── agents/
-│       │   ├── registry.py                  # Plugin-based agent registry
-│       │   ├── orchestrator.py              # LangGraph orchestrator
-│       │   ├── llm_factory.py               # Model-agnostic LLM factory
-│       │   ├── tools/                       # File ops, terminal, git
-│       │   └── implementations/             # 6 agent implementations
-│       ├── context/
-│       │   ├── engine.py                    # Context engine
-│       │   ├── indexer.py                   # ChromaDB indexer
-│       │   ├── retriever.py                 # RAG retriever
-│       │   └── watcher.py                   # File system watcher
-│       ├── events/
-│       │   └── bus.py                       # Async event bus
-│       ├── modes/
-│       │   ├── machine.py                   # Interaction state machine
-│       │   └── implementations/             # Mode implementations
-│       ├── integrations/
-│       │   └── vscode.py                    # VS Code workspace sync
-│       └── storage/
-│           ├── database.py                  # PostgreSQL connection
-│           ├── models.py                    # SQLAlchemy models
-│           └── repositories/                # Data access layer
+```text
+Vyrexo/
 ├── frontend/
+│   ├── scripts/
+│   │   ├── prepare-standalone.mjs           # Standalone build packaging for cloud deployments
+│   │   └── ensure-build.mjs                 # Build verification & artifact readiness script
 │   └── src/
 │       ├── app/
-│       │   ├── page.tsx                     # JARVIS-style landing page
-│       │   ├── auth/                        # Login and signup pages
-│       │   ├── app/                         # Main application
-│       │   └── settings/                    # Voice settings page
+│       │   ├── page.tsx                     # Interactive landing page
+│       │   ├── auth/                        # Supabase login & signup pages
+│       │   ├── app/page.tsx                 # Main Vyrexo Voice Studio & Workspace UI
+│       │   ├── settings/page.tsx            # Voice, accent, speed & AI provider settings
+│       │   └── api/
+│       │       ├── chat/                    # Dual-engine chat & agent orchestrator (Gemini + Claude)
+│       │       ├── voice/                   # ElevenLabs TTS & voice synthesis endpoints
+│       │       ├── projects/                # File tree, file reader, ZIP export & local VS Code sync
+│       │       ├── preview/[sessionId]/     # Live interactive application preview renderer
+│       │       ├── github/                  # GitHub status & atomic repository push API
+│       │       ├── deploy/                  # Vercel, Render & Docker deployment center
+│       │       ├── testing/                 # Automated unit test runner
+│       │       └── security/                # Governance & secret-redaction audit API
 │       ├── components/
-│       │   ├── voice/                       # Animated voice orb
-│       │   ├── agents/                      # Agent timeline
-│       │   └── shared/                      # Sidebar, status bar, mode indicator
+│       │   ├── voice/                       # 3D animated WebGL/Canvas Voice Orb
+│       │   ├── agents/                      # Multi-agent step timeline
+│       │   └── shared/                      # RightPanel (Chat, Files, Task, Preview), Sidebar, TopBar
 │       ├── hooks/                           # useVoice, useWebSocket, useAudioPlayer
-│       └── lib/                             # Supabase client, auth context, ws-protocol
-├── shared/                                  # Shared schemas
-├── .env.example                             # Environment variable template
-└── README.md                                # This file
+│       └── lib/
+│           ├── claude/coding-agent.ts       # Anthropic Claude Sonnet coding & debugging engine
+│           ├── ai-provider-config.ts        # ElevenLabs & AI provider management
+│           ├── project-export.ts            # Workspace materialization, CI/CD & VS Code config generator
+│           ├── vscode-launcher.ts           # Local VS Code folder URI & Desktop sync helpers
+│           └── security/governance.ts       # Secret redaction & environment validation
+├── backend/
+│   └── src/vyrexo/
+│       ├── main.py                          # FastAPI multi-agent server entry point
+│       ├── voice/                           # Whisper STT, TTS providers & emotion middleware
+│       ├── conversation/                    # Intent classification & dialogue memory
+│       ├── agents/                          # LangGraph orchestrator & 6 specialized agents
+│       ├── context/                         # ChromaDB RAG indexer & file watcher
+│       └── integrations/vscode.py           # Local VS Code CLI bridge
+├── .env.example                             # Environment variable template (safe for GitHub)
+├── package.json                             # Root workspace build & start scripts
+└── README.md                                # Project documentation
 ```
+
+---
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.11 or newer
-- Node.js 20 or newer
-- A Google AI Studio account for a free Gemini API key
-- A Supabase account for the free PostgreSQL database
+- **Node.js 20+** and **npm**
+- **Python 3.11+** (optional, if running the standalone FastAPI LangGraph worker)
+- API Keys:
+  - **Anthropic API Key** (`ANTHROPIC_API_KEY`) for Claude Sonnet coding, debugging, and project implementation
+  - **Google Gemini API Key** (`GEMINI_API_KEY`) for conversational intelligence and reasoning
+  - **ElevenLabs API Key** (`ELEVENLABS_API_KEY`) for neural voice synthesis
+  - **Supabase Project URL & Anon Key** (optional, for cloud session persistence and authentication)
 
 ### Installation
 
-Clone the repository.
+1. **Clone the repository:**
 
 ```bash
 git clone https://github.com/Sangini-spec/Vyrexo.git
 cd Vyrexo
 ```
 
-Install backend dependencies.
+2. **Install dependencies:**
+
+```bash
+npm install
+cd frontend && npm install && cd ..
+```
+
+3. **Configure environment variables:**
+
+```bash
+cp .env.example .env
+cp .env.example frontend/.env.local
+```
+
+Open `.env` (and `frontend/.env.local`) and add your `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `ELEVENLABS_API_KEY`.
+
+### Running Locally
+
+Start the unified Next.js full-stack studio server:
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:3000` in your browser.
+
+*(Optional)* If you also want to run the Python FastAPI backend service simultaneously:
 
 ```bash
 cd backend
 pip install -e .
-```
-
-Install frontend dependencies.
-
-```bash
-cd ../frontend
-npm install
-```
-
-Set up environment variables. Copy `.env.example` to `.env` in the project root, then fill in your credentials.
-
-```bash
-cp .env.example .env
-```
-
-You will need to add your Gemini API key, your Supabase database URL, your Supabase project URL, and your Supabase anonymous key. The `.env.example` file documents all required variables with comments.
-
-### Running the Servers
-
-Start the backend (port 8001).
-
-```bash
-cd backend
 PYTHONPATH=src python -m uvicorn vyrexo.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-Start the frontend in a separate terminal (port 3001).
+---
 
-```bash
-cd frontend
-npx next dev -p 3001
-```
+## Configuration & Environment Variables
 
-Open `http://localhost:3001` in your browser. Sign up with an email or Google account, click into a session, and say "Rex" followed by what you want to build.
+All configuration is managed via `.env` (never committed to GitHub; `.env.example` provides the template):
 
-## Configuration
+### Core AI & Voice Keys
 
-Vyrexo is configured through environment variables loaded from `.env`. The most important settings are documented below.
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | **Anthropic Claude API key** used for multi-file code synthesis, live debugging, test generation, and Vercel/workspace project implementation. |
+| `ANTHROPIC_CODING_MODEL` | Primary Anthropic coding model identifier (default: `claude-sonnet-5-5`). |
+| `GEMINI_API_KEY` | **Google Gemini API key** used for real-time voice conversation, intent classification, emotion detection, and task planning. |
+| `ELEVENLABS_API_KEY` | **ElevenLabs API key** (also supports `ELEVEN_LABS_API_KEY`) for ultra-low-latency neural voice output (`eleven_turbo_v2_5`). |
+| `ELEVENLABS_MODEL` | ElevenLabs voice synthesis model (default: `eleven_turbo_v2_5`). |
+| `LLM_MODEL_LIGHT` | Fast conversational Gemini model (default: `gemini-2.5-flash`). |
+| `LLM_MODEL_HEAVY` | Deep reasoning Gemini model (default: `gemini-2.5-pro`). |
 
-### Required
+### Database, Auth & Integrations
 
-- `GEMINI_API_KEY` is your Google AI Studio API key for Gemini access
-- `DATABASE_URL` is your Supabase PostgreSQL connection string with the `postgresql+asyncpg://` prefix
-- `NEXT_PUBLIC_SUPABASE_URL` is your Supabase project URL
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY` is your Supabase anonymous public key
-
-### Optional
-
-- `LLM_MODEL_HEAVY` sets the Gemini model for heavy reasoning (default `gemini-2.5-pro`)
-- `LLM_MODEL_LIGHT` sets the Gemini model for light tasks (default `gemini-2.5-flash`)
-- `STT_PROVIDER` chooses speech-to-text engine, `local` for Whisper local or `api` for OpenAI Whisper API (default `local`)
-- `WHISPER_MODEL_SIZE` sets the Whisper model size (default `base`, options include `tiny`, `small`, `medium`, `large`)
-- `TTS_PROVIDER` chooses text-to-speech engine, `edge` for Edge-TTS (default), `chatterbox` for local, or `pyttsx3` for offline
-- `TTS_VOICE` selects a specific voice ID (default `en-US-GuyNeural`)
-- `HOST` sets the server host (default `127.0.0.1`)
-- `PORT` sets the server port (default `8001`)
-
-The frontend reads `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` from `frontend/.env.local` rather than the root `.env`.
-
-## Usage
-
-After signing in, the workflow looks like this.
-
-You start a new session by clicking the plus icon or selecting an existing session from the sidebar. The connection status indicator turns green once the WebSocket connects to the backend. The voice orb begins its idle pulse.
-
-You activate Rex by saying its name anywhere in your speech. Phrases like "Hey Rex", "OK Rex", "Rex, listen", or just "Rex" all trigger activation. The orb shifts to its listening state, indicating that the system is now in active conversation mode.
-
-You speak naturally. Examples of commands that work include:
-
-- "Create a FastAPI authentication service with JWT tokens and Google OAuth"
-- "Add rate limiting to the login endpoint"
-- "Run the test suite and tell me what fails"
-- "Where is the database connection logic?"
-- "Refactor the user model to use UUID primary keys"
-- "Commit these changes with a sensible message and push to main"
-
-Rex breaks the request into a plan, displays it in the agent timeline, and starts executing. As each agent completes its step, the timeline updates. Rex narrates progress through the speakers.
-
-You can interrupt at any time by speaking. If you say "Wait, also add password reset", Rex pauses, updates the plan, and continues with the new requirement included.
-
-To end a session, say "Goodbye Rex" or "Stop listening". The orb returns to its dormant state and the WebSocket disconnects cleanly. Sessions persist in Supabase, so you can return later and continue where you left off.
-
-The Settings page lets you customize the voice. There are eight curated voices across four accents (American, British, Indian, Australian) for both male and female options, plus speed controls for slow, normal, and fast playback. Each voice can be previewed before selection.
-
-Pressing Space at any time triggers push-to-talk mode if you prefer not to use the wake word. Pressing Escape interrupts the current execution and clears the speech queue.
-
-## Roadmap
-
-### Phase 1: MVP (Current)
-
-- Voice-first conversational interaction with wake word activation
-- Six specialized AI agents orchestrated through LangGraph
-- Interruptible execution with state checkpointing
-- Continuous action narration through TTS
-- Codebase context awareness via ChromaDB RAG
-- Emotion-aware response adaptation
-- Five interaction modes including Normal, Debug, Rubber Duck, Ship It, and Whiteboard
-- VS Code integration for visual code inspection
-- Voice-driven git workflow operations
-- Automated test generation and execution
-- Continuous code review for security and quality
-- Automated documentation generation
-- Frontend dashboard with session management
-- Supabase authentication and persistence
-
-### Phase 2: Differentiating Features
-
-These features are planned for the next development cycle and the architecture is already designed to support them without breaking existing code.
-
-- **Live Collaborative Debugging** where Rex sets breakpoints, inspects runtime state, and walks through stack traces verbally while the developer guides the investigation
-- **Context Streaming** as an ambient awareness mode where references like "that auth bug from yesterday" resolve through git history and conversation memory without explicit file paths
-- **Voice-Driven Architecture Whiteboarding** where verbal descriptions of system architecture generate live Mermaid diagrams that update as you talk, then convert into actual implementations
-- **Rubber Duck Mode** with intelligent listening, where Rex stays silent while the developer thinks out loud and only speaks up when it detects a logical flaw or critical missing piece
-- **Multi-Session Project Memory** building a persistent developer profile that remembers coding style preferences, past architectural decisions, recurring patterns, and project-specific vocabulary
-- **Ship It Mode** as a voice-to-deployment pipeline where saying "ship it" runs the full sequence of tests, linting, security checks, PR generation, and merge approval
-- **Real-Time Voice Tone Adaptation** that goes beyond emotion detection to actual behavioral adaptation, where uncertain developers get more explanation and developers in flow get terse responses
-- **Conflict-Aware Multi-Agent Transparency** exposing internal agent disagreements as natural conversation so the developer can arbitrate when, for example, the Reviewer flags a security issue in code the Coder just wrote
-
-## Design Philosophy
-
-Vyrexo is built around a few core principles that influence every architectural decision.
-
-**Voice is the primary interface, not a side feature.** Most voice tools treat speech as a fancy input method on top of a text-first product. Vyrexo inverts this. The voice layer drives the orchestrator, and text-based interaction is not part of the user experience.
-
-**Components communicate through events, not direct calls.** The Event Bus is the architectural backbone. This means the system can grow without breaking. Phase 2 features plug in by subscribing to events that already exist, with no modifications to current code.
-
-**Agents are plugins, not hardcoded.** Adding a new agent type requires creating a single Python file with a registration decorator. The LangGraph DAG is built dynamically from the registry at startup.
-
-**The LLM provider is abstracted.** Switching from Gemini to another model means changing one configuration variable. No code changes required. This protects against vendor lock-in and rate limit surprises.
-
-**Cost stays at zero.** Every component in the stack is free or open source. The Gemini free tier, Whisper running locally, Edge-TTS through Microsoft's free service, Supabase's free tier, and ChromaDB self-hosted all combine into a system that costs nothing to run.
-
-**The developer stays in control.** Rex narrates everything, can be interrupted at any point, and never executes destructive commands without confirmation. The IDE remains visible at all times so the developer can see exactly what is being built.
-
-## Contributing
-
-This is currently a final-year project under active development. Issues and pull requests are welcome. If you spot a bug or have a feature suggestion, open an issue and describe what you observed.
-
-For larger changes, please open a discussion first to align on the approach. The architecture is intentionally modular to make contributions straightforward.
-
-When contributing code, follow the existing patterns. New agents go in `backend/src/vyrexo/agents/implementations/` with the `@AgentRegistry.register` decorator. New voice middleware goes in `backend/src/vyrexo/voice/middleware/` and implements the `VoiceMiddleware` ABC. New interaction modes implement the `InteractionMode` ABC and register in the state machine.
-
-## License
-
-This project is provided as is for educational and personal use. Commercial licensing terms will be defined when the project moves out of academic scope.
-
-## Acknowledgments
-
-Vyrexo was built with significant help from the open-source community. Whisper from OpenAI provides world-class speech recognition that runs locally. Edge-TTS gives access to Microsoft's neural voices for free. ChromaDB makes vector search trivial to set up. LangGraph from LangChain handles the multi-agent orchestration elegantly. FastAPI and Next.js provide modern, productive frameworks for backend and frontend respectively. Supabase makes database hosting and authentication painless on the free tier.
-
-Most importantly, Google's Gemini API made this entire project possible. Without a free, capable AI model accessible to students, none of this would exist.
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL for authentication and session sync. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anonymous public key. |
+| `DATABASE_URL` | PostgreSQL connection string (`postgresql+asyncpg://...`). |
+| `GITHUB_TOKEN` | *(Optional)* Default GitHub Personal Access Token (`repo`, `workflow` scopes) for one-click repository pushes. |
 
 ---
 
-Built for developers who would rather talk than type.
+## Usage & Workflow
+
+1. **Start or Select a Session**: Open the studio at `/app` and create a new session or select a previous project from the left sidebar.
+2. **Connect a Local Folder (Optional)**: Click **Connect Folder** in the top bar to link a folder from your machine (e.g., `C:\Users\hp\OneDrive\Desktop\<your-folder>`).
+3. **Talk to Rex**:
+   - Say **"Rex"** followed by your instruction, or type/attach files in the bottom bar.
+   - Example voice commands:
+     - *"Rex, build a modern SaaS analytics dashboard with KPI cards, interactive revenue charts, and a filterable customer table."*
+     - *"Rex, debug the checkout modal and add promo code validation."*
+     - *"Rex, run the automated test suite and tell me if anything fails."*
+     - *"Rex, push this project to GitHub with a CI/CD pipeline."*
+4. **Inspect, Preview & Edit**:
+   - Use the **Chat** tab to read formatted explanations and click file chips.
+   - Use the **Files** tab to browse the complete directory tree and inspect generated source code.
+   - Use the **Preview** tab to interact with the live running application inside the studio.
+5. **Customize Voice & Theme**:
+   - Toggle between **Light Mode** and **Dark Mode** in the top navigation bar.
+   - Visit **Settings** (`/settings`) to choose from 8 curated voices across 4 accents (US, UK, Indian, Australian) and adjust speech playback speed.
+
+---
+
+## Local VS Code Integration
+
+Vyrexo lets you transition from voice conversation to your local **VS Code** desktop IDE in a single click:
+
+- Clicking the **VS Code** button in the top bar triggers the `vscode://file/...` protocol pointed directly at your local Desktop project path (`C:\Users\hp\OneDrive\Desktop\<project-folder>`).
+- If you generated a new project in the cloud/browser session, Vyrexo provides a **1-Click Local Sync (`.cmd`) Launcher** and terminal sync command that downloads and extracts the entire file tree (plus a pre-configured `<project>.code-workspace` file) directly into your Desktop folder and opens VS Code with the full file Explorer tree expanded.
+
+---
+
+## GitHub & Vercel Deployment Pipeline
+
+Vyrexo includes a built-in **GitHub Push** and **Deployment Center** inside the **Files** tab:
+
+- **Secret Protection**: Automatically filters out `.env`, `.env.local`, and runtime credential files before any commit—only `.env.example` templates are allowed.
+- **Automated CI/CD Scaffolding**: Generates `.github/workflows/ci-cd.yml` for linting, TypeScript type-checking, Bun unit testing, and production build verification.
+- **Vercel & Cloud Run Ready**: Every project includes `vercel.json`, `Dockerfile`, and `render.yaml` configurations, and Vyrexo itself compiles into a self-contained Next.js standalone artifact (`npm run build`).
+
+---
+
+## Design Philosophy
+
+- **Voice is Primary, Visual Studio is Immediate**: Speak naturally as if pair-programming with a teammate, while having full visual control over files, diffs, terminal output, and live previews.
+- **Best Model for Every Job**: Use **Google Gemini + ElevenLabs** for sub-second, emotionally intelligent voice conversation, and **Anthropic Claude Sonnet 5.5 (`claude-sonnet-5-5`)** for uncompromising code quality, debugging accuracy, and full project implementation.
+- **Developer Stays in Control**: Rex narrates every action, supports instant voice interruption, protects secrets from ever being committed, and syncs cleanly with your local VS Code workflow and GitHub repositories.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome! To contribute:
+
+1. Fork the repository (`https://github.com/Sangini-spec/Vyrexo`).
+2. Create a feature branch (`git checkout -b feat/your-feature`).
+3. Commit your changes and ensure `npm run build` succeeds.
+4. Open a Pull Request describing your changes.
+
+---
+
+Built for developers who want to talk to their AI teammate—and ship real software.
