@@ -16,7 +16,7 @@ import { useVoice } from "@/hooks/useVoice";
 import { useAudioPlayer, unlockAudioPlayback } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
-import { primeSpeechSynthesis, speakHumanizedText } from "@/lib/voice-synthesizer";
+import { primeSpeechSynthesis, speakHumanizedText, playActiveListeningHum } from "@/lib/voice-synthesizer";
 import { detectEmotionFromContext, getEmotionStateMeta, type EmotionTone } from "@/lib/emotion-detector";
 import {
   isPlaceholderOrBadSessionName,
@@ -344,8 +344,11 @@ function checkIsSelfEcho(
     const cleanAi = aiText.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
     if (!cleanAi) continue;
 
-    // 1. Direct contiguous substring check
+    // 1. Direct contiguous substring check (including short 1-2 word fragments if Rex spoke them in the last 5.5s)
     if (cleanInput.length >= 6 && cleanAi.includes(cleanInput)) {
+      return true;
+    }
+    if (now - time <= 5500 && inputWords.length <= 2 && cleanInput.length >= 3 && cleanAi.includes(cleanInput)) {
       return true;
     }
 
@@ -1516,7 +1519,20 @@ export default function App() {
   // The browser SpeechSynthesisUtterance fallback is no longer used; the chosen voice
   // and speed flow from the Settings page through a voice.config WebSocket message.
 
-  // ── Voice: wake word "Rex" + continuous conversation ────────
+  const lastHumTimeRef = useRef<number>(0);
+
+  const triggerListeningHum = useCallback(() => {
+    const now = Date.now();
+    if (now - lastHumTimeRef.current < 2400) return;
+    lastHumTimeRef.current = now;
+    playActiveListeningHum();
+  }, []);
+
+  const handleCheckSelfEcho = useCallback((candidateText: string) => {
+    return checkIsSelfEcho(candidateText, recentAiSpeechRef.current);
+  }, []);
+
+  // ── Voice: wake word "Rex" + continuous conversation + phrase-independent barge-in ────────
   const handleVoiceTranscript = useCallback(
     (text: string, isFinal: boolean) => {
       const normalizedLive = normalizeSpokenTranscript(text, { isInterim: !isFinal });
@@ -1533,56 +1549,68 @@ export default function App() {
       const wasBuildingRecently =
         isBuildingRef.current || Date.now() - lastBuildInterruptedTimeRef.current < 6000;
       const isBuildTermination = isBuildTerminationCommand(effectiveRaw, wasBuildingRecently);
+      const isEcho = !isStop && !isBuildTermination && checkIsSelfEcho(effectiveRaw, recentAiSpeechRef.current);
+      const spokenWordCount = lower.split(/\s+/).filter((w) => w.length > 1).length;
 
-      const rexTalkingOrWorking =
+      const rexSpeakingNow =
         audioIsPlaying ||
         isPlayingRef.current ||
         speakingRef.current ||
         wasPlayingRef.current ||
-        isSynthesizingVoiceRef.current ||
-        isBuildingRef.current;
+        isSynthesizingVoiceRef.current;
+
+      const rexTalkingOrWorking = rexSpeakingNow || isBuildingRef.current;
+
+      // Any non-echo user utterance of 2+ words (or any explicit stop/termination phrase) barges in naturally!
+      const isNaturalUserBargeIn = !isEcho && (isStop || isBuildTermination || spokenWordCount >= 2);
 
       // ── BARGE-IN (Interim) ────────────────────────────────────────────────
-      // Stop/pause/wait/hold-on/cancel/continuation/redirect phrases immediately silence Rex and abort any active build!
+      // Whenever the user starts speaking in the middle of Rex's speech (without needing magic phrases),
+      // Rex immediately pauses speaking, hums a warm human "Mmm-hmm", and listens to the user's full sentence!
       if (!isFinal) {
-        if (rexTalkingOrWorking && isStop) {
+        if (rexTalkingOrWorking && isNaturalUserBargeIn) {
           muteAudio();
           clearPendingRex();
-          if (isBuildingRef.current) {
+          if (isBuildingRef.current && (isStop || isBuildTermination)) {
             lastBuildInterruptedTimeRef.current = Date.now();
             setSteps((prev) =>
               prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
             );
+            isBuildingRef.current = false;
           }
-          isBuildingRef.current = false;
           isSynthesizingVoiceRef.current = false;
           try { window.speechSynthesis.cancel(); } catch {}
           sendMessage({ type: "execution.interrupt", payload: {} });
           setOrbState("listening");
-          setNarration("Stopped — I'm listening! Go ahead.");
+          if (!isBareStop) {
+            triggerListeningHum();
+            setNarration("Mmm-hmm, I'm listening — go ahead...");
+          } else {
+            setNarration("Stopped — I'm listening! Go ahead.");
+          }
         }
         return; // wait for the final transcript to act on the complete sentence
       }
 
       // ── FINAL transcript ──────────────────────────────────────────────────
-      // 1. Explicit user stop, silence, build termination, withdrawal, or continuation
-      if (isStop) {
+      // 1. Explicit or semantic stop, silence, build termination, withdrawal, or conversational barge-in
+      if (isStop || isBuildTermination || (rexSpeakingNow && isNaturalUserBargeIn)) {
         muteAudio();
         clearPendingRex();
-        if (isBuildingRef.current) {
+        if (isBuildingRef.current && (isStop || isBuildTermination)) {
           lastBuildInterruptedTimeRef.current = Date.now();
           setSteps((prev) =>
             prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
           );
+          isBuildingRef.current = false;
         }
-        isBuildingRef.current = false;
         isSynthesizingVoiceRef.current = false;
         try { window.speechSynthesis.cancel(); } catch {}
         sendMessage({ type: "execution.interrupt", payload: {} });
 
         // If the user only said a bare silence command ("Stop Rex", "Pause Rex", "Stop", "Shut up")
         // AND no build was being terminated, keep Rex completely quiet and listening!
-        // If a build WAS running or they spoke a build termination sentence ("Never mind, stop building it..."),
+        // If a build WAS running or they spoke a build termination sentence ("Hey Rex, I think I don't want to build this application anymore. Can you please stop running it?"),
         // fall through so Rex confirms: "Okay <username>, I have terminated the building process just as you requested."
         if (isBareStop && !wasBuildingRecently && !isBuildTermination) {
           setOrbState("listening");
@@ -1592,29 +1620,19 @@ export default function App() {
         }
       }
 
-      // 2. Suppress acoustic spill while Rex is talking or synthesizing voice (unless user just interrupted above)
-      if (
-        (audioIsPlaying || isPlayingRef.current || speakingRef.current || wasPlayingRef.current || isSynthesizingVoiceRef.current) &&
-        !isStop
-      ) {
-        console.debug("[voice] Suppressing transcript received while Rex was speaking (acoustic spill):", effectiveRaw);
+      // 2. Contiguous self-echo check: Did the mic pick up Rex's own speech?
+      if (isEcho) {
+        console.debug("[voice] Suppressing self-echo transcript matching Rex's recent speech:", effectiveRaw);
         setTranscript("");
         return;
       }
 
-      // 3. Suppress acoustic spill in the short post-speech hardware drain window (380ms)
+      // 3. Suppress single-word noise fragments in the 380ms post-speech hardware drain window
       const now = Date.now();
       const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
       const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(effectiveRaw);
-      if (timeSinceRexSpoke < 380 && !hasExplicitWake && !isStop) {
-        console.debug("[voice] Suppressing transcript received in echo cooldown:", effectiveRaw);
-        setTranscript("");
-        return;
-      }
-
-      // 4. Contiguous self-echo check: Did the mic pick up Rex's own speech?
-      if (!isStop && checkIsSelfEcho(effectiveRaw, recentAiSpeechRef.current)) {
-        console.debug("[voice] Suppressing self-echo transcript matching Rex's recent speech:", effectiveRaw);
+      if (timeSinceRexSpoke < 380 && !hasExplicitWake && !isStop && !isBuildTermination && spokenWordCount < 2) {
+        console.debug("[voice] Suppressing 1-word fragment in echo cooldown:", effectiveRaw);
         setTranscript("");
         return;
       }
@@ -1630,7 +1648,7 @@ export default function App() {
       const cleanText = normalizeSpokenTranscript(effectiveRaw, { isInterim: false });
 
       // Check lightweight client fast-path for simple greetings or common commands (<10ms instant response)
-      const fastResult = !wasBuildingRecently ? checkClientFastPath(cleanText, userProfile.username) : null;
+      const fastResult = !wasBuildingRecently && !isBuildTermination ? checkClientFastPath(cleanText, userProfile.username) : null;
       if (fastResult) {
         if (fastResult.action === "preview") {
           setActiveRightTab("preview");
@@ -1667,7 +1685,7 @@ export default function App() {
       sendMessage({ type: "text.input", payload: { text: cleanText } });
       setTranscript("");
     },
-    [sendMessage, muteAudio, unmuteAudio, clearPendingRex, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, userProfile.username, audioIsPlaying]
+    [sendMessage, muteAudio, unmuteAudio, clearPendingRex, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, triggerListeningHum, userProfile.username, audioIsPlaying]
   );
 
   const handleActivated = useCallback(() => {
@@ -1683,6 +1701,17 @@ export default function App() {
     setNarration("Say 'Rex' to start, or click the orb");
   }, []);
 
+  const handleBackchannel = useCallback(
+    (reason: "barge_in" | "listening_hum") => {
+      triggerListeningHum();
+      if (reason === "barge_in") {
+        setOrbState("listening");
+        setNarration("Mmm-hmm, I'm listening — go ahead...");
+      }
+    },
+    [triggerListeningHum]
+  );
+
   const {
     mode: voiceMode,
     audioLevel,
@@ -1694,6 +1723,8 @@ export default function App() {
     onActivated: handleActivated,
     onDeactivated: handleDeactivated,
     onInterrupt: handleInterruptVoice,
+    onBackchannel: handleBackchannel,
+    isSelfEcho: handleCheckSelfEcho,
     isAiSpeaking:
       audioIsPlaying ||
       isPlayingRef.current ||

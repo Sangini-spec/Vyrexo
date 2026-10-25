@@ -500,33 +500,93 @@ export function isBareSilenceCommand(rawText: string): boolean {
   );
 }
 
-export function isBuildTerminationCommand(rawText: string, isCurrentlyBuilding = false): boolean {
-  if (!rawText) return false;
-  const cleaned = rawText
+export interface WholeSentenceSemanticAnalysis {
+  intent: "TERMINATE_BUILD" | "PAUSE_OR_SILENCE" | "GUIDANCE_OR_CONVERSATION" | "EXECUTE_BUILD";
+  isBuildTermination: boolean;
+  isGuidanceOrQuestion: boolean;
+  isPauseOrSilence: boolean;
+  isAffirmativeBuildCommand: boolean;
+  reasoning: string;
+}
+
+/**
+ * Evaluates a single sentence or clause for negated desire, mind-change, or cessation
+ * directed at building, running, executing, or continuing a software project.
+ * Recognizes natural, indirect human expressions without relying on rigid phrase templates, e.g.:
+ * - "Hey Rex, I think I don't want to build this application anymore. Can you please stop running it?"
+ * - "Actually I changed my mind about making this project, let's drop it."
+ * - "We don't need this app built right now, you can stop."
+ */
+function isSentenceSemanticBuildTermination(sentence: string, isCurrentlyBuilding = false): boolean {
+  const s = sentence
     .trim()
     .toLowerCase()
     .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
     .replace(/[.!?,;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (!cleaned) return false;
+  if (!s) return false;
 
-  // Explicit build/project termination phrases (always recognized even right after a build was interrupted)
-  const explicitBuildStop =
-    /\b(stop\s+(building|coding|making|creating|developing|scaffolding|the\s+build|the\s+building(\s+process)?)|terminate\s+(the\s+)?(build|building(\s+process)?|project|app|application)|abort\s+(the\s+)?(build|building|project|app|application)|cancel\s+(the\s+|that\s+|this\s+|my\s+)?(build|building|project|app|application|request)|withdraw\s+(the\s+|that\s+|this\s+|my\s+)?(build|request|project|app|application)|don'?t\s+(build|make|create|develop|code|work\s+on)\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+app|this\s+application|this\s+project|any\s+app|any\s+project)|do\s+not\s+(build|make|create|develop|code|work\s+on)\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+app|this\s+application|this\s+project)|i\s+don'?t\s+want\s+(you\s+)?to\s+(build|work\s+on|make|create|continue)|i\s+do\s+not\s+want\s+(you\s+)?to\s+(build|work\s+on|make|create|continue)|stop\s+working\s+on\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+application|this\s+project)|quit\s+(building|working\s+on)|never\s*mind\s+stop|never\s*mind\s+don'?t\s+build)\b/i.test(
-      cleaned
+  // Never misclassify "I don't know how to build..." or "I don't like the UI, change it..." as build termination
+  if (
+    /\b(don'?t|do\s+not|doesn'?t)\s+(know|understand|see)\s+how\s+to\s+(build|make|create|code|develop|run|start)\b/i.test(s) ||
+    /\b(don'?t|do\s+not)\s+like\s+the\s+(ui|design|theme|color|colors|layout|style|look)\b/i.test(s)
+  ) {
+    return false;
+  }
+
+  // 1. Negated desire / desistance / mind-change + build/run/project/app target anywhere in the sentence
+  const hasNegativeDesireOrMindChange =
+    /\b((?:don'?t|do\s+not|no\s+longer|not)\s+(?:really\s+|think\s+i\s+)?(?:want|wish|need|feel\s+like|care|intend|plan|like)\s+(?:you\s+)?(?:to\s+)?|changed\s+(?:my|our)\s+mind|having\s+second\s+thoughts|on\s+second\s+thought|decided\s+(?:not\s+to|against)|rather\s+not|prefer\s+not\s+to|let'?s\s+not|let\s+us\s+not|we\s+shouldn'?t|we\s+should\s+not|you\s+don'?t\s+(?:need|have)\s+to|no\s+need\s+to|don'?t\s+bother|not\s+interested\s+in)\b/i.test(
+      s
     );
 
-  if (explicitBuildStop) {
+  const hasBuildOrExecutionTarget =
+    /\b(build|building|make|making|create|creating|develop|developing|code|coding|generate|generating|scaffold|scaffolding|run|running|work\s+on|working\s+on|execute|executing|continue|continuing|proceed|proceeding|app|application|project|software|website|web\s*app|platform|store|system|agents|process|it\s+anymore|this\s+anymore|that\s+anymore)\b/i.test(
+      s
+    );
+
+  if (hasNegativeDesireOrMindChange && hasBuildOrExecutionTarget) {
     return true;
   }
 
-  // If a build is actively running right now, shorter cancellation/stop commands also terminate the build
+  // 2. Direct or polite cessation verb ("can you please stop running it", "please halt the build", "let's drop this project")
+  const hasCessationVerb =
+    /\b(stop|halt|cease|terminate|abort|cancel|drop|scrap|abandon|discard|withdraw|quit|kill|end|shut\s+down|leave)\b/i.test(
+      s
+    );
+
+  const hasProcessOrArtifactObject =
+    /\b(building|the\s+build|this\s+build|running|running\s+it|running\s+this|running\s+that|running\s+the|working|working\s+on|coding|making|creating|developing|generating|scaffolding|executing|the\s+process|this\s+process|the\s+agents|the\s+project|this\s+project|that\s+project|the\s+app|this\s+app|that\s+app|the\s+application|this\s+application|that\s+application|the\s+software|this\s+software|the\s+website|this\s+website|the\s+request|this\s+request|my\s+request|what\s+you('re|\s+are)\s+doing|(?:stop|halt|terminate|abort|cancel|drop|scrap|quit)\s+(?:it|this|that)\b)/i.test(
+      s
+    );
+
+  if (
+    hasCessationVerb &&
+    hasProcessOrArtifactObject &&
+    !/\b(stop\s+(?:by|at|for\s+a\s+moment\s+to\s+explain)|without\s+stopping|never\s+stop|don'?t\s+stop|do\s+not\s+stop)\b/i.test(s)
+  ) {
+    return true;
+  }
+
+  // 3. Direct negative imperative ("don't build this", "do not run it anymore", "no need to build it")
+  if (
+    /\b(?:don'?t|do\s+not|please\s+don'?t|please\s+do\s+not|never\s*mind\s+don'?t)\s+(?:build|make|create|develop|code|scaffold|generate|run|continue|work\s+on)\s+(?:it|this|that|the|a|an|any|my|our)\b/i.test(
+      s
+    ) ||
+    /\b(?:build|building|running|working\s+on|making|creating)\s+(?:this|that|it|the\s+app|the\s+application|the\s+project)\s+anymore\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+
+  // 4. When a build is actively running right now, any polite/conversational request to stop, wait, cancel, or do something else
   if (isCurrentlyBuilding) {
     if (
-      isBareSilenceCommand(cleaned) ||
-      /^(?:(?:hey\s+rex|rex|ok|okay|please|no)\s+)*(never\s*mind|nevermind|cancel|cancel\s+it|cancel\s+that|abort|terminate|withdraw|forget\s+it|forget\s+that|scratch\s+that|stop\s+it|stop\s+that)(?:\s+rex)?$/i.test(
-        cleaned
+      isBareSilenceCommand(s) ||
+      /\b(can\s+you\s+(?:please\s+)?stop|could\s+you\s+(?:please\s+)?stop|please\s+stop|stop\s+(?:it|this|that|now|please|rex)|never\s*mind|nevermind|forget\s+(?:it|that|this)|scratch\s+that|cancel|abort|terminate|withdraw|let'?s\s+do\s+something\s+else|i\s+want\s+to\s+do\s+something\s+else|not\s+anymore)\b/i.test(
+        s
       )
     ) {
       return true;
@@ -536,11 +596,101 @@ export function isBuildTerminationCommand(rawText: string, isCurrentlyBuilding =
   return false;
 }
 
+/**
+ * Evaluates whether a sentence is asking for guidance, mentorship, how-to steps,
+ * conceptual explanation, or expressing lack of knowledge (e.g.:
+ * - "You know, I don't know how to build this software."
+ * - "Can you guide me first?"
+ * - "How can we build this specific idea end-to-end?"
+ * - "What is the best way to build an e-commerce app?")
+ */
+function isSentenceGuidanceOrConceptualInquiry(sentence: string): boolean {
+  const raw = sentence.trim();
+  if (!raw) return false;
+  const hasQuestionMark = raw.includes("?");
+  const s = raw.toLowerCase().replace(/\s+/g, " ").trim();
+
+  // 1. Epistemic / lack-of-knowledge / learning statements containing "how to build/create/make..."
+  if (
+    /\b(don'?t\s+know\s+how|do\s+not\s+know\s+how|not\s+sure\s+how|unsure\s+how|no\s+idea\s+how|learn\s+how\s+to|learning\s+how\s+to|understand\s+how\s+to|figure\s+out\s+how\s+to|curious\s+how\s+to|wondering\s+how\s+(?:to|we|i)|know\s+how\s+to\s+(?:build|create|make|develop|code|architect|design))\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+
+  // 2. Mentorship, guidance, roadmap, walkthrough, or advice requests
+  if (
+    /\b(guide\s+me|can\s+you\s+guide|could\s+you\s+guide|walk\s+me\s+through|talk\s+me\s+through|teach\s+me|coach\s+me|mentor\s+me|advise\s+me|help\s+me\s+(?:understand|learn|plan|design|think\s+through|figure\s+out)|give\s+me\s+(?:a\s+|some\s+)?(?:guidance|guide|roadmap|step[\s-]*by[\s-]*step|overview|explanation|advice|suggestion|suggestions|ideas|strategy|plan\s+first)|explain\s+(?:how|what|why|the\s+process|the\s+steps|the\s+architecture|to\s+me)|before\s+(?:we|i|you)\s+(?:start\s+)?(?:build|building|code|coding|make|making|create|creating))\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+
+  // 3. Interrogative "How / What / Why / Which / Where / When" questions about building or software
+  if (
+    /\b(how\s+(?:can|could|should|would|do|does|did|will|might|to)\s+(?:we|i|you|one|someone|people|developers?|a\s+team)\s+(?:go\s+about\s+)?(?:build|building|create|creating|make|making|develop|developing|code|coding|architect|architecting|design|designing|implement|implementing|structure|approach|start))\b/i.test(
+      s
+    ) ||
+    /\b(what\s+(?:is|are|would\s+be)\s+the\s+(?:best\s+|right\s+|recommended\s+|proper\s+)?(?:way|ways|steps|process|approach|architecture|stack|tech\s+stack|tools|roadmap|strategy|method)\s+(?:to|for)\s+(?:build|building|create|creating|make|making|develop|developing))\b/i.test(
+      s
+    ) ||
+    /\b(what\s+(?:do\s+i|do\s+we|would\s+i|would\s+we|does\s+it)\s+(?:need|take|require)\s+to\s+(?:build|create|make|develop))\b/i.test(
+      s
+    ) ||
+    /\b(why\s+(?:did|do|are|would|should)\s+(?:you|we|i)\s+(?:build|building|make|making|create|creating))\b/i.test(
+      s
+    ) ||
+    /\b(is\s+it\s+(?:possible|hard|difficult|easy|better|feasible)\s+to\s+(?:build|create|make|develop))\b/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+
+  // 4. Conditional or hypothetical questions ending in "?"
+  if (
+    hasQuestionMark &&
+    /^(?:if\s+(?:i|we|you)|suppose\s+(?:i|we)|what\s+if\s+(?:i|we)|how\s+|what\s+|why\s+|when\s+|where\s+|which\s+|who\s+|is\s+there\s+|are\s+there\s+|do\s+you\s+(?:think|know|have|recommend|suggest))/i.test(
+      s
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isBuildTerminationCommand(rawText: string, isCurrentlyBuilding = false): boolean {
+  if (!rawText || typeof rawText !== "string") return false;
+  const fullNormalized = rawText.trim();
+  if (!fullNormalized) return false;
+
+  // Check whole utterance as well as each individual sentence
+  if (isSentenceSemanticBuildTermination(fullNormalized, isCurrentlyBuilding)) {
+    return true;
+  }
+
+  const sentences = fullNormalized
+    .split(/[.!?;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const sentence of sentences) {
+    if (isSentenceSemanticBuildTermination(sentence, isCurrentlyBuilding)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 const INTERRUPT_EXTRACTION_REGEX =
-  /\b((?:(?:hey|hi|hello|ok|okay|yo)\s+rex\s*,?\s*)?(?:stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|wait\s+rex|rex\s+wait|hold\s+on\s+rex|rex\s+hold\s+on|shut\s+up(?:\s+rex)?|be\s+quiet(?:\s+rex)?|stop\s+building|stop\s+working|stop\s+talking|stop\s+speaking|stop\s+it|stop\s+now|terminate\s+the\s+build|cancel\s+the\s+build|cancel\s+that|withdraw\s+that|never\s*mind|nevermind|don'?t\s+build|do\s+not\s+build|i\s+don'?t\s+want\s+to\s+(?:work\s+on|build)|wait\s+(?:a\s+(?:second|minute|moment)|i\s+have\s+(?:something|more)|let\s+me)|hold\s+on\s+(?:a\s+(?:second|minute|moment)|i\s+have|let\s+me)|hang\s+on|i\s+have\s+something\s+else\s+to\s+(?:add|say)|let\s+me\s+(?:add|finish|speak|interrupt)|listen\s+to\s+me|hear\s+me\s+out|but\s+i\s+(?:think|want|feel|need|would|don'?t|do\s+not|mean|meant|have)|but\s+(?:what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(?:i\s+(?:think|want|need|don'?t|meant)|let'?s|can\s+you|wait|stop|rex)|instead\s+(?:of\s+that|let'?s|i\s+want|can\s+you)|on\s+second\s+thought|change\s+of\s+plans|no\s+(?:rex|wait|stop|don'?t|i\s+(?:want|don'?t|meant))))\b/i;
+  /\b((?:(?:hey|hi|hello|ok|okay|yo)\s+rex\s*,?\s*)?(?:stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|wait\s+rex|rex\s+wait|hold\s+on\s+rex|rex\s+hold\s+on|shut\s+up(?:\s+rex)?|be\s+quiet(?:\s+rex)?|stop\s+building|stop\s+running|stop\s+working|stop\s+talking|stop\s+speaking|stop\s+it|stop\s+now|can\s+you\s+(?:please\s+)?stop|please\s+stop|terminate\s+the\s+build|cancel\s+the\s+build|cancel\s+that|withdraw\s+that|never\s*mind|nevermind|don'?t\s+build|do\s+not\s+build|i\s+(?:think\s+i\s+)?don'?t\s+want\s+to\s+(?:work\s+on|build|make|create|continue)|wait\s+(?:a\s+(?:second|minute|moment)|i\s+have\s+(?:something|more)|let\s+me)|hold\s+on\s+(?:a\s+(?:second|minute|moment)|i\s+have|let\s+me)|hang\s+on|i\s+have\s+something\s+else\s+to\s+(?:add|say)|let\s+me\s+(?:add|finish|speak|interrupt)|listen\s+to\s+me|hear\s+me\s+out|i\s+get\s+your\s+point|but\s+i\s+(?:think|want|feel|need|would|don'?t|do\s+not|mean|meant|have|get)|but\s+(?:what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(?:i\s+(?:think|want|need|don'?t|meant|changed)|let'?s|can\s+you|wait|stop|rex)|instead\s+(?:of\s+that|let'?s|i\s+want|can\s+you)|on\s+second\s+thought|change\s+of\s+plans|no\s+(?:rex|wait|stop|don'?t|i\s+(?:want|don'?t|meant))))\b/i;
 
 const TAIL_BARE_STOP_REGEX =
-  /\b((?:(?:hey|hi|hello|ok|okay|please)\s+)?(?:rex\s+)?(?:stop|pause|wait|hold\s+on|hang\s+on|quiet|be\s+quiet|shut\s+up|hush|shush|silence|enough|cancel|abort|withdraw|never\s*mind|nevermind)(?:\s+(?:rex|please|now|it))?)\s*$/i;
+  /\b((?:(?:hey|hi|hello|ok|okay|please)\s+)?(?:rex\s+)?(?:stop|pause|wait|hold\s+on|hang\s+on|quiet|be\s+quiet|shut\s+up|hush|shush|silence|enough|cancel|abort|withdraw|never\s*mind|nevermind)(?:\s+(?:rex|please|now|it|running\s+it))?)\s*$/i;
 
 export function extractUserInterruptFromBuffer(rawTranscript: string): {
   matched: boolean;
@@ -555,9 +705,12 @@ export function extractUserInterruptFromBuffer(rawTranscript: string): {
     .trim()
     .replace(/\b(lyrics|lex|wrecks|rax|alex)\b/gi, "Rex");
 
-  // 1. Check if the entire string is already a bare silence command
+  // 1. Check if the entire string is already a bare silence command or semantic build termination
   if (isBareSilenceCommand(normalized)) {
     return { matched: true, extractedText: normalized, isBareSilence: true };
+  }
+  if (isBuildTerminationCommand(normalized, true)) {
+    return { matched: true, extractedText: normalized, isBareSilence: false };
   }
 
   // 2. Check for multi-word interrupt, build-termination, continuation, or redirect phrase anywhere in the buffer
@@ -586,16 +739,35 @@ export function extractUserInterruptFromBuffer(rawTranscript: string): {
 }
 
 /**
- * Unified Build & Implementation Intent Detector:
- * Shared between the client WebSocket orchestrator (`useWebSocket.ts`) and `/api/chat`
- * so both layers agree 100% on when to deploy the 6 AI agents and route to Claude Sonnet 5.5.
+ * Whole-Sentence Semantic Analyzer:
+ * Inspects every sentence and punctuation mark in the user's message to determine whether the user is:
+ * 1. Terminating or withdrawing an active/recent software build (`TERMINATE_BUILD`)
+ * 2. Asking Rex to pause/hold on (`PAUSE_OR_SILENCE`)
+ * 3. Asking for guidance, mentorship, how-to steps, or general conversation (`GUIDANCE_OR_CONVERSATION`)
+ * 4. Issuing an affirmative imperative command to build/create/modify software right now (`EXECUTE_BUILD`)
  */
-export function isBuildOrImplementationIntent(
+export function analyzeWholeSentenceSemantics(
   rawText: string,
-  history: Array<{ role: string; content: string }> = [],
-  hasExistingProject = false
-): boolean {
-  if (!rawText || typeof rawText !== "string") return false;
+  options?: {
+    isCurrentlyBuilding?: boolean;
+    hasExistingProject?: boolean;
+    history?: Array<{ role: string; content: string }>;
+  }
+): WholeSentenceSemanticAnalysis {
+  const isCurrentlyBuilding = Boolean(options?.isCurrentlyBuilding);
+  const hasExistingProject = Boolean(options?.hasExistingProject);
+  const history = options?.history || [];
+
+  if (!rawText || typeof rawText !== "string" || !rawText.trim()) {
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "Empty input",
+    };
+  }
 
   const cleaned = rawText
     .trim()
@@ -606,55 +778,147 @@ export function isBuildOrImplementationIntent(
     .replace(/\bto\s+do\s+app/gi, "todo app");
 
   const trimmed = cleaned.trim().toLowerCase();
-  if (!trimmed) return false;
 
-  // 0. HARD EXCLUSION: Interruption, build termination, withdrawal, cancellation, or "wait I have something else to add"
-  if (
-    isBareSilenceCommand(trimmed) ||
-    isBuildTerminationCommand(trimmed, true) ||
-    /^(stop|wait|hold\s+on|hang\s+on|pause|cancel|never\s*mind|nevermind|quiet|enough|hush|shush|shut\s+up)\b/i.test(trimmed) ||
-    /\b(stop\s+building|stop\s+working\s+on|don'?t\s+build|do\s+not\s+build|don'?t\s+want\s+to\s+(work\s+on|build)|do\s+not\s+want\s+to\s+(work\s+on|build)|terminate\s+(the\s+)?(build|building)|cancel\s+(the\s+|that\s+|this\s+|my\s+)?(build|request|project|app|application)|withdraw\s+(the\s+|that\s+|this\s+|my\s+)?request|wait\s+i\s+have\s+something\s+else|hold\s+on\s+i\s+have|but\s+i\s+think\s+people\s+can\s+interrupt)\b/i.test(
-      trimmed
-    )
-  ) {
-    return false;
+  // 1. Check bare silence / pause
+  if (isBareSilenceCommand(trimmed) && !isCurrentlyBuilding) {
+    return {
+      intent: "PAUSE_OR_SILENCE",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: true,
+      isAffirmativeBuildCommand: false,
+      reasoning: "User issued a direct pause or silence request.",
+    };
   }
 
-  // 0.5 HARD EXCLUSION: Personal/real-life shopping advice, buying suggestions, gift ideas, or everyday "make me feel/happy" idioms
+  // 2. Check whole-sentence semantic build termination (direct or indirect)
+  if (isBuildTerminationCommand(cleaned, isCurrentlyBuilding)) {
+    return {
+      intent: "TERMINATE_BUILD",
+      isBuildTermination: true,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "Whole-sentence semantics indicate the user wants to stop or cancel building/running the application.",
+    };
+  }
+
+  // 3. Split into individual sentences (preserving question marks for interrogative analysis)
+  const rawSentences = cleaned
+    .split(/(?<=[.!?;\n])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const sentences = rawSentences.length > 0 ? rawSentences : [cleaned];
+
+  // Check if any sentence is asking for guidance, mentorship, how-to explanation, or expressing "I don't know how to build..."
+  const guidanceSentences = sentences.filter((s) => isSentenceGuidanceOrConceptualInquiry(s));
+  const nonGuidanceNonNegatedSentences = sentences.filter(
+    (s) =>
+      !isSentenceGuidanceOrConceptualInquiry(s) &&
+      !isSentenceSemanticBuildTermination(s, true)
+  );
+
+  // If the user is asking for guidance/coaching/how-to (e.g. "You know, I don't know how to build this software. Can you guide me first? How can we build this specific idea end-to-end?")
+  // and has NOT explicitly commanded "start building the code right now", classify as GUIDANCE_OR_CONVERSATION!
+  const hasExplicitImmediateOverride =
+    /\b(start\s+building\s+(?:it\s+)?right\s+now|don'?t\s+just\s+(?:explain|guide)\s*,?\s*build\s+it|generate\s+the\s+code\s+right\s+now)\b/i.test(
+      trimmed
+    );
+
+  if (guidanceSentences.length > 0 && nonGuidanceNonNegatedSentences.length === 0 && !hasExplicitImmediateOverride) {
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "Every sentence in the utterance is an epistemic statement or request for guidance/explanation rather than an execution command.",
+    };
+  }
+
+  if (
+    guidanceSentences.length > 0 &&
+    /\b(guide\s+me(\s+first)?|teach\s+me(\s+first)?|explain\s+(?:to\s+me\s+)?first|walk\s+me\s+through\s+first|before\s+we\s+build|don'?t\s+know\s+how\s+to\s+build|how\s+can\s+we\s+build|how\s+do\s+(?:i|we)\s+build|how\s+to\s+build)\b/i.test(
+      trimmed
+    ) &&
+    !hasExplicitImmediateOverride
+  ) {
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "The utterance asks for guidance or 'how to build' knowledge first rather than requesting immediate code generation.",
+    };
+  }
+
+  // Evaluate only the remaining affirmative, non-guidance, non-negated sentences for build execution intent
+  const candidateBuildText = nonGuidanceNonNegatedSentences.join(" ").trim().toLowerCase();
+  if (!candidateBuildText) {
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "No affirmative imperative build sentences found.",
+    };
+  }
+
+  // Personal/real-life shopping advice, buying suggestions, gift ideas, or everyday "make me feel/happy" idioms
   const hasExplicitSoftwareTarget =
     /\b(app|application|web\s*app|website|platform|dashboard|software|frontend|backend|ui|codebase|repo|repository|react|nextjs|next\.js|typescript|component|components|ecommerce\s+(app|application|site|website|platform|store)|shopping\s+(app|application|site|website|platform))\b/i.test(
-      trimmed
+      candidateBuildText
     );
 
   if (!hasExplicitSoftwareTarget) {
     const isPersonalShoppingOrLifestyleAdvice =
       /\b(go\s+(to\s+|for\s+)?shopping|going\s+(to\s+|for\s+)?shopping|want\s+to\s+go\s+(to\s+|for\s+)?shopping|what\s+(new\s+)?(thing|things|item|items|stuff|gift|gifts|present|clothes|shoes|gadget)?\s*(should|can|could)\s+i\s+(buy|get|shop|purchase)|what\s+should\s+i\s+buy|what\s+to\s+buy\s+today|buy\s+today|not\s+very\s+expensive|make\s+me\s+(feel\s+)?(happy|good|better|smile|laugh)|do\s+you\s+have\s+any\s+ideas\s+what|give\s+(me\s+)?a\s+short\s+answer|give\s+me\s+(a\s+|some\s+)?suggestion)\b/i.test(
-        trimmed
+        candidateBuildText
       );
     if (isPersonalShoppingOrLifestyleAdvice) {
-      return false;
+      return {
+        intent: "GUIDANCE_OR_CONVERSATION",
+        isBuildTermination: false,
+        isGuidanceOrQuestion: true,
+        isPauseOrSilence: false,
+        isAffirmativeBuildCommand: false,
+        reasoning: "Personal shopping or lifestyle suggestion inquiry.",
+      };
     }
   }
 
-  // Strip everyday non-coding "make ..." idioms before testing build regexes so "make me feel happy" or "make sure" never masquerades as "make [software]"
-  const normalizedForBuildCheck = trimmed
+  // Strip everyday non-coding "make ..." idioms and epistemic "how to build" phrases before testing build regexes
+  const normalizedForBuildCheck = candidateBuildText
     .replace(
       /\bmake\s+(me\s+)?(feel|happy|smile|laugh|cry|better|sense|sure|a\s+decision|a\s+choice|up\s+my\s+mind|it\s+short|it\s+brief|it\s+quick|friends|money|dinner|lunch|breakfast|coffee|tea)\b/gi,
       "feel"
     )
-    .replace(/\b(go|going)\s+(to\s+|for\s+)?shopping\b/gi, "browse items");
+    .replace(/\b(go|going)\s+(to\s+|for\s+)?shopping\b/gi, "browse items")
+    .replace(
+      /\b(?:how\s+(?:to|can\s+we|can\s+i|do\s+we|do\s+i|should\s+we|would\s+we)|don'?t\s+know\s+how\s+to|not\s+sure\s+how\s+to|learn\s+to|guide\s+me\s+(?:on|to)|steps\s+to|way\s+to)\s+(?:build|create|make|develop|code|architect|design)\b/gi,
+      "understand"
+    );
 
-  // 1. Exclude explicit non-build commands: IDE launch, browser search, terminal unit tests, or pure preview switch
+  // Exclude explicit non-build commands: IDE launch, browser search, terminal unit tests, or pure preview switch
   if (
-    /\b(open\s+(this\s+|the\s+)?(project|workspace|folder|files)?\s*in\s+(vs\s*code|vscode|cursor|windsurf))\b/i.test(trimmed) ||
-    /\b(open\s+(my\s+|the\s+)?browser\s+(and\s+|to\s+)?(search|look|inspect|browse|find)|browse\s+the\s+web|search\s+the\s+web)\b/i.test(trimmed) ||
-    /\b(bun\s+test|run\s+(the\s+)?(unit|playwright|e2e|end\s*to\s*end|acceptance)\s+tests?|test\s+the\s+(entire\s+)?(app|application|project)\s*(end\s*to\s*end|e2e)?)\b/i.test(trimmed) ||
-    (/^(show|open|view|switch\s+to|launch|resume)\s+(that\s+|this\s+|it\s+|the\s+)?(in\s+)?(the\s+)?preview(\s+tab)?$/i.test(trimmed))
+    /\b(open\s+(this\s+|the\s+)?(project|workspace|folder|files)?\s*in\s+(vs\s*code|vscode|cursor|windsurf))\b/i.test(candidateBuildText) ||
+    /\b(open\s+(my\s+|the\s+)?browser\s+(and\s+|to\s+)?(search|look|inspect|browse|find)|browse\s+the\s+web|search\s+the\s+web)\b/i.test(candidateBuildText) ||
+    /\b(bun\s+test|run\s+(the\s+)?(unit|playwright|e2e|end\s*to\s*end|acceptance)\s+tests?|test\s+the\s+(entire\s+)?(app|application|project)\s*(end\s*to\s*end|e2e)?)\b/i.test(candidateBuildText) ||
+    (/^(show|open|view|switch\s+to|launch|resume)\s+(that\s+|this\s+|it\s+|the\s+)?(in\s+)?(the\s+)?preview(\s+tab)?$/i.test(candidateBuildText))
   ) {
-    return false;
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "IDE, browser, test, or preview navigation command.",
+    };
   }
 
-  // 2. Exclude pure meta/explanation/suggestion questions that do NOT contain an imperative request to build software
+  // Exclude pure meta/explanation/suggestion questions that do NOT contain an imperative request to build software
   const hasBuildDirective =
     /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|start\s+working|work\s+on|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)\s+([a-z0-9_-]+\s+){0,4}(app|application|project|website|web\s*app|platform|dashboard|store|shop|ecommerce|e-commerce|tool|system|calculator|todo|tracker|game|page)|make\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo|website|platform|dashboard|ecommerce\s+app|shopping\s+app)|develop\s+(a|an|the|this|that|it|my|our|new)|scaffold\s+(a|an|the|this|that|it|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
       normalizedForBuildCheck
@@ -662,37 +926,37 @@ export function isBuildOrImplementationIntent(
 
   const isPureQuestion =
     !hasBuildDirective &&
-    (/^(check if|why\s+|how\s+(does|do|is|are|did|was)|what\s+(is|are|does|did|was|were|should|can|could)|can\s+you\s+(explain|suggest|recommend|tell|give)|could\s+you\s+(explain|suggest|recommend|tell|give)|explain\s+|clarify\s+|tell\s+me\s+about|who\s+are\s+you|what's\s+your\s+name|what\s+can\s+you\s+do|do\s+you\s+have\s+any\s+(ideas|suggestions|recommendations))/i.test(
-      trimmed
+    (/^(check if|why\s+|how\s+(does|do|is|are|did|was|can|could|should|would)|what\s+(is|are|does|did|was|were|should|can|could)|can\s+you\s+(explain|suggest|recommend|tell|give|guide|help\s+me\s+understand)|could\s+you\s+(explain|suggest|recommend|tell|give|guide)|explain\s+|clarify\s+|tell\s+me\s+about|who\s+are\s+you|what's\s+your\s+name|what\s+can\s+you\s+do|do\s+you\s+have\s+any\s+(ideas|suggestions|recommendations))/i.test(
+      candidateBuildText
     ) ||
       /\b(why\s+is\s+it\s+not\s+building|why\s+are\s+you|what\s+do\s+you\s+think|what\s+is\s+your\s+take|what's\s+your\s+opinion|are\s+you\s+stuck|did\s+you\s+freeze|look\s+at\s+the\s+screenshot|what\s+should\s+i\s+buy|give\s+me\s+a\s+suggestion)\b/i.test(
-        trimmed
+        candidateBuildText
       ));
 
   if (isPureQuestion) {
-    return false;
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "Pure question or inquiry without an affirmative build command.",
+    };
   }
 
-  // 3. Direct Build, Create, Scaffold, "Start Working On", UI/Theme Redesign, or Agent Deployment commands
+  // Direct Build, Create, Scaffold, "Start Working On", UI/Theme Redesign, or Agent Deployment commands
   const explicitBuildPatterns = [
-    // "start working on a project", "start working on the application", "work on a project", "let's work on this project"
     /\b(start\s+working(\s+on)?|begin\s+working(\s+on)?|get\s+to\s+work(\s+on)?|keep\s+working\s+on|continue\s+working\s+on|continue\s+building)\b/i,
     /\b(let('s|s)?|can\s+you|could\s+you|please|i\s+want\s+(you\s+)?to|we\s+should|you\s+should|time\s+to|ready\s+to|just|now)?\s*(work\s+on)\s+(a|an|the|this|that|my|our|it|new|some|another)?\s*([a-z0-9_-]+\s+)*(project|app|application|website|platform|system|tool|store|dashboard|todo|list|calculator|game|portal|service|idea)\b/i,
-    // "start building", "start coding", "start developing", "deploy the AI agents"
     /\b(start\s+(building|coding|developing|creating|making|implementing|scaffolding|execution|the\s+build|the\s+project|the\s+app|the\s+application|actual\s+building|the\s+actual\s+building))\b/i,
     /\b(deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|launch\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|get\s+the\s+(app|application|project)\s+ready)\b/i,
     /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building|we\s+should\s+start\s+building)\b/i,
     /\b(let('s|s)\s+build|start\s+to\s+build|now\s+build|just\s+build|please\s+build|go\s+ahead\s+and\s+(build|create|code|scaffold|implement))\b/i,
-    // Direct pronoun target for unambiguous coding verbs ("build it", "build this", "build that", "scaffold it", "code it")
     /\b(build|scaffold|code|develop|architect)\s+(it|this|that)\b/i,
-    // Verb followed within a few words by an explicit software/app/domain noun (e.g. "build a todo list", "make an ecommerce application", "create a shopping app")
     /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect|work\s+on)\s+(me\s+)?(a\s+|an\s+|the\s+|this\s+|that\s+|my\s+|our\s+|some\s+|another\s+|new\s+)?([a-z0-9_-]+\s+){0,6}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|online\s+store|ecommerce|e-commerce|shopping\s+app|shopping\s+website|shopping\s+platform|storefront|calculator|tracker|todo|to-do|task\s+list|checklist|board|kanban|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|landing\s+page|clone|bot|calendar|scheduler|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|wallet|portfolio|blog|cms|marketplace|booking\s+app|booking\s+system|quiz\s+app)\b/i,
-    // "build a store" / "build a shop" (only with build/create/develop/code/scaffold, NOT "go to shop")
     /\b(build|create|develop|code|scaffold)\s+(me\s+)?(a\s+|an\s+|the\s+|my\s+|our\s+|new\s+)?([a-z0-9_-]+\s+){0,4}(store|shop)\b/i,
-    // Imperative coding verb at start of utterance followed by a software target or article
     /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|construct|start\s+working|work\s+on)\s+(a|an|the|this|that|it|my|our|new|full|complete|modern|simple|basic|custom|interactive)\b/i,
     /^\s*(build|create|develop|code|scaffold|implement|construct)\s+(a|an|the|this|that|it|my|our|new)\b/i,
-    // Direct UI/theme/code modification & redesign commands (e.g. "I don't like the UI... can you use some other theme and elements and make the changes?")
     /\b(make\s+(the\s+|some\s+|these\s+|those\s+)?(changes|updates|edits|improvements|modifications)|apply\s+(the\s+|these\s+|those\s+)?(changes|updates)|implement\s+(the\s+|these\s+)?(changes|updates|features))\b/i,
     /\b(use\s+(some\s+|an?\s+)?(other|different|new|better|another|modern|light|dark|vibrant|colorful)\s+(theme|themes|color|colors|style|styles|layout|design|ui|elements?|components?))\b/i,
     /\b(don'?t\s+like\s+the\s+(ui|design|theme|color|colors|layout|look|style|buttons|components))\b/i,
@@ -703,10 +967,17 @@ export function isBuildOrImplementationIntent(
   ];
 
   if (explicitBuildPatterns.some((p) => p.test(normalizedForBuildCheck))) {
-    return true;
+    return {
+      intent: "EXECUTE_BUILD",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: true,
+      reasoning: "Affirmative imperative command to build or modify software.",
+    };
   }
 
-  // 4. Incremental edits when an active project exists in the session
+  // Incremental edits when an active project exists in the session
   if (
     hasExistingProject &&
     (/^\s*(?:(?:hey\s+rex|rex|please|just|now|can\s+you|could\s+you|i\s+want\s+you\s+to|let('s|s))\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|restyle|polish|integrate|support|iterate)\b/i.test(
@@ -716,21 +987,35 @@ export function isBuildOrImplementationIntent(
         normalizedForBuildCheck
       ))
   ) {
-    return true;
+    return {
+      intent: "EXECUTE_BUILD",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: true,
+      reasoning: "Incremental modification command on an active project.",
+    };
   }
 
-  // 5. Continuation / Agreement phrases ("yes build it", "let's build that", "go ahead", "start now", "do it")
+  // Continuation / Agreement phrases ("yes build it", "let's build that", "go ahead", "start now", "do it")
   const isDirectBuildAgreement =
     /\b(let('s|s)\s+build\s+(it|that|this)|build\s+(it|that|this)\s+now|just\s+build\s+(it|that|this)|build\s+that\s+idea|start\s+building\s+now|go\s+ahead\s+and\s+build|yes\s+(please\s+)?(build|start\s+building|create\s+it|code\s+it|do\s+it))\b/i.test(
       normalizedForBuildCheck
     );
   if (isDirectBuildAgreement) {
-    return true;
+    return {
+      intent: "EXECUTE_BUILD",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: false,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: true,
+      reasoning: "Explicit agreement to start building.",
+    };
   }
 
   const isShortAgreement =
     /^(yes|yeah|yep|sure|okay|ok|alright|go\s+ahead|let('s|s)\s+do\s+it|let('s|s)\s+go|do\s+it|proceed|start|start\s+now|make\s+it\s+happen|sounds\s+good|sounds\s+like\s+a\s+plan|yes\s+please|please\s+do)[\s.!]*$/i.test(
-      trimmed
+      candidateBuildText
     );
   if (isShortAgreement && history.length > 0) {
     const recentHistory = history
@@ -742,11 +1027,43 @@ export function isBuildOrImplementationIntent(
         recentHistory
       )
     ) {
-      return true;
+      return {
+        intent: "EXECUTE_BUILD",
+        isBuildTermination: false,
+        isGuidanceOrQuestion: false,
+        isPauseOrSilence: false,
+        isAffirmativeBuildCommand: true,
+        reasoning: "User agreed to a build proposal in recent conversation history.",
+      };
     }
   }
 
-  return false;
+  return {
+    intent: "GUIDANCE_OR_CONVERSATION",
+    isBuildTermination: false,
+    isGuidanceOrQuestion: true,
+    isPauseOrSilence: false,
+    isAffirmativeBuildCommand: false,
+    reasoning: "General conversation, discussion, or guidance request.",
+  };
+}
+
+/**
+ * Unified Build & Implementation Intent Detector:
+ * Shared between the client WebSocket orchestrator (`useWebSocket.ts`) and `/api/chat`
+ * so both layers agree 100% on when to deploy the 6 AI agents and route to Claude Sonnet 5.5.
+ */
+export function isBuildOrImplementationIntent(
+  rawText: string,
+  history: Array<{ role: string; content: string }> = [],
+  hasExistingProject = false
+): boolean {
+  const analysis = analyzeWholeSentenceSemantics(rawText, {
+    isCurrentlyBuilding: false,
+    hasExistingProject,
+    history,
+  });
+  return analysis.intent === "EXECUTE_BUILD" && analysis.isAffirmativeBuildCommand;
 }
 
 const TITLE_STOP_WORDS = new Set([

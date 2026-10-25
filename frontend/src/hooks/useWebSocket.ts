@@ -35,6 +35,7 @@ import {
   isBuildTerminationCommand,
   formatBuildTerminationMessage,
   isBareSilenceCommand,
+  analyzeWholeSentenceSemantics,
 } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -476,9 +477,19 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
 
         const lowerInput = effectiveText.toLowerCase().replace(/[.!?,;:]/g, " ").replace(/\s+/g, " ").trim();
 
-        // 1. Check for explicit build termination or mid-build cancellation
-        // e.g. "Never mind, stop building it. I don't want to work on this application."
-        if (isBuildTerminationCommand(effectiveText, wasBuildingNowOrRecently)) {
+        const hasProjectInThisSession = sessionHasProjectRef.current.has(requestSessionId);
+        const sentenceSemantics = analyzeWholeSentenceSemantics(effectiveText, {
+          isCurrentlyBuilding: wasBuildingNowOrRecently,
+          hasExistingProject: hasProjectInThisSession,
+          history: sessionHistory,
+        });
+
+        // 1. Check for explicit or whole-sentence semantic build termination / mid-build cancellation
+        // e.g. "Hey Rex, I think I don't want to build this application anymore. Can you please stop running it?"
+        if (
+          sentenceSemantics.isBuildTermination ||
+          isBuildTerminationCommand(effectiveText, wasBuildingNowOrRecently)
+        ) {
           lastBuildInterruptedAtRef.current[requestSessionId] = 0;
           activeBuildingSessionsRef.current.delete(requestSessionId);
           emit("agent.building.completed", {});
@@ -578,18 +589,74 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           return;
         }
 
-        // Unified build & implementation intent check (shared with /api/chat)
-        const hasProjectInThisSession = sessionHasProjectRef.current.has(requestSessionId);
-        const isExplicitBuildCommand = isBuildOrImplementationIntent(
-          effectiveText,
-          sessionHistory,
-          hasProjectInThisSession
-        );
+        // Whole-sentence semantic + LLM intent verification
+        let isGuidanceOrConversationOnly = sentenceSemantics.isGuidanceOrQuestion;
+        let isExplicitBuildCommand =
+          !isGuidanceOrConversationOnly &&
+          sentenceSemantics.isAffirmativeBuildCommand &&
+          isBuildOrImplementationIntent(
+            effectiveText,
+            sessionHistory,
+            hasProjectInThisSession
+          );
 
         const authHeaders: Record<string, string> = {
           "Content-Type": "application/json",
           ...(effectiveUserId ? { "x-user-id": effectiveUserId } : {}),
         };
+
+        // When a build was active/recent OR when the sentence mentions "build"/"app"/"running" with multiple clauses,
+        // consult the fast whole-sentence semantic endpoint (/api/intent) so indirect build cancellations and nuanced
+        // guidance questions are understood at the full-sentence level even without pre-programmed phrases.
+        if (
+          wasBuildingNowOrRecently ||
+          (/\b(build|application|software|project|running)\b/i.test(effectiveText) &&
+            effectiveText.trim().split(/\s+/).length >= 6)
+        ) {
+          try {
+            const intentCtrl = new AbortController();
+            const intentTimer = setTimeout(() => intentCtrl.abort(), 1800);
+            const intentRes = await fetch("/api/intent", {
+              method: "POST",
+              headers: authHeaders,
+              body: JSON.stringify({
+                text: effectiveText,
+                isBuilding: wasBuildingNowOrRecently,
+                hasExistingProject: hasProjectInThisSession,
+                history: sessionHistory.slice(-6),
+              }),
+              signal: intentCtrl.signal,
+            });
+            clearTimeout(intentTimer);
+            if (intentRes.ok && isCurrentRequestValid()) {
+              const intentJson = await intentRes.json();
+              if (intentJson?.intent === "TERMINATE_BUILD") {
+                lastBuildInterruptedAtRef.current[requestSessionId] = 0;
+                activeBuildingSessionsRef.current.delete(requestSessionId);
+                emit("agent.building.completed", {});
+                const termReply = formatBuildTerminationMessage(preferredUsername);
+                sessionHistory.push({ role: "user", content: effectiveText });
+                sessionHistory.push({ role: "assistant", content: termReply });
+                emit("conversation.turn.completed", { text: termReply });
+                emit("agent.narration", { text: termReply });
+                speakNarration(termReply, "calm");
+                return;
+              } else if (intentJson?.intent === "PAUSE_OR_SILENCE") {
+                emit("agent.building.completed", {});
+                emit("agent.narration", { text: "Paused — I'm listening whenever you're ready." });
+                emit("voice.output.completed", {});
+                return;
+              } else if (intentJson?.intent === "GUIDANCE_OR_CONVERSATION") {
+                isGuidanceOrConversationOnly = true;
+                isExplicitBuildCommand = false;
+              } else if (intentJson?.intent === "EXECUTE_BUILD" && !sentenceSemantics.isGuidanceOrQuestion) {
+                isExplicitBuildCommand = true;
+              }
+            }
+          } catch {
+            // Fall back seamlessly to deterministic whole-sentence semantic analysis
+          }
+        }
 
         const buildProgressTimers: ReturnType<typeof setTimeout>[] = [];
 
@@ -749,6 +816,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               user_id: effectiveUserId || undefined,
               userProfile: currentUserProfile,
               forceBuildTask: isExplicitBuildCommand,
+              conversationalOnly: isGuidanceOrConversationOnly,
             }),
             signal: abortCtrl.signal,
           });

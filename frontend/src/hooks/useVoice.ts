@@ -63,6 +63,8 @@ interface UseVoiceOptions {
   onActivated: () => void;
   onDeactivated: () => void;
   onInterrupt?: () => void;
+  onBackchannel?: (reason: "barge_in" | "listening_hum") => void;
+  isSelfEcho?: (text: string) => boolean;
   isAiSpeaking?: boolean;
 }
 
@@ -72,13 +74,15 @@ interface UseVoiceOptions {
  * 2. MediaRecorder + Gemini Flash (/api/voice/transcribe) automatic fallback
  * 3. Real-time audio level analyzer (0-100) for instant visual feedback
  * 4. Transparent permission tracking and friendly recovery
- * 5. Wake-word ("Hello Rex", "Hey Rex", "Rex") and acoustic echo isolation
+ * 5. Wake-word ("Hello Rex", "Hey Rex", "Rex"), phrase-independent barge-in, and acoustic echo isolation
  */
 export function useVoice({
   onTranscript,
   onActivated,
   onDeactivated,
   onInterrupt,
+  onBackchannel,
+  isSelfEcho,
   isAiSpeaking = false,
 }: UseVoiceOptions) {
   const [mode, setMode] = useState<VoiceMode>("idle");
@@ -102,8 +106,19 @@ export function useVoice({
   const lastAiSpeechEndTimeRef = useRef<number>(0);
   const wasAiSpeakingRef = useRef<boolean>(isAiSpeaking);
   const lastInterruptTimeRef = useRef<number>(0);
+  const lastBackchannelHumTimeRef = useRef<number>(0);
+  const onBackchannelRef = useRef(onBackchannel);
+  const isSelfEchoRef = useRef(isSelfEcho);
   const bleedPrefixLengthRef = useRef<Record<number, number>>({});
   const resultInterruptedRef = useRef<Record<number, boolean>>({});
+
+  useEffect(() => {
+    onBackchannelRef.current = onBackchannel;
+  }, [onBackchannel]);
+
+  useEffect(() => {
+    isSelfEchoRef.current = isSelfEcho;
+  }, [isSelfEcho]);
 
   // Audio Stream & Analyser references
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -452,6 +467,12 @@ export function useVoice({
           const deltaSlice = rawTranscript.slice(prevBleedLen).trim();
           const extractedFromFull = extractUserInterruptFromBuffer(rawTranscript);
           const extractedFromDelta = extractUserInterruptFromBuffer(deltaSlice);
+          const isDeltaSelfEcho = isSelfEchoRef.current ? isSelfEchoRef.current(deltaSlice) : false;
+          const deltaWords = deltaSlice
+            .replace(/[^\w\s']/g, " ")
+            .trim()
+            .split(/\s+/)
+            .filter((w) => w.length > 1);
 
           if (extractedFromDelta.matched || matchInterrupt(deltaSlice)) {
             resultInterruptedRef.current[i] = true;
@@ -477,10 +498,23 @@ export function useVoice({
             detectedBargeInThisEvent = true;
             if (isFinalResult) finalText += deltaSlice;
             else interimText += deltaSlice;
-          } else {
-            // Pure speaker bleed while Rex is talking -> advance bleed offset so future user barge-in is isolated cleanly!
+          } else if (!isDeltaSelfEcho && deltaWords.length >= 2) {
+            // Phrase-Independent Barge-In:
+            // The user started speaking any natural sentence in the middle of Rex's speech
+            // (e.g., "Hey Rex, I get your point, but what about this?" or "Actually what if we try...")
+            // and it is NOT an echo of Rex's own voice!
+            resultInterruptedRef.current[i] = true;
+            detectedBargeInThisEvent = true;
+            bleedPrefixLengthRef.current[i] = prevBleedLen;
+            const cleanChunk = rawTranscript.slice(prevBleedLen);
+            if (isFinalResult) finalText += cleanChunk;
+            else interimText += cleanChunk;
+          } else if (isDeltaSelfEcho) {
+            // Verified speaker bleed matching Rex's own voice output -> advance bleed offset
             bleedPrefixLengthRef.current[i] = rawTranscript.length;
           }
+          // Note: if !isDeltaSelfEcho && deltaWords.length === 1, we do NOT advance bleedPrefixLengthRef yet,
+          // so as soon as the user speaks their 2nd word, the 1st word is preserved intact!
         } else {
           // Either Rex is not speaking, or the user already barged in during this result index:
           // strip any recorded speaker bleed prefix from index `i` so only the user's words remain!
@@ -518,6 +552,13 @@ export function useVoice({
         lastAiSpeechEndTimeRef.current = 0;
         isAiSpeakingRef.current = false;
         onInterrupt?.();
+        // Play a warm human active-listening backchannel hum ("Mmm-hmm") when the user barges in
+        // with a conversational thought (skip hum only if they issued a bare silence command like "Stop Rex" / "Shut up")
+        const combinedBargeText = (finalText || interimText).trim();
+        if (!isBareStopCommand(combinedBargeText) && Date.now() - lastBackchannelHumTimeRef.current > 2500) {
+          lastBackchannelHumTimeRef.current = Date.now();
+          onBackchannelRef.current?.("barge_in");
+        }
         setMode("active_conversation");
         modeRef.current = "active_conversation";
         resetActiveInactivityTimerRef.current();
@@ -648,6 +689,17 @@ export function useVoice({
 
         const isCompleteBareStop = isBareStopCommand(lowerLive);
         const hasFinalizedClause = Boolean(finalText) && !cleanInterim;
+
+        // Active-listening backchannel hum ("Mmm-hmm") during multi-clause user speech pauses
+        if (
+          !isCompleteBareStop &&
+          wordCount >= 7 &&
+          (hasFinalizedClause || endsWithFillerOrConnector) &&
+          Date.now() - lastBackchannelHumTimeRef.current > 7000
+        ) {
+          lastBackchannelHumTimeRef.current = Date.now();
+          onBackchannelRef.current?.("listening_hum");
+        }
 
         let pauseDurationMs = 1150;
         if (isCompleteBareStop && hasFinalizedClause) {

@@ -53,6 +53,7 @@ import {
   generateDynamicEcommerceBrandName,
   isBuildTerminationCommand,
   formatBuildTerminationMessage,
+  analyzeWholeSentenceSemantics,
 } from "@/lib/project-spec";
 import { getChariotConfig, chatWithChariot } from "@/lib/ai-provider-config";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -426,11 +427,30 @@ function classifyIntent(
     };
   }
 
-  const isUnifiedBuildIntent = isBuildOrImplementationIntent(
-    cleanedText,
+  const sentenceSemantics = analyzeWholeSentenceSemantics(cleanedText, {
+    isCurrentlyBuilding: true,
+    hasExistingProject: hasExistingSessionProject,
     history,
-    hasExistingSessionProject
-  );
+  });
+
+  if (sentenceSemantics.isBuildTermination) {
+    const termMsg = formatBuildTerminationMessage(username);
+    return {
+      isConversational: true,
+      emotion: "calm",
+      reply: termMsg,
+      spokenReply: termMsg,
+    };
+  }
+
+  const isUnifiedBuildIntent =
+    !sentenceSemantics.isGuidanceOrQuestion &&
+    sentenceSemantics.isAffirmativeBuildCommand &&
+    isBuildOrImplementationIntent(
+      cleanedText,
+      history,
+      hasExistingSessionProject
+    );
 
   // PRIORITY -1: Instant Greetings, Casual Pleasantries & Status Inquiries
   // Only match when the message is NOT a build/implementation command
@@ -1047,6 +1067,7 @@ export async function POST(request: NextRequest) {
       !rawSessionId || rawSessionId === "default" ? `s_${Date.now().toString(36)}` : rawSessionId;
     const userId: string = (body.userId || body.user_id || request.headers.get("x-user-id") || "").trim();
     const forceBuildTask: boolean = Boolean(body.forceBuildTask);
+    const conversationalOnly: boolean = Boolean(body.conversationalOnly);
     const incomingImages: string[] = Array.isArray(body.images) ? body.images : [];
 
     // 1. Block legacy shared session IDs and verify session ownership
@@ -1114,7 +1135,7 @@ export async function POST(request: NextRequest) {
     }
 
     const intent = classifyIntent(text, history, sessionId, userProfile?.username);
-    const isCodingTask = forceBuildTask || !intent.isConversational;
+    const isCodingTask = !conversationalOnly && (forceBuildTask || !intent.isConversational);
     const routeDecision = recordAgentRouting({
       isCodingTask,
       sessionId,
@@ -1678,6 +1699,7 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
    - Provide a direct, articulate, senior-level response with authentic human vocal inflection.
    - If the user explicitly asks for a "short answer", "brief answer", or "not long", respect that preference strictly (keep it concise, warm, and 2-4 sentences).
    - When the user asks for personal shopping ideas, gift suggestions, or things to buy today to feel happy, give creative, thoughtful, real-world item suggestions (and NEVER talk about building an e-commerce app unless they explicitly asked you to code software).
+   - When the user asks for guidance, mentorship, or an explanation of HOW to build a software idea end-to-end (e.g., "I don't know how to build this software. Can you guide me first? How can we build this specific idea end-to-end?"), act as an empowering senior engineering mentor: walk them through the complete end-to-end roadmap (1. Product & UX Architecture, 2. Frontend & Backend Stack, 3. Database & API Design, 4. Step-by-Step Implementation Phases, and 5. Testing & Deployment), and let them know that whenever they are ready, they can ask you to start building it together.
    - When discussing or naming e-commerce or shopping applications, NEVER use the hardcoded name "AuraMart" or "AuraBeauty" — always invent a fresh, unique brand name tailored to the specific features and niche requested.
    - When the user asks you to sing a song, recite a poem, tell a joke, tell a story, or engages in philosophical, personal, or life conversations (such as inner beauty vs outer beauty, human connection, meaning, etc.), write with vivid, natural spoken rhythm so that the ENTIRE response sounds wonderful when spoken aloud from start to finish.
    - Avoid generic boilerplate or repetitive phrases like "you can see the features in the chat".`;

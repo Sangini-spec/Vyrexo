@@ -709,3 +709,102 @@ export function cancelHumanizedSpeech(): void {
   }
   window.__rexActiveUtterances?.clear();
 }
+
+let sharedHumAudioCtx: AudioContext | null = null;
+let lastListeningHumTimestamp = 0;
+
+/**
+ * Plays a subtle, warm, human-like closed-lip "Mmm-hmm" active listening backchannel hum.
+ * Uses vocal-formant synthesis via Web Audio API so it has 0ms latency, adapts to the
+ * selected male/female voice pitch, and never gets transcribed as words by SpeechRecognition.
+ */
+export function playActiveListeningHum(voiceOverride?: string): void {
+  if (typeof window === "undefined") return;
+  const now = Date.now();
+  // Prevent overlapping or rapid-fire hums
+  if (now - lastListeningHumTimestamp < 1800) return;
+  lastListeningHumTimestamp = now;
+
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+
+    if (!sharedHumAudioCtx || sharedHumAudioCtx.state === "closed") {
+      sharedHumAudioCtx = new AudioCtx();
+    }
+    const ctx = sharedHumAudioCtx;
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {});
+    }
+
+    let voiceKey = (voiceOverride || "adam").toLowerCase();
+    try {
+      const stored = localStorage.getItem("vyrexo_voice");
+      if (stored && !voiceOverride) {
+        const parsed = JSON.parse(stored);
+        if (parsed?.voice) voiceKey = String(parsed.voice).toLowerCase();
+      }
+    } catch {}
+
+    const profile = VOICE_PROFILES[voiceKey] || VOICE_PROFILES.adam;
+    const isFemale = profile.gender === "Female";
+
+    // Fundamental vocal frequencies for "Mmm-hmm" (gentle slightly falling 1st syllable, rising 2nd syllable)
+    const f1Start = isFemale ? 212 : 128;
+    const f1End = isFemale ? 204 : 122;
+    const f2Start = isFemale ? 208 : 125;
+    const f2End = isFemale ? 246 : 150;
+
+    const t0 = ctx.currentTime + 0.01;
+
+    // Closed-lip nasal formant filter
+    const formantFilter = ctx.createBiquadFilter();
+    formantFilter.type = "lowpass";
+    formantFilter.frequency.setValueAtTime(isFemale ? 520 : 380, t0);
+    formantFilter.Q.setValueAtTime(2.2, t0);
+
+    const masterGain = ctx.createGain();
+    masterGain.gain.setValueAtTime(0.0001, t0);
+    formantFilter.connect(masterGain);
+    masterGain.connect(ctx.destination);
+
+    // Syllable 1: "Mmm" (t0 -> t0 + 0.11s)
+    masterGain.gain.exponentialRampToValueAtTime(0.13, t0 + 0.025);
+    masterGain.gain.exponentialRampToValueAtTime(0.09, t0 + 0.09);
+    masterGain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.115);
+
+    // Syllable 2: "hmm" (t0 + 0.145s -> t0 + 0.31s)
+    masterGain.gain.setValueAtTime(0.001, t0 + 0.145);
+    masterGain.gain.exponentialRampToValueAtTime(0.15, t0 + 0.175);
+    masterGain.gain.exponentialRampToValueAtTime(0.11, t0 + 0.26);
+    masterGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.32);
+
+    // Primary vocal cord oscillator
+    const osc1 = ctx.createOscillator();
+    osc1.type = "sine";
+    osc1.frequency.setValueAtTime(f1Start, t0);
+    osc1.frequency.linearRampToValueAtTime(f1End, t0 + 0.11);
+    osc1.frequency.setValueAtTime(f2Start, t0 + 0.145);
+    osc1.frequency.exponentialRampToValueAtTime(f2End, t0 + 0.30);
+
+    // Warm 2nd harmonic vocal formant
+    const osc2 = ctx.createOscillator();
+    osc2.type = "triangle";
+    const harmGain = ctx.createGain();
+    harmGain.gain.setValueAtTime(0.32, t0);
+    osc2.frequency.setValueAtTime(f1Start * 2, t0);
+    osc2.frequency.linearRampToValueAtTime(f1End * 2, t0 + 0.11);
+    osc2.frequency.setValueAtTime(f2Start * 2, t0 + 0.145);
+    osc2.frequency.exponentialRampToValueAtTime(f2End * 2, t0 + 0.30);
+
+    osc1.connect(formantFilter);
+    osc2.connect(harmGain);
+    harmGain.connect(formantFilter);
+
+    osc1.start(t0);
+    osc2.start(t0);
+    osc1.stop(t0 + 0.34);
+    osc2.stop(t0 + 0.34);
+  } catch {}
+}
+
