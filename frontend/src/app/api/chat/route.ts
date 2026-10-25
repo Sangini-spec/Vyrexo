@@ -50,6 +50,9 @@ import {
   generateChatTitle,
   extractProjectSpecification,
   isBuildOrImplementationIntent,
+  generateDynamicEcommerceBrandName,
+  isBuildTerminationCommand,
+  formatBuildTerminationMessage,
 } from "@/lib/project-spec";
 import { getChariotConfig, chatWithChariot } from "@/lib/ai-provider-config";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -184,7 +187,8 @@ function isProjectTechnicalBreakdown(userPrompt: string, responseText: string): 
     return true;
   }
   const combined = `${userPrompt} ${responseText}`.toLowerCase();
-  return /\b(tech stack|architecture|codebase|scaffold|component hierarchy|indexed files|endpoints|schema|repository|implementation|workspace|local folder|preview tab|code tab|react|typescript|next\.js|tailwind|e-commerce|application|project)\b/i.test(
+  // Only classify as a technical breakdown when actual engineering/code artifacts are discussed
+  return /\b(tech stack|component hierarchy|indexed files|api endpoints|database schema|repository structure|workspace files|bun build|bun test|src\/components|package\.json)\b/i.test(
     combined
   );
 }
@@ -346,7 +350,7 @@ function generateSpokenSummary(text: string, userPrompt = ""): string {
       spokenParts.push(outroSentences[0].trim());
     }
 
-    return trimToSentenceBoundary(cleanSpokenArtifacts(spokenParts.join(" ")), 750);
+    return trimToSentenceBoundary(cleanSpokenArtifacts(spokenParts.join(" ")), 2400);
   }
 
   let fullSpoken = cleaned
@@ -366,7 +370,7 @@ function generateSpokenSummary(text: string, userPrompt = ""): string {
 
   return trimToSentenceBoundary(
     cleanSpokenArtifacts(fullSpoken),
-    shouldSummarizeProjectDetails ? 750 : 4800
+    shouldSummarizeProjectDetails ? 2400 : 4800
   );
 }
 
@@ -411,6 +415,16 @@ function classifyIntent(
       getSessionWorkspaceFiles(sessionId).length > 0 ||
       Boolean(ensureSessionWorkspaceMaterialized(sessionId))
     : false;
+
+  if (isBuildTerminationCommand(cleanedText, false)) {
+    const termMsg = formatBuildTerminationMessage(username);
+    return {
+      isConversational: true,
+      emotion: "calm",
+      reply: termMsg,
+      spokenReply: termMsg,
+    };
+  }
 
   const isUnifiedBuildIntent = isBuildOrImplementationIntent(
     cleanedText,
@@ -704,38 +718,29 @@ Ultimately, money gives you the **freedom** to choose your direction, but **true
     } else if (/\b(calc|calculator|scientific|math engine|arithmetic)\b/i.test(normalizedForPreview)) {
       targetType = "calculator";
       targetTitle = "OmniCalc Pro — Scientific & Financial Calculation Suite";
-    } else if (/\b(cosmetic|cosmetics|skincare|skin care|facial kit|makeup|beauty|serum|aurabeauty)\b/i.test(normalizedForPreview)) {
+    } else if (/\b(cosmetic|cosmetics|skincare|skin care|facial kit|makeup|beauty|serum)\b/i.test(normalizedForPreview)) {
       targetType = "cosmetics_ecommerce";
-      targetTitle = "AuraBeauty — Cosmetics & Skincare Platform";
+      const dynamicBrand = connectedProject?.name || activeProject?.title || generateDynamicEcommerceBrandName(cleanedText, combined);
+      targetTitle = dynamicBrand.includes("—") ? dynamicBrand : `${dynamicBrand} — Cosmetics & Skincare Platform`;
     } else if (/\b(invest|investment advisor|apexwealth|portfolio allocation|wealth management)\b/i.test(normalizedForPreview)) {
       targetType = "investment_advisor";
       targetTitle = "Hyper-Personalized Investment Advisor";
     } else if (/\b(room canvas|roomcanvas|virtual space|presence avatar)\b/i.test(normalizedForPreview)) {
       targetType = "room_canvas";
       targetTitle = "Collaborative Virtual Space & Room Canvas";
-    } else if (/\b(auramart|aura\s*mart)\b/i.test(normalizedForPreview)) {
+    } else if (/\b(e-?commerce|online\s+store|shopping\s+store|marketplace)\b/i.test(normalizedForPreview)) {
       targetType = "ecommerce";
-      targetTitle = "AuraMart — Modern E-Commerce Suite";
+      const dynamicBrand = connectedProject?.name || activeProject?.title || generateDynamicEcommerceBrandName(cleanedText, combined);
+      targetTitle = dynamicBrand.includes("—") ? dynamicBrand : `${dynamicBrand} — Modern E-Commerce Suite`;
     } else if (connectedProject || activeProject) {
       targetType = (activeProject?.type && activeProject.type !== "rest_api" ? activeProject.type : "custom");
       targetTitle = connectedProject?.name || activeProject?.title || "Active Application";
     } else {
       targetType = "custom";
-      targetTitle = "RailGo — High-Speed Train & Railway Booking Platform";
+      targetTitle = "Interactive Web Application";
     }
 
-    const reply = targetType === "ecommerce" && /\bauramart\b/i.test(targetTitle)
-      ? `### 🛒 AuraMart Modern E-Commerce Suite Running in Preview
-
-I have launched the **AuraMart — Modern E-Commerce Suite** in your **Preview** tab!
-
-- **Live Capabilities**:
-  - **Departments**: Clothes & Fashion, Household Essentials, Today's Mega Deals, and Best Sellers.
-  - **Interactive Cart**: Add products, modify quantities, review order subtotal with free Prime shipping progress, and test promo voucher \`AURAPRO15\`.
-  - **Simulated Checkout**: Place orders and receive real-time order confirmation tracking.
-
-👉 **Switch to the Preview tab** to interact directly with the running store!`
-      : `### 🚀 ${targetTitle} Running in Preview
+    const reply = `### 🚀 ${targetTitle} Running in Preview
 
 I have launched **${targetTitle}** in your **Preview** tab!
 
@@ -746,9 +751,7 @@ I have launched **${targetTitle}** in your **Preview** tab!
 
 👉 **Switch to the Preview tab** to test the live application!`;
 
-    const spokenReply = targetType === "ecommerce" && /\bauramart\b/i.test(targetTitle)
-      ? "I've launched the AuraMart Modern E-Commerce platform in your Preview tab! You can now explore the catalog, add items to your cart, and test checkout."
-      : `I've launched ${targetTitle} in your Preview tab! Switch over to the Preview tab to interact with the live application.`;
+    const spokenReply = `I've launched ${targetTitle} in your Preview tab! Switch over to the Preview tab to interact with the live application.`;
 
     return {
       isConversational: true,
@@ -761,11 +764,27 @@ I have launched **${targetTitle}** in your **Preview** tab!
     };
   }
 
-  // Also check if user wrote a long specification describing an app to create
+  // PRIORITY 1.8: Personal Shopping Advice, Gift Ideas, Product Suggestions & Lifestyle Recommendations
+  // Ensure requests like "I really want to go to shopping today do you have any ideas what new thing I should buy today..."
+  // NEVER trigger app building and instead use conversational response + web search grounding.
+  const isPersonalShoppingOrAdvice =
+    /\b(go\s+(to\s+|for\s+)?shopping|going\s+shopping|shopping\s+today|what\s+(new\s+)?(thing|things|item|items|gift|product|stuff)?\s*(should|can|could|to)\s+i\s+(buy|get|shop\s+for|pick\s+up)|what\s+should\s+i\s+buy|ideas?\s+(on\s+|for\s+)?what\s+(new\s+)?(thing\s+)?(i\s+should\s+|to\s+)?buy|buy\s+today|buy\s+for\s+myself|not\s+very\s+expensive|make\s+me\s+(feel\s+)?(happy|better|smile|good)|give\s+(me\s+)?a\s+short\s+answer|suggest\s+(something|what)\s+to\s+buy)\b/i.test(
+      trimmed
+    );
+
+  if (isPersonalShoppingOrAdvice) {
+    return {
+      isConversational: true,
+      isWebSearch: true,
+      emotion: "upbeat",
+    };
+  }
+
+  // Also check if user wrote a long specification explicitly asking to create/build a software app
   const isSpecifyingApp =
     trimmed.length > 50 &&
-    /\b(i want (an?|to build|a)|create an?|build an?|make an?)\b/i.test(trimmed) &&
-    /\b(app|application|platform|dashboard|system|website|tool|software|calculator|tracker)\b/i.test(trimmed);
+    /\b(i want to (build|create|develop|code)|create an?|build an?|develop an?|scaffold an?)\s+(?:[a-z0-9-]+\s+){0,4}(app|application|platform|dashboard|system|website|software|calculator|tracker)\b/i.test(trimmed) &&
+    !isPersonalShoppingOrAdvice;
 
   if (isSpecifyingApp) {
     return { isConversational: false };
@@ -773,7 +792,7 @@ I have launched **${targetTitle}** in your **Preview** tab!
 
   // PRIORITY 2: Questions, Explanations, Clarifications, Inquiries & Architectural Discussions
   const isQuestionOrInquiry =
-    /\b(explain|tell me|describe|what is|what are|what does|how does|how do|how can|why|which|who|where|when|can you explain|could you explain|help me understand|show me|walk me through|what did you|what have you|since you|review|list the|give me|details of|features of|overview of|architecture of|how was|clarify|what features|tell me about the features|i have a question|what do you think|what is your take|what's your opinion|more important|success or money|money or success)\b/i.test(
+    /\b(explain|tell me|describe|what is|what are|what does|how does|how do|how can|why|which|who|where|when|can you explain|could you explain|help me understand|show me|walk me through|what did you|what have you|since you|review|list the|give me|details of|features of|overview of|architecture of|how was|clarify|what features|tell me about the features|i have a question|what do you think|what is your take|what's your opinion|more important|success or money|money or success|do you have any ideas|any suggestions|recommend)\b/i.test(
       trimmed
     ) ||
     trimmed.endsWith("?") ||
@@ -1657,12 +1676,15 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
 
 4. VOICE & CONVERSATIONAL COMPLETENESS RULES:
    - Provide a direct, articulate, senior-level response with authentic human vocal inflection.
+   - If the user explicitly asks for a "short answer", "brief answer", or "not long", respect that preference strictly (keep it concise, warm, and 2-4 sentences).
+   - When the user asks for personal shopping ideas, gift suggestions, or things to buy today to feel happy, give creative, thoughtful, real-world item suggestions (and NEVER talk about building an e-commerce app unless they explicitly asked you to code software).
+   - When discussing or naming e-commerce or shopping applications, NEVER use the hardcoded name "AuraMart" or "AuraBeauty" — always invent a fresh, unique brand name tailored to the specific features and niche requested.
    - When the user asks you to sing a song, recite a poem, tell a joke, tell a story, or engages in philosophical, personal, or life conversations (such as inner beauty vs outer beauty, human connection, meaning, etc.), write with vivid, natural spoken rhythm so that the ENTIRE response sounds wonderful when spoken aloud from start to finish.
    - Avoid generic boilerplate or repetitive phrases like "you can see the features in the chat".`;
 
         const requiresSearch = Boolean(
           intent.isWebSearch ||
-          /\b(news|headline|headlines|weather|stock|score|latest|recent|today|current|now|price|who won|release date)\b/i.test(
+          /\b(news|headline|headlines|weather|stock|score|latest|recent|today|current|now|price|who won|release date|what should i buy|shopping|trending|recommend|suggestion|ideas what|best .* to buy)\b/i.test(
             text
           )
         );

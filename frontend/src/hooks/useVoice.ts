@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
+import {
+  extractUserInterruptFromBuffer,
+  isBareSilenceCommand,
+  isBuildTerminationCommand,
+} from "@/lib/project-spec";
 
 const WAKE_PATTERNS = [
   /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear)\s+rex\b/i,
@@ -15,19 +20,39 @@ const WAKE_PATTERNS = [
 
 const INTERRUPT_PATTERNS = [
   /\bstop\b/i,
-  /\bwait\b/i,
+  /\bstop\s+rex\b/i,
+  /\brex\s+stop\b/i,
   /\bpause\b/i,
+  /\bpause\s+rex\b/i,
+  /\brex\s+pause\b/i,
+  /\bwait\b/i,
+  /\bwait\s+rex\b/i,
   /\binterrupt\b/i,
   /\bhold\s+on\b/i,
+  /\bhang\s+on\b/i,
   /\bshut\s+up\b/i,
+  /\bbe\s+quiet\b/i,
   /\bhush\b/i,
   /\bcancel\b/i,
+  /\bwithdraw\b/i,
+  /\babort\b/i,
+  /\bterminate\b/i,
   /\bstop\s+talking\b/i,
+  /\bstop\s+speaking\b/i,
+  /\bstop\s+building\b/i,
+  /\bstop\s+working\b/i,
+  /\bdon'?t\s+build\b/i,
+  /\bdon'?t\s+want\s+to\s+work\b/i,
   /\bquiet\b/i,
   /\benough\b/i,
   /\bshush\b/i,
   /\bsilence\b/i,
   /\bnever\s*mind\b/i,
+];
+
+const EXPLICIT_MULTIWORD_INTERRUPT_PATTERNS = [
+  /^(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|no|please|yo)\s*,?\s*)*(stop|pause|wait|hold\s+on|hang\s+on|cancel|never\s*mind|nevermind|terminate|don'?t\s+build|do\s+not\s+build|i\s+don'?t\s+want\s+to\s+(?:work\s+on|build)|stop\s+working|withdraw|abort|listen\s+to\s+me|hear\s+me\s+out|shut\s+up|be\s+quiet)\b/i,
+  /\b(stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|stop\s+(building|coding|making|working|talking|speaking|it|that)|terminate\s+(the\s+)?(build|building|project|application)|don'?t\s+(build|make|create|work\s+on)\s+(it|that|this|the)|do\s+not\s+(build|make|create|work\s+on)|i\s+don'?t\s+want\s+to\s+work\s+on\s+this|cancel\s+(that|the|this|my)\s*(request|build|project|app|application)?|withdraw\s+(that|the|this|my)\s*(request|build|project)?|i\s+have\s+(something|more|another\s+thing)\s+(else\s+)?to\s+(add|say|mention)|let\s+me\s+(add|finish|speak|interrupt)|wait\s+a\s+(second|minute|moment)|hold\s+on\s+a\s+(second|minute|moment)|but\s+i\s+(think|want|feel|need|would|don'?t|mean|meant)|but\s+(what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(i\s+think|i\s+want|let'?s|wait|stop|rex)|instead\s+(of\s+that|let'?s|i\s+want)|on\s+second\s+thought|change\s+of\s+plans)\b/i,
 ];
 
 export type VoiceMode = "waiting_for_wake" | "active_conversation" | "idle";
@@ -76,6 +101,9 @@ export function useVoice({
   const isAiSpeakingRef = useRef(isAiSpeaking);
   const lastAiSpeechEndTimeRef = useRef<number>(0);
   const wasAiSpeakingRef = useRef<boolean>(isAiSpeaking);
+  const lastInterruptTimeRef = useRef<number>(0);
+  const bleedPrefixLengthRef = useRef<Record<number, number>>({});
+  const resultInterruptedRef = useRef<Record<number, boolean>>({});
 
   // Audio Stream & Analyser references
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -93,28 +121,31 @@ export function useVoice({
   const commitFallbackAudioRef = useRef<() => void>(() => {});
   const resetActiveInactivityTimerRef = useRef<() => void>(() => {});
 
-  const ECHO_COOLDOWN_MS = 450;
+  const ECHO_COOLDOWN_MS = 380;
 
   useEffect(() => {
+    const userRecentlyInterrupted = Date.now() - lastInterruptTimeRef.current < 3000;
     if (isAiSpeaking) {
-      // AI just started speaking -> instantly wipe any accumulated mic buffers
-      // so speech heard from the room or speakers cannot leak into user turns
-      accumulatedTurnRef.current = "";
-      pendingInterimRef.current = "";
-      lastEmittedFinalRef.current = "";
-      if (turnSilenceTimerRef.current) {
-        clearTimeout(turnSilenceTimerRef.current);
-        turnSilenceTimerRef.current = null;
+      // Only wipe mic buffers if the user is NOT currently in the middle of an active barge-in turn
+      if (!userRecentlyInterrupted) {
+        accumulatedTurnRef.current = "";
+        pendingInterimRef.current = "";
+        lastEmittedFinalRef.current = "";
+        if (turnSilenceTimerRef.current) {
+          clearTimeout(turnSilenceTimerRef.current);
+          turnSilenceTimerRef.current = null;
+        }
       }
     } else if (wasAiSpeakingRef.current && !isAiSpeaking) {
-      // AI finished speaking -> start echo cooldown and wipe buffers again
       lastAiSpeechEndTimeRef.current = Date.now();
-      accumulatedTurnRef.current = "";
-      pendingInterimRef.current = "";
-      lastEmittedFinalRef.current = "";
-      if (turnSilenceTimerRef.current) {
-        clearTimeout(turnSilenceTimerRef.current);
-        turnSilenceTimerRef.current = null;
+      if (!userRecentlyInterrupted) {
+        accumulatedTurnRef.current = "";
+        pendingInterimRef.current = "";
+        lastEmittedFinalRef.current = "";
+        if (turnSilenceTimerRef.current) {
+          clearTimeout(turnSilenceTimerRef.current);
+          turnSilenceTimerRef.current = null;
+        }
       }
       resetActiveInactivityTimerRef.current();
     }
@@ -186,12 +217,25 @@ export function useVoice({
   const matchInterrupt = (text: string): boolean => {
     const trimmed = text.trim();
     if (!trimmed) return false;
-    // Only treat short, explicit stop commands (<= 5 words) as barge-in interrupts
-    // so Rex's own voice from speakers (e.g., saying "wait", "quiet", "pause" in a sentence)
-    // cannot accidentally self-interrupt.
+    if (isBareSilenceCommand(trimmed) || isBuildTerminationCommand(trimmed, true)) {
+      return true;
+    }
+    const extracted = extractUserInterruptFromBuffer(trimmed);
+    if (extracted.matched) {
+      return true;
+    }
     const wordCount = trimmed.split(/\s+/).length;
-    if (wordCount > 5) return false;
-    return INTERRUPT_PATTERNS.some((p) => p.test(trimmed));
+    if (wordCount <= 8 && INTERRUPT_PATTERNS.some((p) => p.test(trimmed))) {
+      return true;
+    }
+    if (EXPLICIT_MULTIWORD_INTERRUPT_PATTERNS.some((p) => p.test(trimmed))) {
+      return true;
+    }
+    return false;
+  };
+
+  const isBareStopCommand = (text: string): boolean => {
+    return isBareSilenceCommand(text);
   };
 
   // ── Audio Level Analyzer Setup ──────────────────────────────────
@@ -375,6 +419,8 @@ export function useVoice({
 
     recognition.onstart = () => {
       lastActivityRef.current = Date.now();
+      bleedPrefixLengthRef.current = {};
+      resultInterruptedRef.current = {};
       setLastError(null);
     };
     recognition.onaudiostart = () => {
@@ -386,14 +432,64 @@ export function useVoice({
 
     recognition.onresult = (event: any) => {
       lastActivityRef.current = Date.now();
+      const speaking = isAiSpeakingRef.current;
+      const now = Date.now();
+      const inEchoCooldown = now - lastAiSpeechEndTimeRef.current < ECHO_COOLDOWN_MS;
+      const isEchoWindow = speaking || inEchoCooldown;
+
       let finalText = "";
       let interimText = "";
+      let detectedBargeInThisEvent = false;
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const t = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          finalText += t;
+        const rawTranscript: string = event.results[i][0].transcript || "";
+        const isFinalResult: boolean = Boolean(event.results[i].isFinal);
+        const alreadyInterruptedInResult = Boolean(resultInterruptedRef.current[i]);
+        const prevBleedLen = bleedPrefixLengthRef.current[i] || 0;
+
+        if (isEchoWindow && !alreadyInterruptedInResult) {
+          // Check both the newly added delta after any speaker bleed AND full buffer extraction
+          const deltaSlice = rawTranscript.slice(prevBleedLen).trim();
+          const extractedFromFull = extractUserInterruptFromBuffer(rawTranscript);
+          const extractedFromDelta = extractUserInterruptFromBuffer(deltaSlice);
+
+          if (extractedFromDelta.matched || matchInterrupt(deltaSlice)) {
+            resultInterruptedRef.current[i] = true;
+            detectedBargeInThisEvent = true;
+            const userPortion = extractedFromDelta.matched ? extractedFromDelta.extractedText : deltaSlice;
+            const matchIdx = rawTranscript.toLowerCase().lastIndexOf(userPortion.toLowerCase());
+            if (matchIdx >= 0) {
+              bleedPrefixLengthRef.current[i] = matchIdx;
+            }
+            const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i] || prevBleedLen);
+            if (isFinalResult) finalText += cleanChunk;
+            else interimText += cleanChunk;
+          } else if (extractedFromFull.matched) {
+            resultInterruptedRef.current[i] = true;
+            detectedBargeInThisEvent = true;
+            const matchIdx = rawTranscript.toLowerCase().lastIndexOf(extractedFromFull.extractedText.toLowerCase());
+            bleedPrefixLengthRef.current[i] = matchIdx >= 0 ? matchIdx : 0;
+            const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i]);
+            if (isFinalResult) finalText += cleanChunk;
+            else interimText += cleanChunk;
+          } else if (/\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(deltaSlice)) {
+            resultInterruptedRef.current[i] = true;
+            detectedBargeInThisEvent = true;
+            if (isFinalResult) finalText += deltaSlice;
+            else interimText += deltaSlice;
+          } else {
+            // Pure speaker bleed while Rex is talking -> advance bleed offset so future user barge-in is isolated cleanly!
+            bleedPrefixLengthRef.current[i] = rawTranscript.length;
+          }
         } else {
-          interimText += t;
+          // Either Rex is not speaking, or the user already barged in during this result index:
+          // strip any recorded speaker bleed prefix from index `i` so only the user's words remain!
+          const cleanChunk = prevBleedLen > 0 ? rawTranscript.slice(prevBleedLen) : rawTranscript;
+          if (isFinalResult) {
+            finalText += cleanChunk;
+          } else {
+            interimText += cleanChunk;
+          }
         }
       }
 
@@ -407,44 +503,27 @@ export function useVoice({
       const currentMode = modeRef.current;
       const spokenInterim = interimText.toLowerCase();
       const spokenFinal = finalText.toLowerCase();
-      const speaking = isAiSpeakingRef.current;
-      const now = Date.now();
-      const inEchoCooldown = now - lastAiSpeechEndTimeRef.current < ECHO_COOLDOWN_MS;
 
-      // Acoustic isolation & intelligent barge-in:
-      // While Rex is speaking or during the trailing echo drain window,
-      // the microphone hears Rex's voice coming out of the computer speakers.
-      // We MUST isolate and suppress this so the agent never talks to itself.
-      if (speaking || inEchoCooldown) {
-        const isInterrupt = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
-        const hasExplicitWake = Boolean(spokenFinal) && /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(spokenFinal);
-
-        if (isInterrupt) {
-          onInterrupt?.();
-          lastAiSpeechEndTimeRef.current = 0;
-          accumulatedTurnRef.current = "";
-          pendingInterimRef.current = "";
-          lastEmittedFinalRef.current = "";
-        } else if (hasExplicitWake) {
-          const command = stripWake(finalText);
-          if (command && command.trim().length > 1) {
-            onInterrupt?.();
-            lastAiSpeechEndTimeRef.current = 0;
-            setMode("active_conversation");
-            modeRef.current = "active_conversation";
-            onTranscript(
-              normalizeSpokenTranscript(command, { isInterim: false }),
-              true
-            );
-          }
+      // If Rex was speaking and no barge-in was detected in the delta/buffer, ignore the speaker bleed
+      if (isEchoWindow && !detectedBargeInThisEvent) {
+        const isInterruptFallback = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
+        if (!isInterruptFallback) {
+          return;
         }
-        // Discard any acoustic spill from Rex speaking
-        accumulatedTurnRef.current = "";
-        pendingInterimRef.current = "";
-        return;
+        detectedBargeInThisEvent = true;
       }
 
-      if (currentMode === "waiting_for_wake") {
+      if (detectedBargeInThisEvent) {
+        lastInterruptTimeRef.current = Date.now();
+        lastAiSpeechEndTimeRef.current = 0;
+        isAiSpeakingRef.current = false;
+        onInterrupt?.();
+        setMode("active_conversation");
+        modeRef.current = "active_conversation";
+        resetActiveInactivityTimerRef.current();
+      }
+
+      if (currentMode === "waiting_for_wake" && !detectedBargeInThisEvent) {
         const hasWake = matchWakeWord(spokenInterim) || matchWakeWord(spokenFinal);
         const triggerSource = finalText || interimText;
 
@@ -472,7 +551,6 @@ export function useVoice({
               accumulatedTurnRef.current = "";
               onTranscript(normalizeSpokenTranscript(fullText, { isInterim: false }), true);
             } else {
-              // User simply said "Hey Rex" / "Hi Rex" as a standalone greeting
               accumulatedTurnRef.current = "";
               onTranscript("Hey Rex", true);
             }
@@ -481,7 +559,7 @@ export function useVoice({
         return;
       }
 
-      if (currentMode === "active_conversation") {
+      if (modeRef.current === "active_conversation") {
         resetActiveInactivityTimerRef.current();
 
         // 1. Check deactivation phrases
@@ -506,24 +584,20 @@ export function useVoice({
           return;
         }
 
-        // 2. Check instant stop phrases ("stop", "wait", "hold on", "quiet", "cancel")
+        // 2. Check instant stop or continuation/withdrawal/redirect phrases
         const isImmediateStop = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
         if (isImmediateStop) {
-          if (turnSilenceTimerRef.current) {
-            clearTimeout(turnSilenceTimerRef.current);
-            turnSilenceTimerRef.current = null;
+          // Throttle onInterrupt so we silence Rex immediately on the first syllable without resetting UI state on every subsequent syllable
+          if (Date.now() - lastInterruptTimeRef.current > 600) {
+            lastInterruptTimeRef.current = Date.now();
+            onInterrupt?.();
           }
-          accumulatedTurnRef.current = "";
-          pendingInterimRef.current = "";
-          lastEmittedFinalRef.current = "";
-          onInterrupt?.();
-          onTranscript("stop", true);
-          return;
         }
 
-        // 3. Accumulate spoken text across pauses
+        // 3. Accumulate spoken text across comma pauses (so "Never mind, stop building it. I don't want to work on this application"
+        // or "Wait, I have something else to add on" is captured in full without being cut off at the first comma!)
         if (finalText) {
-          const trimmedFinal = stripWake(finalText).trim();
+          const trimmedFinal = (isBareStopCommand(finalText) ? finalText : stripWake(finalText)).trim();
           if (trimmedFinal) {
             const acc = accumulatedTurnRef.current.trim();
             const normAcc = acc.toLowerCase().replace(/[.!?,]/g, "").trim();
@@ -540,7 +614,7 @@ export function useVoice({
           }
         }
 
-        const cleanInterim = stripWake(interimText).trim();
+        const cleanInterim = (isBareStopCommand(interimText) ? interimText : stripWake(interimText)).trim();
         const combinedLiveRaw = (
           accumulatedTurnRef.current + (cleanInterim ? " " + cleanInterim : "")
         ).trim();
@@ -559,14 +633,12 @@ export function useVoice({
         const lowerLive = combinedLive.toLowerCase().replace(/[.!?,]/g, "").trim();
         const wordCount = lowerLive.split(/\s+/).filter(Boolean).length;
 
-        // Detect conversational fillers ("um", "uh", "ah", "er", "hmm", "like") or mid-sentence connectives ("or", "and", "so", "with", "because")
         const endsWithFillerOrConnector =
           /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of)\s*$/i.test(
             lowerLive
           ) ||
           /^(um|uh|ah|er|hmm|like|and|or|so)\b$/i.test(lowerLive);
 
-        // Detect quick greetings, pleasantries, or short complete acknowledgments
         const isShortGreetingOrReply =
           wordCount <= 6 &&
           !endsWithFillerOrConnector &&
@@ -574,17 +646,22 @@ export function useVoice({
             lowerLive
           );
 
+        const isCompleteBareStop = isBareStopCommand(lowerLive);
         const hasFinalizedClause = Boolean(finalText) && !cleanInterim;
 
         let pauseDurationMs = 1150;
-        if (isShortGreetingOrReply && hasFinalizedClause) {
+        if (isCompleteBareStop && hasFinalizedClause) {
+          // Give 650ms after "Stop", "Wait", "Pause Rex", "Never mind" so if the user continues after a comma
+          // ("Wait, I have something else to add on" or "Never mind, stop building it"), the full sentence is captured!
+          pauseDurationMs = 650;
+        } else if (isShortGreetingOrReply && hasFinalizedClause) {
           pauseDurationMs = 420;
-        } else if (isShortGreetingOrReply) {
-          pauseDurationMs = 750;
+        } else if (isShortGreetingOrReply || isCompleteBareStop) {
+          pauseDurationMs = 800;
         } else if (hasFinalizedClause && !endsWithFillerOrConnector) {
           pauseDurationMs = 1100;
         } else {
-          pauseDurationMs = 2100;
+          pauseDurationMs = 2000;
         }
 
         if (combinedLive.length > 0) {
@@ -592,7 +669,6 @@ export function useVoice({
             if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
             const fullText = accumulatedTurnRef.current.trim() || combinedLive.trim();
 
-            // Filter out standalone fillers or accidental room noises
             const cleanText = normalizeSpokenTranscript(
               fullText
                 .replace(/\b(um|uh|ah|er|erm|hmm)\b/gi, "")
@@ -607,7 +683,6 @@ export function useVoice({
               lastEmittedFinalRef.current = "";
               onTranscript(cleanText, true);
             } else {
-              // Only filler words detected; discard and keep listening
               accumulatedTurnRef.current = "";
               pendingInterimRef.current = "";
             }
@@ -618,8 +693,7 @@ export function useVoice({
 
     recognition.onerror = (event: any) => {
       const err = event?.error || "";
-      // Ignore normal silence events in the room
-      if (err === "no-speech") {
+      if (err === "no-speech" || err === "aborted") {
         return;
       }
 
@@ -633,9 +707,8 @@ export function useVoice({
         return;
       }
 
-      // Network or internal recognition failure -> activate fallback recorder
-      if (err === "network" || err === "aborted") {
-        console.warn("[voice] speech recognition network issue, falling back to server audio");
+      if (err === "network") {
+        console.warn("[voice] speech recognition network issue, enabling fallback recorder alongside retry");
         useServerFallbackRef.current = true;
         return;
       }
@@ -647,7 +720,7 @@ export function useVoice({
     recognition.onend = () => {
       if (modeRef.current !== "idle") {
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = setTimeout(() => restartRef.current(false), 250);
+        restartTimerRef.current = setTimeout(() => restartRef.current(false), 180);
       }
     };
 
@@ -854,11 +927,15 @@ export function useVoice({
     }
   }, [startListening, stopListening]);
 
-  // Periodic heartbeat watchdog
+  // Periodic heartbeat watchdog (never abort/restart while Rex is actively speaking)
   useEffect(() => {
     const id = setInterval(() => {
       if (modeRef.current === "idle") return;
-      if (Date.now() - (lastActivityRef.current || 0) > 14000) {
+      if (isAiSpeakingRef.current) {
+        lastActivityRef.current = Date.now();
+        return;
+      }
+      if (Date.now() - (lastActivityRef.current || 0) > 25000) {
         lastActivityRef.current = Date.now();
         restartRef.current(true);
       }

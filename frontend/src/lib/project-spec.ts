@@ -302,20 +302,15 @@ export function extractProjectName(
     return "ApexLanding";
   }
 
-  if (lower.includes("clothing") || lower.includes("clothes") || lower.includes("fashion") || lower.includes("apparel") || lower.includes("wear")) {
-    return "AuraWear";
-  }
-
-  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare") || lower.includes("facial")) {
-    return "AuraBeauty";
-  }
-
-  if (/\b(jewel|jewellery|jewelry|diamond|ring|necklace|bracelet|earring|gemstone|gold|silver|luxury\s*atelier)\b/i.test(combined)) {
-    return "AuraMart — Fine Jewellery Atelier";
-  }
-
-  if (lower.includes("ecommerce") || lower.includes("e-commerce") || lower.includes("store") || lower.includes("shop") || lower.includes("merchandise")) {
-    return "AuraMart";
+  // Dynamic, context-aware e-commerce & retail brand naming (never hardcoded to a single static name)
+  if (
+    /\b(ecommerce|e-commerce|online\s*store|shopping\s*app|shopping\s*platform|retail\s*app|marketplace|storefront|merchandise|clothing|clothes|fashion|apparel|sneaker|shoe|footwear|cosmetic|makeup|beauty|skincare|facial|jewel|jewellery|jewelry|diamond|boutique|grocery|groceries|gadget|electronics|furniture|decor|book\s*store|pet\s*store)\b/i.test(
+      combined
+    ) ||
+    (/\b(store|shop|cart|catalog|checkout)\b/i.test(lower) &&
+      /\b(build|create|make|develop|code|scaffold|app|application|website|platform)\b/i.test(combined))
+  ) {
+    return generateDynamicEcommerceBrandName(clean, combined);
   }
 
   if (
@@ -369,7 +364,7 @@ export function extractProjectName(
     .filter(
       (w) =>
         w.length > 2 &&
-        !/^(just|now|start|working|work|build|built|make|create|develop|code|generate|implement|want|need|please|like|dont|don|not|some|other|another|different|theme|themes|element|elements|change|changes|update|updates|modify|redesign|improve|enhance|better|color|colors|style|layout|design|the|for|with|and|app|application|website|platform|software|system|tool|project|frontend|backend|component|components|good|great|job|done|correctly|nice|hey|rex|can|you|could|would|should|this|that|into|from|use|using)$/i.test(
+        !/^(just|now|start|working|work|build|built|make|create|develop|code|generate|implement|want|need|please|like|dont|don|not|some|other|another|different|theme|themes|element|elements|change|changes|update|updates|modify|redesign|improve|enhance|better|color|colors|style|layout|design|the|for|with|and|app|application|website|platform|software|system|tool|project|frontend|backend|component|components|good|great|job|done|correctly|nice|hey|rex|can|you|could|would|should|this|that|into|from|use|using|shopping|buy|today|ideas|something|happy|short|answer|long|expensive)$/i.test(
           w
         )
     );
@@ -381,6 +376,213 @@ export function extractProjectName(
   }
 
   return "NexusApp";
+}
+
+/**
+ * Generates a unique, feature-aware e-commerce brand name every time based on the
+ * specific products, features, vibe, and user request so no two shopping builds are
+ * forced into a hardcoded static name.
+ */
+export function generateDynamicEcommerceBrandName(rawPrompt: string, combinedContext = ""): string {
+  const text = `${rawPrompt} ${combinedContext}`.toLowerCase();
+
+  // Compute a lightweight deterministic + entropy seed from the prompt words & current minute/turn
+  let hash = 0;
+  const seedInput = `${rawPrompt.trim()}_${rawPrompt.length}`;
+  for (let i = 0; i < seedInput.length; i++) {
+    hash = (hash * 31 + seedInput.charCodeAt(i)) >>> 0;
+  }
+
+  const pick = (options: string[], offset = 0): string => {
+    return options[(hash + offset) % options.length];
+  };
+
+  // 1. Check specific niche/vertical keywords first
+  if (/\b(sneaker|shoe|footwear|kicks|streetwear|athleisure|runner)\b/i.test(text)) {
+    return pick(["StrideVault", "KicksLab", "VeloceStep", "UrbanTread", "SoleCraft", "AeroKicks"]);
+  }
+  if (/\b(vintage|thrift|secondhand|preloved|retro|archive)\b/i.test(text)) {
+    return pick(["RetroLoom", "ThriftHaven", "VelvetArchive", "EraCurate", "PastFound"]);
+  }
+  if (/\b(clothing|clothes|fashion|apparel|dress|wardrobe|outfit|wear|boutique|garment)\b/i.test(text)) {
+    return pick(["VerveAtelier", "LoomCraft", "ModaVibe", "VelvetThread", "KnitAndCo", "SartoriaHub", "atelierVogue"]);
+  }
+  if (/\b(cosmetic|makeup|beauty|skincare|skin\s*care|facial|serum|glow|botanical|organic\s*skin)\b/i.test(text)) {
+    return pick(["LumiereSkin", "BotanicaGlow", "PureDewAtelier", "VelvetBloom", "SolaceBeauty", "FloraDerma"]);
+  }
+  if (/\b(jewel|jewellery|jewelry|diamond|ring|necklace|bracelet|earring|gemstone|gold|silver)\b/i.test(text)) {
+    return pick(["CaratAtelier", "OpalineFine", "GildedLuxe", "CelesteGems", "VermeilHouse"]);
+  }
+  if (/\b(grocery|groceries|fresh|organic|produce|supermarket|pantry|farm|vegan|food\s*market)\b/i.test(text)) {
+    return pick(["HarvestCart", "GreenPantry", "FreshRootMarket", "BountifulBasket", "VerdantGrocer"]);
+  }
+  if (/\b(tech|gadget|electronics|laptop|phone|audio|headphone|hardware|gaming|gear)\b/i.test(text)) {
+    return pick(["CircuitBay", "VoltGear", "NexusTechStore", "PulseGadgets", "HyperionTech"]);
+  }
+  if (/\b(furniture|home|decor|interior|living|sofa|lighting|minimalist\s*home|artisan\s*home)\b/i.test(text)) {
+    return pick(["HearthAndLoom", "NordicHaven", "OakAndVessel", "FormaLiving", "AtelierCasa"]);
+  }
+  if (/\b(book|bookstore|reading|novel|literature|library\s*shop)\b/i.test(text)) {
+    return pick(["FolioBindery", "ChapterVerse", "QuillAndPage", "PaperLanternBooks"]);
+  }
+  if (/\b(pet|dog|cat|puppy|kitten|paw|vet\s*shop)\b/i.test(text)) {
+    return pick(["PawParlor", "WhiskerMarket", "TailWagSupply", "BarkAndBounty"]);
+  }
+  if (/\b(coffee|cafe|espresso|roast|tea|matcha|beverage)\b/i.test(text)) {
+    return pick(["RoastCraft", "CremaCollective", "VelvetBean", "SteepAndSip"]);
+  }
+  if (/\b(fitness|gym|workout|supplement|sport|athletic|yoga)\b/i.test(text)) {
+    return pick(["ApexAthletics", "KineticGear", "IronPulseShop", "ZenithFitStore"]);
+  }
+
+  // 2. Extract any distinctive user feature/domain noun to forge a bespoke brand name
+  const domainNouns = rawPrompt
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter(
+      (w) =>
+        w.length >= 4 &&
+        w.length <= 11 &&
+        !/^(build|create|make|develop|code|scaffold|implement|generate|design|please|want|need|like|would|could|should|application|website|platform|software|system|ecommerce|commerce|shopping|online|store|shop|market|marketplace|with|that|have|having|features|feature|cart|checkout|payment|filter|filters|search|product|products|item|items|user|users|modern|simple|full|complete|custom|different|every|time|single|agent|rex)$/i.test(
+          w
+        )
+    );
+
+  const suffixes = ["Bazaar", "Collective", "Vault", "Haven", "Emporium", "Curate", "Cart", "Exchange", "Atelier", "Hub"];
+  if (domainNouns.length > 0) {
+    const noun = domainNouns[0].charAt(0).toUpperCase() + domainNouns[0].slice(1).toLowerCase();
+    const suffix = pick(suffixes, noun.length);
+    return `${noun}${suffix}`;
+  }
+
+  // 3. General e-commerce / shopping application: rotate across a diverse, modern brand palette
+  const generalBrands = [
+    "NovaBazaar",
+    "VerveMarket",
+    "CartSphere",
+    "ZephyrShop",
+    "LuminaTrade",
+    "PrismEmporium",
+    "VelvetCart",
+    "SolsticeMarket",
+    "harborCurate",
+    "KinetixStore",
+    "VertexGoods",
+    "OasisMercantile",
+  ];
+  // Incorporate current minute so even identical generic prompts ("build an ecommerce app") get fresh names
+  const timeBucket = Math.floor(Date.now() / 15000);
+  return generalBrands[(hash + timeBucket) % generalBrands.length].replace(/^harbor/, "Harbor");
+}
+
+export function formatBuildTerminationMessage(username?: string | null): string {
+  const cleanName = (username || "").trim();
+  if (cleanName) {
+    return `Okay ${cleanName}, I have terminated the building process just as you requested.`;
+  }
+  return "Okay, I have terminated the building process just as you requested.";
+}
+
+export function isBareSilenceCommand(rawText: string): boolean {
+  if (!rawText) return false;
+  const cleaned = rawText
+    .trim()
+    .toLowerCase()
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
+    .replace(/\b(lyrics|lex|wrecks|rax|alex)$/i, "rex")
+    .replace(/[.!?,;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return false;
+
+  return /^(?:(?:hey|hi|hello|yo|ok|okay|please|now)\s+)*(?:(?:rex)\s+)?(stop|stop\s+it|stop\s+now|stop\s+talking|stop\s+speaking|pause|pause\s+it|pause\s+now|wait|hold\s+on|hang\s+on|shut\s+up|be\s+quiet|quiet|hush|shush|silence|enough|that'?s\s+enough|thats\s+enough|mute)(?:\s+(?:rex|please|now|it|talking|speaking))*$/i.test(
+    cleaned
+  );
+}
+
+export function isBuildTerminationCommand(rawText: string, isCurrentlyBuilding = false): boolean {
+  if (!rawText) return false;
+  const cleaned = rawText
+    .trim()
+    .toLowerCase()
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
+    .replace(/[.!?,;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return false;
+
+  // Explicit build/project termination phrases (always recognized even right after a build was interrupted)
+  const explicitBuildStop =
+    /\b(stop\s+(building|coding|making|creating|developing|scaffolding|the\s+build|the\s+building(\s+process)?)|terminate\s+(the\s+)?(build|building(\s+process)?|project|app|application)|abort\s+(the\s+)?(build|building|project|app|application)|cancel\s+(the\s+|that\s+|this\s+|my\s+)?(build|building|project|app|application|request)|withdraw\s+(the\s+|that\s+|this\s+|my\s+)?(build|request|project|app|application)|don'?t\s+(build|make|create|develop|code|work\s+on)\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+app|this\s+application|this\s+project|any\s+app|any\s+project)|do\s+not\s+(build|make|create|develop|code|work\s+on)\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+app|this\s+application|this\s+project)|i\s+don'?t\s+want\s+(you\s+)?to\s+(build|work\s+on|make|create|continue)|i\s+do\s+not\s+want\s+(you\s+)?to\s+(build|work\s+on|make|create|continue)|stop\s+working\s+on\s+(it|that|this|the\s+app|the\s+application|the\s+project|this\s+application|this\s+project)|quit\s+(building|working\s+on)|never\s*mind\s+stop|never\s*mind\s+don'?t\s+build)\b/i.test(
+      cleaned
+    );
+
+  if (explicitBuildStop) {
+    return true;
+  }
+
+  // If a build is actively running right now, shorter cancellation/stop commands also terminate the build
+  if (isCurrentlyBuilding) {
+    if (
+      isBareSilenceCommand(cleaned) ||
+      /^(?:(?:hey\s+rex|rex|ok|okay|please|no)\s+)*(never\s*mind|nevermind|cancel|cancel\s+it|cancel\s+that|abort|terminate|withdraw|forget\s+it|forget\s+that|scratch\s+that|stop\s+it|stop\s+that)(?:\s+rex)?$/i.test(
+        cleaned
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+const INTERRUPT_EXTRACTION_REGEX =
+  /\b((?:(?:hey|hi|hello|ok|okay|yo)\s+rex\s*,?\s*)?(?:stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|wait\s+rex|rex\s+wait|hold\s+on\s+rex|rex\s+hold\s+on|shut\s+up(?:\s+rex)?|be\s+quiet(?:\s+rex)?|stop\s+building|stop\s+working|stop\s+talking|stop\s+speaking|stop\s+it|stop\s+now|terminate\s+the\s+build|cancel\s+the\s+build|cancel\s+that|withdraw\s+that|never\s*mind|nevermind|don'?t\s+build|do\s+not\s+build|i\s+don'?t\s+want\s+to\s+(?:work\s+on|build)|wait\s+(?:a\s+(?:second|minute|moment)|i\s+have\s+(?:something|more)|let\s+me)|hold\s+on\s+(?:a\s+(?:second|minute|moment)|i\s+have|let\s+me)|hang\s+on|i\s+have\s+something\s+else\s+to\s+(?:add|say)|let\s+me\s+(?:add|finish|speak|interrupt)|listen\s+to\s+me|hear\s+me\s+out|but\s+i\s+(?:think|want|feel|need|would|don'?t|do\s+not|mean|meant|have)|but\s+(?:what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(?:i\s+(?:think|want|need|don'?t|meant)|let'?s|can\s+you|wait|stop|rex)|instead\s+(?:of\s+that|let'?s|i\s+want|can\s+you)|on\s+second\s+thought|change\s+of\s+plans|no\s+(?:rex|wait|stop|don'?t|i\s+(?:want|don'?t|meant))))\b/i;
+
+const TAIL_BARE_STOP_REGEX =
+  /\b((?:(?:hey|hi|hello|ok|okay|please)\s+)?(?:rex\s+)?(?:stop|pause|wait|hold\s+on|hang\s+on|quiet|be\s+quiet|shut\s+up|hush|shush|silence|enough|cancel|abort|withdraw|never\s*mind|nevermind)(?:\s+(?:rex|please|now|it))?)\s*$/i;
+
+export function extractUserInterruptFromBuffer(rawTranscript: string): {
+  matched: boolean;
+  extractedText: string;
+  isBareSilence: boolean;
+} {
+  if (!rawTranscript || !rawTranscript.trim()) {
+    return { matched: false, extractedText: "", isBareSilence: false };
+  }
+
+  const normalized = rawTranscript
+    .trim()
+    .replace(/\b(lyrics|lex|wrecks|rax|alex)\b/gi, "Rex");
+
+  // 1. Check if the entire string is already a bare silence command
+  if (isBareSilenceCommand(normalized)) {
+    return { matched: true, extractedText: normalized, isBareSilence: true };
+  }
+
+  // 2. Check for multi-word interrupt, build-termination, continuation, or redirect phrase anywhere in the buffer
+  const match = INTERRUPT_EXTRACTION_REGEX.exec(normalized);
+  if (match && typeof match.index === "number") {
+    const sliced = normalized.slice(match.index).trim();
+    return {
+      matched: true,
+      extractedText: sliced,
+      isBareSilence: isBareSilenceCommand(sliced),
+    };
+  }
+
+  // 3. Check if the tail of the buffer ends with a bare stop/pause command (e.g. after speaker bleed)
+  const tailMatch = TAIL_BARE_STOP_REGEX.exec(normalized);
+  if (tailMatch && typeof tailMatch.index === "number") {
+    const sliced = normalized.slice(tailMatch.index).trim();
+    return {
+      matched: true,
+      extractedText: sliced,
+      isBareSilence: isBareSilenceCommand(sliced),
+    };
+  }
+
+  return { matched: false, extractedText: normalized, isBareSilence: false };
 }
 
 /**
@@ -406,6 +608,42 @@ export function isBuildOrImplementationIntent(
   const trimmed = cleaned.trim().toLowerCase();
   if (!trimmed) return false;
 
+  // 0. HARD EXCLUSION: Interruption, build termination, withdrawal, cancellation, or "wait I have something else to add"
+  if (
+    isBareSilenceCommand(trimmed) ||
+    isBuildTerminationCommand(trimmed, true) ||
+    /^(stop|wait|hold\s+on|hang\s+on|pause|cancel|never\s*mind|nevermind|quiet|enough|hush|shush|shut\s+up)\b/i.test(trimmed) ||
+    /\b(stop\s+building|stop\s+working\s+on|don'?t\s+build|do\s+not\s+build|don'?t\s+want\s+to\s+(work\s+on|build)|do\s+not\s+want\s+to\s+(work\s+on|build)|terminate\s+(the\s+)?(build|building)|cancel\s+(the\s+|that\s+|this\s+|my\s+)?(build|request|project|app|application)|withdraw\s+(the\s+|that\s+|this\s+|my\s+)?request|wait\s+i\s+have\s+something\s+else|hold\s+on\s+i\s+have|but\s+i\s+think\s+people\s+can\s+interrupt)\b/i.test(
+      trimmed
+    )
+  ) {
+    return false;
+  }
+
+  // 0.5 HARD EXCLUSION: Personal/real-life shopping advice, buying suggestions, gift ideas, or everyday "make me feel/happy" idioms
+  const hasExplicitSoftwareTarget =
+    /\b(app|application|web\s*app|website|platform|dashboard|software|frontend|backend|ui|codebase|repo|repository|react|nextjs|next\.js|typescript|component|components|ecommerce\s+(app|application|site|website|platform|store)|shopping\s+(app|application|site|website|platform))\b/i.test(
+      trimmed
+    );
+
+  if (!hasExplicitSoftwareTarget) {
+    const isPersonalShoppingOrLifestyleAdvice =
+      /\b(go\s+(to\s+|for\s+)?shopping|going\s+(to\s+|for\s+)?shopping|want\s+to\s+go\s+(to\s+|for\s+)?shopping|what\s+(new\s+)?(thing|things|item|items|stuff|gift|gifts|present|clothes|shoes|gadget)?\s*(should|can|could)\s+i\s+(buy|get|shop|purchase)|what\s+should\s+i\s+buy|what\s+to\s+buy\s+today|buy\s+today|not\s+very\s+expensive|make\s+me\s+(feel\s+)?(happy|good|better|smile|laugh)|do\s+you\s+have\s+any\s+ideas\s+what|give\s+(me\s+)?a\s+short\s+answer|give\s+me\s+(a\s+|some\s+)?suggestion)\b/i.test(
+        trimmed
+      );
+    if (isPersonalShoppingOrLifestyleAdvice) {
+      return false;
+    }
+  }
+
+  // Strip everyday non-coding "make ..." idioms before testing build regexes so "make me feel happy" or "make sure" never masquerades as "make [software]"
+  const normalizedForBuildCheck = trimmed
+    .replace(
+      /\bmake\s+(me\s+)?(feel|happy|smile|laugh|cry|better|sense|sure|a\s+decision|a\s+choice|up\s+my\s+mind|it\s+short|it\s+brief|it\s+quick|friends|money|dinner|lunch|breakfast|coffee|tea)\b/gi,
+      "feel"
+    )
+    .replace(/\b(go|going)\s+(to\s+|for\s+)?shopping\b/gi, "browse items");
+
   // 1. Exclude explicit non-build commands: IDE launch, browser search, terminal unit tests, or pure preview switch
   if (
     /\b(open\s+(this\s+|the\s+)?(project|workspace|folder|files)?\s*in\s+(vs\s*code|vscode|cursor|windsurf))\b/i.test(trimmed) ||
@@ -416,18 +654,18 @@ export function isBuildOrImplementationIntent(
     return false;
   }
 
-  // 2. Exclude pure meta/explanation questions that do NOT contain an imperative request to build/create/start working/make changes
+  // 2. Exclude pure meta/explanation/suggestion questions that do NOT contain an imperative request to build software
   const hasBuildDirective =
-    /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|start\s+working|work\s+on|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me|my|our|new|basic|simple)|make\s+(a|an|the|this|that|it|me|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo)|develop\s+(a|an|the|this|that|it|me|my|our|new)|scaffold\s+(a|an|the|this|that|it|me|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
-      trimmed
+    /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|start\s+working|work\s+on|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)\s+([a-z0-9_-]+\s+){0,4}(app|application|project|website|web\s*app|platform|dashboard|store|shop|ecommerce|e-commerce|tool|system|calculator|todo|tracker|game|page)|make\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo|website|platform|dashboard|ecommerce\s+app|shopping\s+app)|develop\s+(a|an|the|this|that|it|my|our|new)|scaffold\s+(a|an|the|this|that|it|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
+      normalizedForBuildCheck
     );
 
   const isPureQuestion =
     !hasBuildDirective &&
-    (/^(check if|why\s+|how\s+(does|do|is|are|did|was)|what\s+(is|are|does|did|was|were)|can\s+you\s+explain|could\s+you\s+explain|explain\s+|clarify\s+|tell\s+me\s+about|who\s+are\s+you|what's\s+your\s+name|what\s+can\s+you\s+do)/i.test(
+    (/^(check if|why\s+|how\s+(does|do|is|are|did|was)|what\s+(is|are|does|did|was|were|should|can|could)|can\s+you\s+(explain|suggest|recommend|tell|give)|could\s+you\s+(explain|suggest|recommend|tell|give)|explain\s+|clarify\s+|tell\s+me\s+about|who\s+are\s+you|what's\s+your\s+name|what\s+can\s+you\s+do|do\s+you\s+have\s+any\s+(ideas|suggestions|recommendations))/i.test(
       trimmed
     ) ||
-      /\b(why\s+is\s+it\s+not\s+building|why\s+are\s+you|what\s+do\s+you\s+think|what\s+is\s+your\s+take|what's\s+your\s+opinion|are\s+you\s+stuck|did\s+you\s+freeze|look\s+at\s+the\s+screenshot)\b/i.test(
+      /\b(why\s+is\s+it\s+not\s+building|why\s+are\s+you|what\s+do\s+you\s+think|what\s+is\s+your\s+take|what's\s+your\s+opinion|are\s+you\s+stuck|did\s+you\s+freeze|look\s+at\s+the\s+screenshot|what\s+should\s+i\s+buy|give\s+me\s+a\s+suggestion)\b/i.test(
         trimmed
       ));
 
@@ -444,25 +682,27 @@ export function isBuildOrImplementationIntent(
     /\b(start\s+(building|coding|developing|creating|making|implementing|scaffolding|execution|the\s+build|the\s+project|the\s+app|the\s+application|actual\s+building|the\s+actual\s+building))\b/i,
     /\b(deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|launch\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|get\s+the\s+(app|application|project)\s+ready)\b/i,
     /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building|we\s+should\s+start\s+building)\b/i,
-    /\b(let('s|s)\s+build|start\s+to\s+build|now\s+build|just\s+build|please\s+build|go\s+ahead\s+and\s+(build|create|make|code|start|implement|work))\b/i,
-    // "build that to do list application", "build a todo list", "create my app", "make that project", "build it"
-    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect)\s+(it|this|that|the|a|an|me|my|our|your|another|some|new|full|complete|working|modern|simple|basic|real|custom|interactive)\b/i,
-    // Verb followed within a few words by any app/software/domain noun (e.g. "just build that to do list application", "build todo list")
-    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect|work\s+on)\s+([a-z0-9_-]+\s+){0,6}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|store|shop|ecommerce|e-commerce|calculator|tracker|todo|to-do|list|checklist|board|kanban|task|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|page|landing|clone|bot|calendar|scheduler|chat|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|wallet|portfolio|blog|cms|marketplace|booking|form|quiz)\b/i,
-    // Imperative verb at start of utterance (optionally after hey rex / please / just / ok / now / can you)
-    /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|i\s+want\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|generate|construct|make|start\s+working|work\s+on)\b/i,
-    /^\s*(build|create|develop|code|scaffold|implement|generate|construct)\s+/i,
+    /\b(let('s|s)\s+build|start\s+to\s+build|now\s+build|just\s+build|please\s+build|go\s+ahead\s+and\s+(build|create|code|scaffold|implement))\b/i,
+    // Direct pronoun target for unambiguous coding verbs ("build it", "build this", "build that", "scaffold it", "code it")
+    /\b(build|scaffold|code|develop|architect)\s+(it|this|that)\b/i,
+    // Verb followed within a few words by an explicit software/app/domain noun (e.g. "build a todo list", "make an ecommerce application", "create a shopping app")
+    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect|work\s+on)\s+(me\s+)?(a\s+|an\s+|the\s+|this\s+|that\s+|my\s+|our\s+|some\s+|another\s+|new\s+)?([a-z0-9_-]+\s+){0,6}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|online\s+store|ecommerce|e-commerce|shopping\s+app|shopping\s+website|shopping\s+platform|storefront|calculator|tracker|todo|to-do|task\s+list|checklist|board|kanban|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|landing\s+page|clone|bot|calendar|scheduler|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|wallet|portfolio|blog|cms|marketplace|booking\s+app|booking\s+system|quiz\s+app)\b/i,
+    // "build a store" / "build a shop" (only with build/create/develop/code/scaffold, NOT "go to shop")
+    /\b(build|create|develop|code|scaffold)\s+(me\s+)?(a\s+|an\s+|the\s+|my\s+|our\s+|new\s+)?([a-z0-9_-]+\s+){0,4}(store|shop)\b/i,
+    // Imperative coding verb at start of utterance followed by a software target or article
+    /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|construct|start\s+working|work\s+on)\s+(a|an|the|this|that|it|my|our|new|full|complete|modern|simple|basic|custom|interactive)\b/i,
+    /^\s*(build|create|develop|code|scaffold|implement|construct)\s+(a|an|the|this|that|it|my|our|new)\b/i,
     // Direct UI/theme/code modification & redesign commands (e.g. "I don't like the UI... can you use some other theme and elements and make the changes?")
     /\b(make\s+(the\s+|some\s+|these\s+|those\s+)?(changes|updates|edits|improvements|modifications)|apply\s+(the\s+|these\s+|those\s+)?(changes|updates)|implement\s+(the\s+|these\s+)?(changes|updates|features))\b/i,
     /\b(use\s+(some\s+|an?\s+)?(other|different|new|better|another|modern|light|dark|vibrant|colorful)\s+(theme|themes|color|colors|style|styles|layout|design|ui|elements?|components?))\b/i,
     /\b(don'?t\s+like\s+the\s+(ui|design|theme|color|colors|layout|look|style|buttons|components))\b/i,
-    /\b(change|update|modify|fix|tweak|set|make|improve|enhance|upgrade|redesign|restyle|overhaul|replace)\s+(the\s+|this\s+|my\s+|our\s+|its\s+)?(color|colors|font|padding|background|bg|text|size|style|styling|layout|title|button|buttons|nav|navbar|header|footer|margin|border|theme|ui|interface|design|elements|components|cards|look|appearance|app|application|project|todo|page|dashboard|store|code)\b/i,
+    /\b(change|update|modify|fix|tweak|set|improve|enhance|upgrade|redesign|restyle|overhaul|replace)\s+(the\s+|this\s+|my\s+|our\s+|its\s+)?(color|colors|font|padding|background|bg|text|size|style|styling|layout|title|button|buttons|nav|navbar|header|footer|margin|border|theme|ui|interface|design|elements|components|cards|look|appearance|app|application|project|todo|page|dashboard|store|code)\b/i,
     /^\s*(add|modify|update|refactor|edit|improve|expand|upgrade|redesign)\s+(a\s+|an\s+|the\s+|some\s+|more\s+)?([a-z0-9\s_-]{2,40})\s+(to|in|into|on|for)\s+(the\s+|this\s+|my\s+)?(app|application|project|code|component|page|dashboard|store|tracker|calculator|todo|list|ui|src\/)/i,
     /\b(modify|update|edit|refactor|improve|expand|upgrade|redesign)\s+(src\/components\/App\.tsx|App\.tsx|the\s+code|the\s+application|the\s+project|the\s+component|this\s+project|this\s+app|the\s+ui)\b/i,
     /\b(take\s+(it|this|the\s+project|the\s+app)\s+to\s+(an?\s+)?(entire\s+|full\s+)?product\s+level)\b/i,
   ];
 
-  if (explicitBuildPatterns.some((p) => p.test(trimmed))) {
+  if (explicitBuildPatterns.some((p) => p.test(normalizedForBuildCheck))) {
     return true;
   }
 
@@ -470,10 +710,10 @@ export function isBuildOrImplementationIntent(
   if (
     hasExistingProject &&
     (/^\s*(?:(?:hey\s+rex|rex|please|just|now|can\s+you|could\s+you|i\s+want\s+you\s+to|let('s|s))\s+)*(add|modify|update|refactor|edit|remove|fix|change|include|insert|implement|improve|enhance|expand|upgrade|extend|elevate|refine|redesign|restyle|polish|integrate|support|iterate)\b/i.test(
-      trimmed
+      normalizedForBuildCheck
     ) ||
       /\b(make\s+(the\s+|some\s+)?changes|add\s+(a\s+|some\s+|more\s+)?features?|improve\s+(the|this)\s+(project|app|application|ui|code|design)|enhance\s+(the|this)\s+(project|app|application|ui|design|quality)|other\s+theme|different\s+theme|new\s+theme)\b/i.test(
-        trimmed
+        normalizedForBuildCheck
       ))
   ) {
     return true;
@@ -481,8 +721,8 @@ export function isBuildOrImplementationIntent(
 
   // 5. Continuation / Agreement phrases ("yes build it", "let's build that", "go ahead", "start now", "do it")
   const isDirectBuildAgreement =
-    /\b(let('s|s)\s+build\s+(it|that|this)|build\s+(it|that|this)\s+now|just\s+build\s+(it|that|this)|build\s+that\s+idea|start\s+building\s+now|go\s+ahead\s+and\s+build|yes\s+(please\s+)?(build|start|create|make|code|do\s+it))\b/i.test(
-      trimmed
+    /\b(let('s|s)\s+build\s+(it|that|this)|build\s+(it|that|this)\s+now|just\s+build\s+(it|that|this)|build\s+that\s+idea|start\s+building\s+now|go\s+ahead\s+and\s+build|yes\s+(please\s+)?(build|start\s+building|create\s+it|code\s+it|do\s+it))\b/i.test(
+      normalizedForBuildCheck
     );
   if (isDirectBuildAgreement) {
     return true;
@@ -498,7 +738,7 @@ export function isBuildOrImplementationIntent(
       .map((h) => h.content || "")
       .join(" ");
     if (
-      /\b(start\s+building|start\s+scaffolding|start\s+coding|should\s+we\s+start|would\s+you\s+like\s+me\s+to\s+(start|build|scaffold)|ready\s+to\s+scaffold|build\s+this\s+now|app|application|project|platform|todo|store|dashboard|calculator)\b/i.test(
+      /\b(start\s+building|start\s+scaffolding|start\s+coding|should\s+we\s+start|would\s+you\s+like\s+me\s+to\s+(start|build|scaffold)|ready\s+to\s+scaffold|build\s+this\s+now)\b/i.test(
         recentHistory
       )
     ) {
@@ -536,8 +776,6 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
     const cleanProj = projectName.split("—")[0].split("-")[0].trim();
     if (/railgo/i.test(cleanProj)) return "RailGo Train Booking";
     if (/omnicalc/i.test(cleanProj)) return "OmniCalc Calculator";
-    if (/aurabeauty/i.test(cleanProj)) return "AuraBeauty Skincare";
-    if (/auramart/i.test(cleanProj)) return "AuraMart E-Commerce";
     if (/flowstate/i.test(cleanProj)) return "Flowstate Focus OS";
     if (/amity/i.test(cleanProj)) return "Amity Social App";
     if (/apexwealth/i.test(cleanProj)) return "ApexWealth Advisor";
@@ -557,6 +795,15 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
     return "";
   }
 
+  // Personal shopping / buying suggestions conversation title
+  if (
+    /\b(go\s+(to\s+|for\s+)?shopping|going\s+(to\s+|for\s+)?shopping|what\s+(new\s+)?(thing|things|item|items)?\s*(should|can|could)\s+i\s+buy|buy\s+today)\b/i.test(
+      lower
+    )
+  ) {
+    return "Shopping Ideas & Picks";
+  }
+
   // Semantic Domain Classifications
   if (/\b(railgo|rail\s*go|train\s*booking|railway|irctc|train\s*ticket|locomotive)\b/i.test(lower)) return "RailGo Train Booking";
   if (/\b(flight|airline|airport|aviation)\b/i.test(lower)) return "SkyJet Flight Booking";
@@ -564,8 +811,21 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
   if (/\b(flowstate|flow\s*state|focus\s*os)\b/i.test(lower)) return "Flowstate Focus OS";
   if (lower.includes("pomodoro") || (lower.includes("timer") && !lower.includes("crypto"))) return "Pomodoro Focus Timer";
   if (lower.includes("calculator") || lower.includes("omnicalc") || lower.includes("math engine")) return "OmniCalc Calculator";
-  if (lower.includes("cosmetic") || lower.includes("makeup") || lower.includes("beauty") || lower.includes("skincare") || lower.includes("facial")) return "AuraBeauty Skincare";
-  if (lower.includes("auramart") || lower.includes("clothing") || lower.includes("fashion") || lower.includes("ecommerce") || lower.includes("e-commerce") || lower.includes("store") || lower.includes("shop")) return "AuraMart E-Commerce";
+  if (
+    lower.includes("cosmetic") ||
+    lower.includes("makeup") ||
+    lower.includes("beauty") ||
+    lower.includes("skincare") ||
+    lower.includes("facial") ||
+    lower.includes("clothing") ||
+    lower.includes("fashion") ||
+    lower.includes("ecommerce") ||
+    lower.includes("e-commerce") ||
+    (lower.includes("store") && /\b(build|create|make|app|online)\b/i.test(lower)) ||
+    (lower.includes("shop") && /\b(build|create|make|app|online)\b/i.test(lower))
+  ) {
+    return `${generateDynamicEcommerceBrandName(p)} Store`;
+  }
   if (lower.includes("food") || lower.includes("restaurant") || lower.includes("recipe") || lower.includes("meal") || lower.includes("delivery")) return "BiteFlow Food App";
   if (lower.includes("friend") || lower.includes("amity") || lower.includes("bestie")) return "Amity Social App";
   if (lower.includes("landing page") || lower.includes("startup landing")) return "Startup Landing Page";

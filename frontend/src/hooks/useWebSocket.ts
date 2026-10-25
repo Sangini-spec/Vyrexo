@@ -32,6 +32,9 @@ import {
   extractProjectSpecification,
   isPlaceholderOrBadSessionName,
   isBuildOrImplementationIntent,
+  isBuildTerminationCommand,
+  formatBuildTerminationMessage,
+  isBareSilenceCommand,
 } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
@@ -179,10 +182,27 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
   const onMessageRef = useRef(onMessage);
   const onAudioRef = useRef(onAudio);
   const fallbackActiveRef = useRef(false);
-  const chatHistoryRef = useRef<Array<{ role: string; content: string }>>([]);
+  const chatHistoryBySessionRef = useRef<Record<string, Array<{ role: string; content: string }>>>({});
+  const sessionHasProjectRef = useRef<Set<string>>(new Set());
   const activeSpeechCancelRef = useRef<(() => void) | null>(null);
   const activeTtsAbortRef = useRef<AbortController | null>(null);
+  const activeChatAbortRef = useRef<AbortController | null>(null);
+  const activeRequestIdRef = useRef<number>(0);
+  const currentSessionIdRef = useRef<string>(sessionId);
   const namedSessionsRef = useRef<Set<string>>(new Set());
+  const activeBuildingSessionsRef = useRef<Set<string>>(new Set());
+  const lastBuildInterruptedAtRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    currentSessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const getSessionHistory = useCallback((sid: string) => {
+    if (!chatHistoryBySessionRef.current[sid]) {
+      chatHistoryBySessionRef.current[sid] = [];
+    }
+    return chatHistoryBySessionRef.current[sid];
+  }, []);
 
   // Keep callbacks fresh without reconnecting
   useEffect(() => {
@@ -209,6 +229,18 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
     }
     cancelHumanizedSpeech();
   }, []);
+
+  const abortActiveBuildAndRequest = useCallback(() => {
+    activeRequestIdRef.current += 1;
+    if (activeChatAbortRef.current) {
+      try {
+        activeChatAbortRef.current.abort();
+      } catch {}
+      activeChatAbortRef.current = null;
+    }
+    clearSimTimers();
+    stopActiveSpeech();
+  }, [clearSimTimers, stopActiveSpeech]);
 
   // Built-in emotion-aware voice synthesizer with server neural TTS & resilient browser fallback
   const speakNarration = useCallback(
@@ -327,14 +359,25 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
   // Built-in assistant engine when standalone Next.js server is running
   const simulateServerResponse = useCallback(
     async (message: ClientMessage) => {
-      clearSimTimers();
+      const requestSessionId = sessionId;
+      const sessionHistory = getSessionHistory(requestSessionId);
 
       const emit = (type: string, payload: Record<string, unknown>) => {
+        if (type === "agent.building.started") {
+          activeBuildingSessionsRef.current.add(requestSessionId);
+        } else if (type === "agent.building.completed" || type === "preview.ready") {
+          activeBuildingSessionsRef.current.delete(requestSessionId);
+        }
+        // Strictly prevent cross-session message leaking if the user already switched to another session
+        // (except for session.renamed which carries its own target session id)
+        if (currentSessionIdRef.current !== requestSessionId && type !== "session.renamed") {
+          return;
+        }
         onMessageRef.current?.({
           type,
           id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           timestamp: new Date().toISOString(),
-          session_id: sessionId,
+          session_id: requestSessionId,
           payload,
         });
       };
@@ -349,6 +392,9 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             : extracted && !/^session-\d+$/i.test(extracted)
             ? extracted
             : "";
+        if (projectName) {
+          sessionHasProjectRef.current.add(requestSessionId);
+        }
         const cleanPath =
           rawPath.startsWith("/app/applet/workspaces/") && projectName
             ? `~/Desktop/${projectName}`
@@ -366,39 +412,146 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
       }
 
       if (message.type === "execution.interrupt" || message.type === "voice.hush") {
-        clearSimTimers();
-        stopActiveSpeech();
+        if (activeBuildingSessionsRef.current.has(requestSessionId)) {
+          lastBuildInterruptedAtRef.current[requestSessionId] = Date.now();
+          activeBuildingSessionsRef.current.delete(requestSessionId);
+        }
+        abortActiveBuildAndRequest();
+        emit("agent.building.completed", {});
         emit("execution.interrupt.acknowledged", {
           reason: "Interrupted by user",
         });
         emit("agent.narration", {
-          text: "Stopped active execution.",
+          text: "Stopped — I'm all ears! Tell me what you'd like instead.",
         });
         emit("voice.output.completed", {});
         return;
       }
 
       if (message.type === "text.input") {
-        const text = (message.payload?.text as string) || "";
+        const rawInputText = (message.payload?.text as string) || "";
         const images = Array.isArray(message.payload?.images) ? (message.payload?.images as string[]) : [];
         const documents = Array.isArray(message.payload?.documents) ? (message.payload?.documents as any[]) : [];
-        if (!text.trim() && images.length === 0) return;
+        if (!rawInputText.trim() && images.length === 0) return;
 
-        const effectiveText = text.trim() || (images.length > 0 ? "Please analyze this attached screenshot/image." : "");
+        const wasBuildingNowOrRecently =
+          activeBuildingSessionsRef.current.has(requestSessionId) ||
+          Date.now() - (lastBuildInterruptedAtRef.current[requestSessionId] || 0) < 6000;
 
-        chatHistoryRef.current.push({ role: "user", content: effectiveText, images: images.length > 0 ? images : undefined } as any);
+        // Every new user turn immediately cancels any previous in-flight build/chat request
+        // so an old request can NEVER keep running or overwrite the user's new intent!
+        abortActiveBuildAndRequest();
+        const myRequestId = activeRequestIdRef.current;
+        const isCurrentRequestValid = () =>
+          activeRequestIdRef.current === myRequestId &&
+          currentSessionIdRef.current === requestSessionId;
 
         let effectiveUserId = (userId || "").trim();
-        if (!effectiveUserId && typeof window !== "undefined") {
+        let fallbackAuthName = "";
+        if (typeof window !== "undefined") {
           try {
             const rawAuth = localStorage.getItem("vyrexo_user");
             if (rawAuth) {
               const parsedAuth = JSON.parse(rawAuth);
-              if (parsedAuth?.id) effectiveUserId = String(parsedAuth.id).trim();
+              if (!effectiveUserId && parsedAuth?.id) {
+                effectiveUserId = String(parsedAuth.id).trim();
+              }
+              fallbackAuthName = (
+                parsedAuth?.user_metadata?.username ||
+                parsedAuth?.user_metadata?.full_name ||
+                ""
+              ).trim();
             }
           } catch {}
         }
         const currentUserProfile = loadUserProfile(effectiveUserId || undefined);
+        const preferredUsername = (
+          currentUserProfile.username ||
+          currentUserProfile.fullName ||
+          fallbackAuthName
+        ).trim();
+
+        let effectiveText =
+          rawInputText.trim() || (images.length > 0 ? "Please analyze this attached screenshot/image." : "");
+
+        const lowerInput = effectiveText.toLowerCase().replace(/[.!?,;:]/g, " ").replace(/\s+/g, " ").trim();
+
+        // 1. Check for explicit build termination or mid-build cancellation
+        // e.g. "Never mind, stop building it. I don't want to work on this application."
+        if (isBuildTerminationCommand(effectiveText, wasBuildingNowOrRecently)) {
+          lastBuildInterruptedAtRef.current[requestSessionId] = 0;
+          activeBuildingSessionsRef.current.delete(requestSessionId);
+          emit("agent.building.completed", {});
+          const termReply = formatBuildTerminationMessage(preferredUsername);
+          sessionHistory.push({ role: "user", content: effectiveText });
+          sessionHistory.push({ role: "assistant", content: termReply });
+          emit("conversation.turn.completed", { text: termReply });
+          emit("agent.narration", { text: termReply });
+          speakNarration(termReply, "calm");
+          return;
+        }
+
+        // 2. Check for bare silence / pause commands ("Stop Rex", "Pause Rex", "Shut up", "Stop") when no build is active
+        if (isBareSilenceCommand(effectiveText)) {
+          emit("agent.building.completed", {});
+          emit("agent.narration", { text: "Paused — I'm listening whenever you're ready." });
+          emit("voice.output.completed", {});
+          return;
+        }
+
+        // 3. Check for continuation holds ("Wait, I have something else to add on", "Hold on, let me add something")
+        const isContinuationHold =
+          /^(?:(?:hey\s+rex|rex|ok|okay)\s+)?(wait|hold\s+on|hang\s+on|one\s+second|one\s+moment|pause)\s+(i\s+have\s+(something|more|another\s+thing)(\s+else)?\s+to\s+(add|say|mention|tell\s+you)|let\s+me\s+(add|finish|say\s+something)|i('m|\s+am)\s+not\s+done(\s+talking|\s+speaking|\s+yet)?|listen\s+to\s+me(\s+first)?|hear\s+me\s+out)\s*(on)?$/i.test(
+            lowerInput
+          );
+
+        if (isContinuationHold) {
+          emit("agent.building.completed", {});
+          const holdReply =
+            "I've paused right there and I'm all ears! Take your time and tell me what else you'd like to add or change.";
+          sessionHistory.push({ role: "user", content: effectiveText });
+          sessionHistory.push({ role: "assistant", content: holdReply });
+          emit("conversation.turn.completed", { text: holdReply });
+          emit("agent.narration", { text: "Paused and listening — go ahead and add your thoughts!" });
+          speakNarration(holdReply, "warm");
+          return;
+        }
+
+        // 4. General request withdrawal when not specifically about a build ("never mind", "forget that", "scratch that")
+        const isGeneralWithdraw =
+          /^(?:(?:hey\s+rex|rex|please|no)\s+)?(never\s*mind|nevermind|withdraw|forget\s+it|forget\s+that|scratch\s+that|cancel\s+that\s+question)$/i.test(
+            lowerInput
+          );
+
+        if (isGeneralWithdraw) {
+          emit("agent.building.completed", {});
+          const cancelReply =
+            "Got it — I've dropped that right away. I'm listening! Tell me what you'd like to talk about instead.";
+          sessionHistory.push({ role: "user", content: effectiveText });
+          sessionHistory.push({ role: "assistant", content: cancelReply });
+          emit("conversation.turn.completed", { text: cancelReply });
+          emit("agent.narration", { text: "Listening for your next thought." });
+          speakNarration(cancelReply, "calm");
+          return;
+        }
+
+        // 5. If the user prefixed a new instruction with "wait, I have something else to add: <actual instruction>"
+        // or "hold on, don't build that, instead <actual instruction>", strip the interrupt prefix and run their new intent!
+        const redirectMatch = effectiveText.match(
+          /^(?:(?:hey\s+rex|rex)\s*,?\s*)?(?:wait(?:\s+a\s+second|\s+a\s+minute)?|hold\s+on|pause|stop(?:\s+building)?|cancel\s+that|never\s*mind|don'?t\s+build\s+that)[,.\s]+(?:i\s+have\s+something\s+else\s+to\s+add(?:\s+on)?[,.\s]*|let\s+me\s+add\s+something[,.\s]*|instead[,.\s]*|actually[,.\s]*)*(?=[a-zA-Z]{2,})(.+)$/i
+        );
+        if (
+          redirectMatch &&
+          redirectMatch[1] &&
+          redirectMatch[1].trim().length > 3 &&
+          !isBuildTerminationCommand(effectiveText, true)
+        ) {
+          emit("agent.building.completed", {});
+          effectiveText = redirectMatch[1].trim();
+        }
+
+        const text = effectiveText;
+        sessionHistory.push({ role: "user", content: effectiveText, images: images.length > 0 ? images : undefined } as any);
 
         if (message.payload?.fastPath) {
           // Fast-path was already handled immediately client-side with 0ms latency!
@@ -407,7 +560,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             currentUserProfile.username
           );
           if (fastResponse) {
-            chatHistoryRef.current.push({ role: "assistant", content: fastResponse.reply });
+            sessionHistory.push({ role: "assistant", content: fastResponse.reply });
           }
           return;
         }
@@ -418,20 +571,19 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           currentUserProfile.username
         );
         if (fastResponse) {
-          chatHistoryRef.current.push({ role: "assistant", content: fastResponse.reply });
+          sessionHistory.push({ role: "assistant", content: fastResponse.reply });
           emit("conversation.turn.completed", { text: fastResponse.reply });
           emit("agent.narration", { text: fastResponse.spoken });
           speakNarration(fastResponse.spoken, fastResponse.emotion);
           return;
         }
 
-        const lowerEffective = effectiveText.toLowerCase();
-
         // Unified build & implementation intent check (shared with /api/chat)
+        const hasProjectInThisSession = sessionHasProjectRef.current.has(requestSessionId);
         const isExplicitBuildCommand = isBuildOrImplementationIntent(
           effectiveText,
-          chatHistoryRef.current,
-          true
+          sessionHistory,
+          hasProjectInThisSession
         );
 
         const authHeaders: Record<string, string> = {
@@ -440,11 +592,10 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         };
 
         const buildProgressTimers: ReturnType<typeof setTimeout>[] = [];
-        let buildStartSpokenAt = 0;
 
         if (isExplicitBuildCommand) {
           emit("agent.building.started", {});
-          const preliminaryTitle = extractProjectName(effectiveText, chatHistoryRef.current);
+          const preliminaryTitle = extractProjectName(effectiveText, sessionHistory);
 
           // Immediately deploy the 6 AI agents in the Task tab so the user sees live progress right away
           emit("agent.plan.created", {
@@ -464,13 +615,12 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
 
           const startStatement =
             `Okay, I am now going to work on your application (**${preliminaryTitle}**). ` +
-            `I have deployed all 6 AI agents (Planner, Coder, Executor, Reviewer, Tester, and Documenter) and will give you live progress updates every 10 to 15 seconds while your project is being built and verified. Hold on!`;
-          chatHistoryRef.current.push({ role: "assistant", content: startStatement });
+            `I have deployed all 6 AI agents (Planner, Coder, Executor, Reviewer, Tester, and Documenter) and will give you live progress updates every 10 to 15 seconds while your project is being built and verified.`;
+          sessionHistory.push({ role: "assistant", content: startStatement });
           emit("conversation.turn.completed", { text: startStatement });
           emit("agent.narration", {
             text: `Working on your application (${preliminaryTitle}) — deploying 6 AI agents...`,
           });
-          buildStartSpokenAt = Date.now();
           speakNarration(
             `Okay, I am now going to work on your application. I'm deploying the six AI agents to build ${preliminaryTitle}, and I'll give you updates every 10 to 15 seconds until your live preview is ready.`,
             "warm"
@@ -479,6 +629,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           // 12s progress update
           buildProgressTimers.push(
             setTimeout(() => {
+              if (!isCurrentRequestValid()) return;
               emit("agent.plan.step.completed", { step_index: 0 });
               emit("agent.plan.step.started", {
                 step_index: 1,
@@ -499,6 +650,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           // 25s progress update
           buildProgressTimers.push(
             setTimeout(() => {
+              if (!isCurrentRequestValid()) return;
               const msg25 = "⏳ **Build Progress (25s)**: **Coder Agent** is assembling UI views, interactive controls, and local persistence modules...";
               emit("conversation.turn.completed", { text: msg25 });
               emit("agent.narration", {
@@ -514,6 +666,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           // 38s progress update
           buildProgressTimers.push(
             setTimeout(() => {
+              if (!isCurrentRequestValid()) return;
               emit("agent.plan.step.completed", { step_index: 1 });
               emit("agent.plan.step.started", {
                 step_index: 2,
@@ -534,6 +687,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           // 52s progress update
           buildProgressTimers.push(
             setTimeout(() => {
+              if (!isCurrentRequestValid()) return;
               emit("agent.plan.step.completed", { step_index: 2 });
               emit("agent.plan.step.started", {
                 step_index: 3,
@@ -554,6 +708,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           // 68s progress update (for deep Claude Sonnet 5.5 syntheses)
           buildProgressTimers.push(
             setTimeout(() => {
+              if (!isCurrentRequestValid()) return;
               emit("agent.plan.step.completed", { step_index: 3 });
               emit("agent.plan.step.started", {
                 step_index: 4,
@@ -576,6 +731,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
 
         let chatData: any = null;
         const abortCtrl = new AbortController();
+        activeChatAbortRef.current = abortCtrl;
         const abortTimeout = setTimeout(() => abortCtrl.abort(), 240000);
 
         try {
@@ -587,8 +743,8 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               message: effectiveText,
               images,
               documents,
-              history: chatHistoryRef.current.slice(-10),
-              sessionId,
+              history: sessionHistory.slice(-10),
+              sessionId: requestSessionId,
               userId: effectiveUserId || undefined,
               user_id: effectiveUserId || undefined,
               userProfile: currentUserProfile,
@@ -599,24 +755,27 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           clearTimeout(abortTimeout);
           buildProgressTimers.forEach((t) => clearTimeout(t));
 
+          // If interrupted, withdrawn, or superseded while /api/chat was in flight, stop immediately!
+          if (abortCtrl.signal.aborted || !isCurrentRequestValid()) {
+            return;
+          }
+
           const data = await res.json();
+          if (abortCtrl.signal.aborted || !isCurrentRequestValid()) {
+            return;
+          }
           chatData = data;
 
           // 1. CONVERSATIONAL / QUESTION / EXPLANATION / GREETING RESPONSE
-          // Note: Only take the conversational return path if this was NOT an explicit build command
-          // (or if it was blocked by security governance). This prevents a second conversational agent
-          // from interrupting or overriding an active build!
           const isSecurityBlock = data?.chatTitle === "Security Policy Notice";
           if (data.ok && data.isTask === false && (!isExplicitBuildCommand || isSecurityBlock)) {
             emit("agent.building.completed", {});
             const reply = data.reply || "I'm right here! How can I help you with your architecture and code?";
             const spokenText = data.spokenReply || reply;
-            chatHistoryRef.current.push({ role: "assistant", content: reply });
+            sessionHistory.push({ role: "assistant", content: reply });
 
             const shortNarration = reply.length > 120 ? reply.split("\n")[0].slice(0, 100) + "..." : reply;
 
-            // If user inquired why preview wasn't running or requested to run/show preview:
-            // Emit files and trigger preview so the preview iframe loads the real application!
             const lowerQuery = text.toLowerCase();
             const isPreviewOrBuildInquiry =
               Boolean(data.isPreviewAction) ||
@@ -629,7 +788,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               lowerQuery.includes("run the application");
 
             if (isPreviewOrBuildInquiry) {
-              const previewUrl = `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+              const previewUrl = `/api/preview?session=${encodeURIComponent(requestSessionId)}&t=${Date.now()}`;
               emit("preview.ready", { url: previewUrl });
             }
 
@@ -637,15 +796,15 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             if (
               data.chatTitle &&
               !isPlaceholderOrBadSessionName(data.chatTitle) &&
-              !namedSessionsRef.current.has(sessionId)
+              !namedSessionsRef.current.has(requestSessionId)
             ) {
-              namedSessionsRef.current.add(sessionId);
-              emit("session.renamed", { id: sessionId, name: data.chatTitle });
+              namedSessionsRef.current.add(requestSessionId);
+              emit("session.renamed", { id: requestSessionId, name: data.chatTitle });
               fetch("/api/sessions", {
                 method: "POST",
                 headers: authHeaders,
                 body: JSON.stringify({
-                  id: sessionId,
+                  id: requestSessionId,
                   user_id: effectiveUserId || undefined,
                   name: data.chatTitle,
                 }),
@@ -661,9 +820,14 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             );
             return;
           }
-        } catch (err) {
+        } catch (err: any) {
           clearTimeout(abortTimeout);
           buildProgressTimers.forEach((t) => clearTimeout(t));
+          // If the request was aborted due to user interruption, withdrawal, or session switch, exit silently!
+          if (abortCtrl.signal.aborted || err?.name === "AbortError" || !isCurrentRequestValid()) {
+            emit("agent.building.completed", {});
+            return;
+          }
           console.warn("Failed to call /api/chat:", err);
           // In fallback, only trigger build if explicitly commanded
           const lowerFallback = text.toLowerCase();
@@ -696,12 +860,20 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               spokenFallback = "I heard your question and I am right here. Let's explore that topic together.";
             }
 
-            chatHistoryRef.current.push({ role: "assistant", content: fallbackReply });
+            sessionHistory.push({ role: "assistant", content: fallbackReply });
             emit("conversation.turn.completed", { text: fallbackReply });
             emit("agent.narration", { text: fallbackReply.slice(0, 80) + "..." });
             speakNarration(spokenFallback, "warm");
             return;
           }
+        } finally {
+          if (activeChatAbortRef.current === abortCtrl) {
+            activeChatAbortRef.current = null;
+          }
+        }
+
+        if (abortCtrl.signal.aborted || !isCurrentRequestValid()) {
+          return;
         }
 
         const lower = text.toLowerCase();
@@ -715,10 +887,11 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           emit("agent.narration", { text: "Focusing live preview sandbox..." });
           speakNarration("Displaying live preview sandbox now.");
           const tPrev = setTimeout(() => {
-            const targetUrl = `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+            if (!isCurrentRequestValid()) return;
+            const targetUrl = `/api/preview?session=${encodeURIComponent(requestSessionId)}&t=${Date.now()}`;
             emit("preview.ready", { url: targetUrl });
             const reply = "Live preview is running and displayed in the **Preview** tab! You can interact directly with the software inside the embedded browser frame.";
-            chatHistoryRef.current.push({ role: "assistant", content: reply });
+            sessionHistory.push({ role: "assistant", content: reply });
             emit("conversation.turn.completed", { text: reply });
             emit("agent.narration", { text: "Live preview is online." });
             emit("voice.output.completed", {});
@@ -778,6 +951,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           });
 
           const tQuick1 = setTimeout(() => {
+            if (!isCurrentRequestValid()) return;
             emit("agent.plan.step.started", { step_index: 0, description: `Surgical edit: ${text}` });
             emit("agent.action", {
               category: "file_write",
@@ -791,14 +965,15 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           }, 1200);
 
           const tQuick2 = setTimeout(() => {
+            if (!isCurrentRequestValid()) return;
             emit("agent.plan.step.started", { step_index: 1, description: "Hot reload & verify bundle syntax" });
             emit("execution.output", { output: "✓ Hot update applied in 48ms (0 reload latency)\n✓ Syntax verified\n" });
             emit("agent.plan.step.completed", { step_index: 1 });
-            emit("preview.ready", { url: `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}` });
+            emit("preview.ready", { url: `/api/preview?session=${encodeURIComponent(requestSessionId)}&t=${Date.now()}` });
             emit("agent.building.completed", {});
 
             const tweakReply = `### 🎉 Now your project is completely created!\nYou can check that on the **Preview** tab and in the **Code** files.\n\nI've directly applied your change for **${text}**:\n\n- ⚡ **Coder Agent**: Applied surgical update to \`${quickFile}\`.\n- 🚀 **Live Preview**: Refreshed instantly.`;
-            chatHistoryRef.current.push({ role: "assistant", content: tweakReply });
+            sessionHistory.push({ role: "assistant", content: tweakReply });
             emit("conversation.turn.completed", { text: tweakReply });
             emit("agent.narration", { text: "Now your project is completely created. You can check that on the preview tab and in the code files." });
             speakNarration("Now your project is completely created. You can check that on the preview tab and in the code files.", "upbeat");
@@ -811,7 +986,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         // ========== TIER 2: FEATURE SPRINT (Full 6-Agent Cohort) ==========
         if (isFeatureSprint) {
           const featureFile = "src/components/App.tsx";
-          const sprintTitle = extractProjectName(text);
+          const sprintTitle = extractProjectName(text, sessionHistory);
           emit("agent.narration", { text: `Deploying 6-agent Feature Sprint (Planner, Coder, Executor, Reviewer, Tester, Documenter) for: "${text}"` });
           speakNarration(`Deploying the 6 agents for ${sprintTitle}.`, "upbeat");
 
@@ -827,12 +1002,14 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           });
 
           const tSp1 = setTimeout(() => {
+            if (!isCurrentRequestValid()) return;
             emit("agent.plan.step.started", { step_index: 0, description: `Plan feature targets` });
             emit("agent.narration", { text: `Planner Agent: Target identified in ${featureFile}` });
             emit("agent.plan.step.completed", { step_index: 0 });
           }, 600);
 
           const tSp2 = setTimeout(() => {
+            if (!isCurrentRequestValid()) return;
             emit("agent.plan.step.started", { step_index: 1, description: `Implement feature logic` });
             emit("agent.action", {
               category: "file_write",
@@ -846,6 +1023,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           }, 1800);
 
           const tSp3 = setTimeout(() => {
+            if (!isCurrentRequestValid()) return;
             emit("agent.plan.step.started", { step_index: 2, description: `Compile bundle` });
             emit("agent.plan.step.completed", { step_index: 2 });
             emit("agent.plan.step.started", { step_index: 3, description: `Audit code quality` });
@@ -856,21 +1034,21 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             emit("agent.plan.step.started", { step_index: 5, description: `Document feature` });
             emit("agent.plan.step.completed", { step_index: 5 });
 
-            emit("preview.ready", { url: `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}` });
+            emit("preview.ready", { url: `/api/preview?session=${encodeURIComponent(requestSessionId)}&t=${Date.now()}` });
             emit("agent.building.completed", {});
 
             const sprintChatTitle = generateChatTitle(text, sprintTitle);
             if (
               !isPlaceholderOrBadSessionName(sprintChatTitle) &&
-              !namedSessionsRef.current.has(sessionId)
+              !namedSessionsRef.current.has(requestSessionId)
             ) {
-              namedSessionsRef.current.add(sessionId);
-              emit("session.renamed", { id: sessionId, name: sprintChatTitle });
+              namedSessionsRef.current.add(requestSessionId);
+              emit("session.renamed", { id: requestSessionId, name: sprintChatTitle });
               fetch("/api/sessions", {
                 method: "POST",
                 headers: authHeaders,
                 body: JSON.stringify({
-                  id: sessionId,
+                  id: requestSessionId,
                   user_id: effectiveUserId || undefined,
                   name: sprintChatTitle,
                 }),
@@ -878,7 +1056,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             }
 
             const featReply = `### 🎉 Feature Sprint Complete!\nYou can check that on the **Preview** tab and in the **Code** files.\n\nI've coordinated all 6 agents for **${text}**:\n\n- 📋 **Planner**: Mapped minimal dependency footprint.\n- 💻 **Coder**: Authored modular feature components in \`${featureFile}\`.\n- ⚡ **Executor**: Bundled module graph with zero syntax errors.\n- 🛡️ **Reviewer**: Audited UX, responsive layout, and accessibility invariants.\n- 🧪 **Tester**: Validated test suite assertions with zero regressions.\n- 📄 **Documenter**: Updated project README and feature contracts.\n- 🚀 **Live Preview**: Running and ready to test in the **Preview** tab.`;
-            chatHistoryRef.current.push({ role: "assistant", content: featReply });
+            sessionHistory.push({ role: "assistant", content: featReply });
             emit("conversation.turn.completed", { text: featReply, chatTitle: sprintChatTitle });
             emit("agent.narration", { text: "Now your project is completely created. You can check that on the preview tab and in the code files." });
             speakNarration("Now your project is completely created. You can check that on the preview tab and in the code files.", "upbeat");
@@ -904,7 +1082,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
 
         const isFlowstateBuild =
           /\b(flowstate|flow\s*state|focus\s*os|flow\s*os|productivity(\s*os)?|focus\s*timer|pomodoro|deep\s*work|work\s*os|workspace\s*os|task\s*os|workflow\s*os|operating\s*system|soundscape)\b/i.test(lower) ||
-          chatHistoryRef.current.some((h) => /\b(flowstate|flow\s*state)\b/i.test(h.content));
+          sessionHistory.some((h) => /\b(flowstate|flow\s*state)\b/i.test(h.content));
 
         const isCalculatorBuild =
           !isFlowstateBuild &&
@@ -944,9 +1122,9 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           !isPublishingBuild &&
           (lower.includes("ecommerce") ||
           lower.includes("e-commerce") ||
-          lower.includes("auramart") ||
           lower.includes("online store") ||
           lower.includes("shopping cart") ||
+          lower.includes("shopping app") ||
           lower.includes("clothing store") ||
           lower.includes("retail store"));
 
@@ -1027,9 +1205,11 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             ];
           } else if (isCosmeticsBuild) {
             targetType = "cosmetics_ecommerce";
-            cleanProjectTitle = "AuraBeauty — Cosmetics & Skincare E-Commerce Platform";
+            const dynamicCosmeticsBrand = extractProjectName(text, sessionHistory);
+            cleanProjectTitle = `${dynamicCosmeticsBrand} — Cosmetics & Skincare E-Commerce Platform`;
+            const slug = dynamicCosmeticsBrand.toLowerCase().replace(/[^a-z0-9]+/g, "-");
             planSteps = [
-              { agent_name: "planner", description: "Architect AuraBeauty product taxonomy (5-Step Facial Kits, serums, cleansers), routine skin-profiler, and cart state", files: ["src/components/CosmeticsStore.tsx", "src/types/cosmetics.ts"] },
+              { agent_name: "planner", description: `Architect ${dynamicCosmeticsBrand} product taxonomy (5-Step Facial Kits, serums, cleansers), routine skin-profiler, and cart state`, files: ["src/components/CosmeticsStore.tsx", "src/types/cosmetics.ts"] },
               { agent_name: "coder", description: "Implement CosmeticsStore.tsx with skin-routine filtering, quick view ingredients modal, promo coupon engine, and slide-out cart drawer", files: ["src/components/CosmeticsStore.tsx", "src/data/products.ts", "src/types/cosmetics.ts"] },
               { agent_name: "executor", description: "Verify React hydration, Tailwind CSS botanical palette tokens, and icon bindings", files: ["package.json"] },
               { agent_name: "reviewer", description: "Audit cart calculation invariants, discount coupon security, and mobile touch targets", files: ["src/components/CosmeticsStore.tsx"] },
@@ -1066,8 +1246,8 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
                 category: "file_write",
                 agent: "coder",
                 tool: "file_writer",
-                message: "Configured package.json dependencies for AuraBeauty",
-                content: JSON.stringify({ name: "aurabeauty-cosmetics", version: "1.0.0", private: true }, null, 2),
+                message: `Configured package.json dependencies for ${dynamicCosmeticsBrand}`,
+                content: JSON.stringify({ name: `${slug}-cosmetics`, version: "1.0.0", private: true }, null, 2),
               },
               {
                 path: "README.md",
@@ -1075,7 +1255,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
                 agent: "documenter",
                 tool: "doc_generator",
                 message: "Generated architecture specifications and developer documentation",
-                content: "# AuraBeauty — Cosmetics & Skincare E-Commerce Platform\n\nA clinical, botanical skincare e-commerce platform with specialized routine recommendations, dermatological ingredients breakdown, responsive cart drawer, and checkout workflow.",
+                content: `# ${cleanProjectTitle}\n\nA clinical, botanical skincare e-commerce platform with specialized routine recommendations, dermatological ingredients breakdown, responsive cart drawer, and checkout workflow.`,
               },
             ];
           } else if (isRoomCanvas) {
@@ -1438,23 +1618,29 @@ test("Filters by status correctly", () => {
         }
 
         if (!cleanProjectTitle || /\b(yes|we should start|start building|start actual building|start coding)\b/i.test(cleanProjectTitle)) {
-          cleanProjectTitle = chatData?.projectTitle || extractProjectName(text);
+          cleanProjectTitle = chatData?.projectTitle || extractProjectName(text, sessionHistory);
         }
+
+        if (!isCurrentRequestValid()) {
+          return;
+        }
+
+        sessionHasProjectRef.current.add(requestSessionId);
 
         const projectChatTitle =
           (!isPlaceholderOrBadSessionName(chatData?.chatTitle) && chatData?.chatTitle) ||
           generateChatTitle(text, cleanProjectTitle);
         if (
           !isPlaceholderOrBadSessionName(projectChatTitle) &&
-          !namedSessionsRef.current.has(sessionId)
+          !namedSessionsRef.current.has(requestSessionId)
         ) {
-          namedSessionsRef.current.add(sessionId);
-          emit("session.renamed", { id: sessionId, name: projectChatTitle });
+          namedSessionsRef.current.add(requestSessionId);
+          emit("session.renamed", { id: requestSessionId, name: projectChatTitle });
           fetch("/api/sessions", {
             method: "POST",
             headers: authHeaders,
             body: JSON.stringify({
-              id: sessionId,
+              id: requestSessionId,
               user_id: effectiveUserId || undefined,
               name: projectChatTitle,
               forceRename: true,
@@ -1468,7 +1654,7 @@ test("Filters by status correctly", () => {
             method: "POST",
             headers: authHeaders,
             body: JSON.stringify({
-              sessionId,
+              sessionId: requestSessionId,
               user_id: effectiveUserId || undefined,
               type: targetType,
               title: cleanProjectTitle,
@@ -1559,7 +1745,7 @@ test("Filters by status correctly", () => {
           });
         }
 
-        const targetPreviewUrl = (chatData as any)?.previewUrl || `/api/preview?session=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+        const targetPreviewUrl = (chatData as any)?.previewUrl || `/api/preview?session=${encodeURIComponent(requestSessionId)}&t=${Date.now()}`;
         const buildSlug =
           (cleanProjectTitle || "vyrexo-project")
             .toLowerCase()
@@ -1589,7 +1775,7 @@ test("Filters by status correctly", () => {
         const completionSpeech =
           "Congratulations, your project is completed just the way you wanted. You can now look at it in the preview tab.";
 
-        chatHistoryRef.current.push({ role: "assistant", content: completionMsg });
+        sessionHistory.push({ role: "assistant", content: completionMsg });
         emit("conversation.turn.completed", {
           text: completionMsg,
         });
@@ -1599,7 +1785,7 @@ test("Filters by status correctly", () => {
         speakNarration(completionSpeech, "upbeat");
       }
     },
-    [clearSimTimers, speakNarration, sessionId, userId, stopActiveSpeech]
+    [abortActiveBuildAndRequest, getSessionHistory, speakNarration, sessionId, userId, stopActiveSpeech]
   );
 
   const connect = useCallback(() => {
@@ -1675,13 +1861,13 @@ test("Filters by status correctly", () => {
 
   const disconnect = useCallback(() => {
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
-    clearSimTimers();
+    abortActiveBuildAndRequest();
     if (wsRef.current) {
       wsRef.current.close(1000, "Client disconnect");
       wsRef.current = null;
     }
     setStatus("disconnected");
-  }, [clearSimTimers]);
+  }, [abortActiveBuildAndRequest]);
 
   const sendMessage = useCallback(
     (message: ClientMessage) => {

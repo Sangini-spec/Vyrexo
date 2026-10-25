@@ -21,6 +21,10 @@ import { detectEmotionFromContext, getEmotionStateMeta, type EmotionTone } from 
 import {
   isPlaceholderOrBadSessionName,
   resolveSemanticSessionName,
+  isBuildTerminationCommand,
+  formatBuildTerminationMessage,
+  isBareSilenceCommand,
+  extractUserInterruptFromBuffer,
 } from "@/lib/project-spec";
 import {
   syncSessionFilesToLocalDisk,
@@ -95,15 +99,64 @@ function dayGroup(ts: number): string {
 // Single stop words count as a hard stop when they appear ANYWHERE in a short
 // utterance — so "stop", "rex stop", "rex can you stop", "ok stop please" all
 // halt Rex, not just phrases that literally start with "stop".
-const STOP_SINGLE = ["stop", "wait", "cancel", "pause", "quiet", "enough", "shush", "hush", "silence"];
-const STOP_PHRASES = ["stop it", "hold on", "shut up", "be quiet", "never mind", "nevermind", "knock it off", "that's enough", "thats enough", "stop talking", "stop listening"];
+const STOP_SINGLE = ["stop", "wait", "cancel", "pause", "quiet", "enough", "shush", "hush", "silence", "withdraw", "abort", "terminate"];
+const STOP_PHRASES = [
+  "stop rex",
+  "pause rex",
+  "rex stop",
+  "rex pause",
+  "wait rex",
+  "rex wait",
+  "hold on rex",
+  "stop it",
+  "stop building",
+  "stop coding",
+  "stop working",
+  "stop talking",
+  "stop speaking",
+  "stop listening",
+  "terminate the build",
+  "terminate building",
+  "hold on",
+  "hang on",
+  "shut up",
+  "be quiet",
+  "never mind",
+  "nevermind",
+  "knock it off",
+  "that's enough",
+  "thats enough",
+  "don't build",
+  "do not build",
+  "don't want to work on",
+  "do not want to work on",
+  "cancel that",
+  "cancel the build",
+  "withdraw that",
+  "withdraw the request",
+  "i have something else to add",
+  "let me add",
+  "but i think",
+  "but i want",
+  "actually i",
+  "instead of that",
+];
 function isStopPhrase(lower: string): boolean {
-  const words = lower.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return false;
-  // A short command (≤ 6 words) containing a stop word as a whole word.
-  if (words.length <= 6 && words.some((w) => STOP_SINGLE.includes(w))) return true;
-  // Multi-word stop phrases appearing anywhere.
-  return STOP_PHRASES.some((p) => lower.includes(p));
+  const trimmed = lower.trim();
+  if (!trimmed) return false;
+  if (isBareSilenceCommand(trimmed) || isBuildTerminationCommand(trimmed, true)) return true;
+  if (extractUserInterruptFromBuffer(trimmed).matched) return true;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length <= 8 && words.some((w) => STOP_SINGLE.includes(w))) return true;
+  if (STOP_PHRASES.some((p) => trimmed.includes(p))) return true;
+  if (/^(?:(?:hey\s+rex|hi\s+rex|rex|ok|okay|no|please)\s*,?\s*)*(stop|pause|wait|hold\s+on|hang\s+on|cancel|never\s*mind|terminate|don'?t\s+build|withdraw|shut\s+up|be\s+quiet)\b/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+function isPureBareStop(lower: string): boolean {
+  return isBareSilenceCommand(lower);
 }
 
 interface FastPathResponse {
@@ -244,10 +297,15 @@ function checkClientFastPath(rawText: string, username?: string): FastPathRespon
     };
   }
 
-  if (/^(stop|pause|wait|be quiet|shut up|hush)$/i.test(t)) {
+  // Never intercept build termination commands in fast-path so useWebSocket handles them with full build abort & confirmation
+  if (isBuildTerminationCommand(t, false)) {
+    return null;
+  }
+
+  if (isBareSilenceCommand(t)) {
     return {
       reply: "Stopped active execution.",
-      spoken: "Stopped. What would you like to do instead?",
+      spoken: "",
       action: "stop",
       emotion: "calm",
     };
@@ -259,42 +317,51 @@ function checkClientFastPath(rawText: string, username?: string): FastPathRespon
 /**
  * Detects if a captured microphone transcript is an acoustic echo of Rex's
  * own voice output that was picked up by the user's microphone.
+ * Uses contiguous phrase / n-gram matching (never unordered bag-of-words) and
+ * never suppresses explicit user interruption, stop, or build-termination commands.
  */
 function checkIsSelfEcho(
   userText: string,
   recentAiUtterances: Array<{ text: string; time: number }>
 ): boolean {
   if (!userText.trim()) return false;
-  const cleanInput = userText.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+  const cleanInput = userText.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleanInput) return false;
+
+  // Never block an explicit stop, pause, build-termination, continuation, or redirect phrase
+  if (isStopPhrase(cleanInput)) {
+    return false;
+  }
+
   const inputWords = cleanInput.split(/\s+/).filter((w) => w.length > 1);
   if (inputWords.length === 0) return false;
 
   const now = Date.now();
 
   for (const { text: aiText, time } of recentAiUtterances) {
-    // Only check speech outputted within the last 25 seconds
-    if (now - time > 25000) continue;
-    const cleanAi = aiText.toLowerCase().replace(/[^\w\s]/g, " ").trim();
+    // Only check speech outputted within the last 12 seconds
+    if (now - time > 12000) continue;
+    const cleanAi = aiText.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
     if (!cleanAi) continue;
 
-    // Direct substring check
-    if (cleanAi.includes(cleanInput)) {
+    // 1. Direct contiguous substring check
+    if (cleanInput.length >= 6 && cleanAi.includes(cleanInput)) {
       return true;
     }
 
-    // Tokenized word-overlap check
-    const aiWords = new Set(cleanAi.split(/\s+/).filter((w) => w.length > 1));
-    let matchingWordCount = 0;
-    for (const w of inputWords) {
-      if (aiWords.has(w)) {
-        matchingWordCount++;
+    // 2. Contiguous 2-word bigram overlap check (requires words to appear in the SAME adjacent order as Rex's speech)
+    if (inputWords.length >= 3) {
+      let matchingBigrams = 0;
+      const totalBigrams = inputWords.length - 1;
+      for (let i = 0; i < totalBigrams; i++) {
+        const bigram = `${inputWords[i]} ${inputWords[i + 1]}`;
+        if (cleanAi.includes(bigram)) {
+          matchingBigrams++;
+        }
       }
-    }
-
-    const overlapRatio = matchingWordCount / inputWords.length;
-    // If >= 60% of words in the transcript appear in Rex's recent speech, it is an echo
-    if (inputWords.length >= 2 && overlapRatio >= 0.6) {
-      return true;
+      if (matchingBigrams / totalBigrams >= 0.75) {
+        return true;
+      }
     }
   }
 
@@ -868,6 +935,7 @@ export default function App() {
   const lastRexSpeechEndTimeRef = useRef(0);
   const recentAiSpeechRef = useRef<Array<{ text: string; time: number }>>([]);
   const isBuildingRef = useRef(false);
+  const lastBuildInterruptedTimeRef = useRef(0);
   const isSynthesizingVoiceRef = useRef(false);
   const recordAiSpeech = useCallback((text: string) => {
     if (!text || !text.trim()) return;
@@ -948,6 +1016,14 @@ export default function App() {
     }
   }, []);
 
+  const clearPendingRex = useCallback(() => {
+    if (pendingRexTimerRef.current) {
+      clearTimeout(pendingRexTimerRef.current);
+      pendingRexTimerRef.current = null;
+    }
+    pendingRexRef.current = null;
+  }, []);
+
   // ── High-Performance RAF Stream Batching (prevents main thread bottleneck) ──
   const codeEventsBufferRef = useRef<CodeEvent[]>([]);
   const codeEventsRafRef = useRef<number | null>(null);
@@ -989,6 +1065,17 @@ export default function App() {
 
   // ── WebSocket: handles all server events ────────────────────
   const onServerMessage = useCallback((msg: ServerMessage) => {
+    // Strictly isolate events to the session they belong to so background builds or replies
+    // from a previous session can NEVER leak into a newly opened chat session!
+    if (
+      msg.session_id &&
+      activeSessionRef.current &&
+      msg.session_id !== activeSessionRef.current &&
+      msg.type !== "session.renamed"
+    ) {
+      return;
+    }
+
     switch (msg.type) {
       case "voice.transcription.partial": {
         const text = msg.payload.text as string;
@@ -1338,12 +1425,21 @@ export default function App() {
 
   const handleInterruptVoice = useCallback(() => {
     muteAudio();
+    clearPendingRex();
+    if (isBuildingRef.current) {
+      lastBuildInterruptedTimeRef.current = Date.now();
+      setSteps((prev) =>
+        prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
+      );
+    }
+    isBuildingRef.current = false;
+    isSynthesizingVoiceRef.current = false;
     try { window.speechSynthesis.cancel(); } catch {}
     sendMessage({ type: "execution.interrupt", payload: {} });
-    setOrbState("idle");
-    setNarration("Stopped. What would you like instead?");
+    setOrbState(voiceListeningRef.current ? "listening" : "idle");
+    setNarration("Stopped — I'm all ears! Tell me what you'd like instead.");
     setTranscript("");
-  }, [muteAudio, sendMessage]);
+  }, [muteAudio, clearPendingRex, sendMessage]);
 
   // Unified voice synthesis: keeps Rex's voice 100% consistent across all turns
   const playUnifiedVoice = useCallback(
@@ -1427,62 +1523,98 @@ export default function App() {
       setTranscript(normalizedLive);
       const raw = normalizedLive.trim();
       if (!raw) return;
-      const lower = raw.toLowerCase().replace(/[.!?,]/g, "").trim();
-      const isStop = isStopPhrase(lower);
-      const rexTalking =
+
+      // Extract clean user utterance if preceded by any speaker bleed
+      const extracted = extractUserInterruptFromBuffer(raw);
+      const effectiveRaw = extracted.matched ? extracted.extractedText : raw;
+      const lower = effectiveRaw.toLowerCase().replace(/[.!?,]/g, "").trim();
+      const isStop = extracted.matched || isStopPhrase(lower);
+      const isBareStop = isPureBareStop(lower);
+      const wasBuildingRecently =
+        isBuildingRef.current || Date.now() - lastBuildInterruptedTimeRef.current < 6000;
+      const isBuildTermination = isBuildTerminationCommand(effectiveRaw, wasBuildingRecently);
+
+      const rexTalkingOrWorking =
+        audioIsPlaying ||
         isPlayingRef.current ||
         speakingRef.current ||
         wasPlayingRef.current ||
-        isSynthesizingVoiceRef.current;
+        isSynthesizingVoiceRef.current ||
+        isBuildingRef.current;
 
-      // ── BARGE-IN ──────────────────────────────────────────────────────────
-      // Only explicit stop words ("stop", "wait", "pause", "quiet", "cancel")
-      // are permitted to interrupt Rex mid-speech.
-      // Arbitrary speech or acoustic spill from the speakers MUST NEVER interrupt Rex!
+      // ── BARGE-IN (Interim) ────────────────────────────────────────────────
+      // Stop/pause/wait/hold-on/cancel/continuation/redirect phrases immediately silence Rex and abort any active build!
       if (!isFinal) {
-        if (rexTalking && isStop) {
-          muteAudio(); // pause local audio + discard any in-flight chunks
+        if (rexTalkingOrWorking && isStop) {
+          muteAudio();
+          clearPendingRex();
+          if (isBuildingRef.current) {
+            lastBuildInterruptedTimeRef.current = Date.now();
+            setSteps((prev) =>
+              prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
+            );
+          }
+          isBuildingRef.current = false;
+          isSynthesizingVoiceRef.current = false;
           try { window.speechSynthesis.cancel(); } catch {}
           sendMessage({ type: "execution.interrupt", payload: {} });
-          setOrbState("idle");
-          setNarration("Stopped. What would you like instead?");
-          setTranscript("");
+          setOrbState("listening");
+          setNarration("Stopped — I'm listening! Go ahead.");
         }
-        return; // wait for the final transcript to act on the actual message
+        return; // wait for the final transcript to act on the complete sentence
       }
 
       // ── FINAL transcript ──────────────────────────────────────────────────
-      // 1. Explicit user stop
+      // 1. Explicit user stop, silence, build termination, withdrawal, or continuation
       if (isStop) {
         muteAudio();
+        clearPendingRex();
+        if (isBuildingRef.current) {
+          lastBuildInterruptedTimeRef.current = Date.now();
+          setSteps((prev) =>
+            prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
+          );
+        }
+        isBuildingRef.current = false;
+        isSynthesizingVoiceRef.current = false;
         try { window.speechSynthesis.cancel(); } catch {}
         sendMessage({ type: "execution.interrupt", payload: {} });
-        setOrbState("idle");
-        setNarration("Stopped. What would you like instead?");
+
+        // If the user only said a bare silence command ("Stop Rex", "Pause Rex", "Stop", "Shut up")
+        // AND no build was being terminated, keep Rex completely quiet and listening!
+        // If a build WAS running or they spoke a build termination sentence ("Never mind, stop building it..."),
+        // fall through so Rex confirms: "Okay <username>, I have terminated the building process just as you requested."
+        if (isBareStop && !wasBuildingRecently && !isBuildTermination) {
+          setOrbState("listening");
+          setNarration("Paused — I'm listening whenever you're ready.");
+          setTranscript("");
+          return;
+        }
+      }
+
+      // 2. Suppress acoustic spill while Rex is talking or synthesizing voice (unless user just interrupted above)
+      if (
+        (audioIsPlaying || isPlayingRef.current || speakingRef.current || wasPlayingRef.current || isSynthesizingVoiceRef.current) &&
+        !isStop
+      ) {
+        console.debug("[voice] Suppressing transcript received while Rex was speaking (acoustic spill):", effectiveRaw);
         setTranscript("");
         return;
       }
 
-      // 2. Suppress acoustic spill while Rex is talking or synthesizing voice
-      if (rexTalking) {
-        console.debug("[voice] Suppressing transcript received while Rex was speaking (acoustic spill):", raw);
-        setTranscript("");
-        return;
-      }
-
-      // 3. Suppress acoustic spill in the short post-speech hardware drain window (450ms)
+      // 3. Suppress acoustic spill in the short post-speech hardware drain window (380ms)
       const now = Date.now();
       const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
-      const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(raw);
-      if (timeSinceRexSpoke < 450 && !hasExplicitWake) {
-        console.debug("[voice] Suppressing transcript received in echo cooldown:", raw);
+      const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(effectiveRaw);
+      if (timeSinceRexSpoke < 380 && !hasExplicitWake && !isStop) {
+        console.debug("[voice] Suppressing transcript received in echo cooldown:", effectiveRaw);
         setTranscript("");
         return;
       }
 
-      // 4. Semantic self-echo check: Did the mic pick up Rex's own speech?
-      if (checkIsSelfEcho(raw, recentAiSpeechRef.current)) {
-        console.debug("[voice] Suppressing self-echo transcript matching Rex's recent speech:", raw);
+      // 4. Contiguous self-echo check: Did the mic pick up Rex's own speech?
+      if (!isStop && checkIsSelfEcho(effectiveRaw, recentAiSpeechRef.current)) {
+        console.debug("[voice] Suppressing self-echo transcript matching Rex's recent speech:", effectiveRaw);
         setTranscript("");
         return;
       }
@@ -1495,10 +1627,10 @@ export default function App() {
       setOrbState("thinking");
       setNarration("Thinking...");
 
-      const cleanText = normalizeSpokenTranscript(raw, { isInterim: false });
+      const cleanText = normalizeSpokenTranscript(effectiveRaw, { isInterim: false });
 
       // Check lightweight client fast-path for simple greetings or common commands (<10ms instant response)
-      const fastResult = checkClientFastPath(cleanText, userProfile.username);
+      const fastResult = !wasBuildingRecently ? checkClientFastPath(cleanText, userProfile.username) : null;
       if (fastResult) {
         if (fastResult.action === "preview") {
           setActiveRightTab("preview");
@@ -1535,7 +1667,7 @@ export default function App() {
       sendMessage({ type: "text.input", payload: { text: cleanText } });
       setTranscript("");
     },
-    [sendMessage, muteAudio, unmuteAudio, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, userProfile.username]
+    [sendMessage, muteAudio, unmuteAudio, clearPendingRex, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, userProfile.username, audioIsPlaying]
   );
 
   const handleActivated = useCallback(() => {
@@ -1563,6 +1695,7 @@ export default function App() {
     onDeactivated: handleDeactivated,
     onInterrupt: handleInterruptVoice,
     isAiSpeaking:
+      audioIsPlaying ||
       isPlayingRef.current ||
       orbState === "speaking" ||
       wasPlayingRef.current ||
@@ -1579,15 +1712,12 @@ export default function App() {
   const handleOrbClick = useCallback(() => {
     unlockAudioPlayback();
     primeSpeechSynthesis();
-    if (isPlayingRef.current || orbState === "speaking" || orbState === "thinking") {
-      muteAudio();
-      sendMessage({ type: "execution.interrupt", payload: {} });
-      setOrbState("idle");
-      setNarration("Stopped. What would you like instead?");
+    if (isPlayingRef.current || isBuildingRef.current || orbState === "speaking" || orbState === "thinking") {
+      handleInterruptVoice();
       return;
     }
     forceActivate();
-  }, [orbState, muteAudio, sendMessage, forceActivate]);
+  }, [orbState, handleInterruptVoice, forceActivate]);
 
   // ── Session management ──────────────────────────────────────
   // Tracks the most recently opened session so a slow history fetch from an
@@ -1627,7 +1757,15 @@ export default function App() {
   const handleSessionClick = useCallback(
     (id: string) => {
       if (isBlockedSessionId(id)) return;
-      if (activeSession && activeSession !== id) disconnect();
+      if (activeSession && activeSession !== id) {
+        muteAudio();
+        clearPendingRex();
+        isBuildingRef.current = false;
+        isSynthesizingVoiceRef.current = false;
+        try { window.speechSynthesis.cancel(); } catch {}
+        disconnect();
+      }
+      activeSessionRef.current = id;
       setActiveSession(id);
       if (userStorageKeys.activeSession) {
         try {
@@ -1635,6 +1773,7 @@ export default function App() {
         } catch {}
       }
       setSteps([]);
+      setOrbState(voiceListeningRef.current ? "listening" : "idle");
       setNarration("Say 'Rex' to start, or click the orb");
 
       // Instantly restore this session's saved conversation from user-scoped localStorage
