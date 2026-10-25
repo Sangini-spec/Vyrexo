@@ -20,7 +20,7 @@ const rootPublicDir = path.join(workspaceRoot, "public");
 
 const EXCLUDED_RUNTIME_PACKAGES = new Set(["typescript", "eslint", "@types"]);
 
-function copyRealPackagesFromNodeModules(srcNodeModules, destNodeModules) {
+function copyRealPackagesFromNodeModules(srcNodeModules, destNodeModules, dereferenceSymlinks = false) {
   if (!fs.existsSync(srcNodeModules)) return;
   fs.mkdirSync(destNodeModules, { recursive: true });
 
@@ -36,20 +36,27 @@ function copyRealPackagesFromNodeModules(srcNodeModules, destNodeModules) {
     const entryPath = path.join(srcNodeModules, entry);
     let stat;
     try {
-      stat = fs.lstatSync(entryPath);
+      stat = dereferenceSymlinks ? fs.statSync(entryPath) : fs.lstatSync(entryPath);
     } catch {
       continue;
     }
 
+    const isAllowedDir = dereferenceSymlinks
+      ? stat.isDirectory()
+      : stat.isDirectory() && !stat.isSymbolicLink();
+
     if (entry.startsWith("@")) {
-      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      if (isAllowedDir) {
         const scopeDest = path.join(destNodeModules, entry);
         fs.mkdirSync(scopeDest, { recursive: true });
         for (const subEntry of fs.readdirSync(entryPath)) {
           const subPath = path.join(entryPath, subEntry);
           try {
-            const subStat = fs.lstatSync(subPath);
-            if (subStat.isDirectory() && !subStat.isSymbolicLink()) {
+            const subStat = dereferenceSymlinks ? fs.statSync(subPath) : fs.lstatSync(subPath);
+            const isAllowedSubDir = dereferenceSymlinks
+              ? subStat.isDirectory()
+              : subStat.isDirectory() && !subStat.isSymbolicLink();
+            if (isAllowedSubDir) {
               const targetPkg = path.join(scopeDest, subEntry);
               if (!fs.existsSync(targetPkg)) {
                 fs.cpSync(subPath, targetPkg, { recursive: true, dereference: true });
@@ -58,7 +65,7 @@ function copyRealPackagesFromNodeModules(srcNodeModules, destNodeModules) {
           } catch {}
         }
       }
-    } else if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    } else if (isAllowedDir) {
       const targetPkg = path.join(destNodeModules, entry);
       if (!fs.existsSync(targetPkg)) {
         fs.cpSync(entryPath, targetPkg, { recursive: true, dereference: true });
@@ -161,8 +168,8 @@ function main() {
     }
   }
 
-  copyRealPackagesFromNodeModules(path.join(frontendStandaloneDir, "node_modules"), destNodeModules);
-  copyRealPackagesFromNodeModules(path.join(appStandaloneSrc, "node_modules"), destNodeModules);
+  copyRealPackagesFromNodeModules(path.join(frontendStandaloneDir, "node_modules"), destNodeModules, true);
+  copyRealPackagesFromNodeModules(path.join(appStandaloneSrc, "node_modules"), destNodeModules, true);
 
   const appNodeModules = path.join(appStandaloneSrc, "node_modules");
   if (fs.existsSync(appNodeModules)) {

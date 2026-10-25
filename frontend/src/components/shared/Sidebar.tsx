@@ -2,6 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { VyrexoLogo } from "./VyrexoLogo";
+import {
+  DEFAULT_USER_PROFILE,
+  loadUserProfile,
+  type UserProfile,
+} from "@/lib/user-profile";
 
 export interface Session {
   id: string;
@@ -16,7 +21,8 @@ interface SidebarProps {
   activeSessionId?: string;
   collapsed: boolean;
   width?: number;
-  user?: { email?: string; user_metadata?: { full_name?: string; username?: string } } | null;
+  user?: { id?: string; email?: string; user_metadata?: { full_name?: string; username?: string } } | null;
+  userProfile?: UserProfile | null;
   onSignOut?: () => void;
   onToggle: () => void;
   onSessionClick: (id: string) => void;
@@ -34,6 +40,7 @@ export function Sidebar({
   collapsed,
   width = 260,
   user,
+  userProfile,
   onSignOut,
   onSessionClick,
   onNewSession,
@@ -47,8 +54,39 @@ export function Sidebar({
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
+  const [localProfile, setLocalProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const syncProfile = () => {
+      setLocalProfile(loadUserProfile(user?.id, user));
+    };
+    syncProfile();
+    window.addEventListener("vyrexo-profile-updated", syncProfile);
+    window.addEventListener("storage", syncProfile);
+    return () => {
+      window.removeEventListener("vyrexo-profile-updated", syncProfile);
+      window.removeEventListener("storage", syncProfile);
+    };
+  }, [user]);
+
+  const emailPrefix = user?.email ? user.email.split("@")[0].trim() : "";
+  const effectiveUsername = (
+    userProfile?.username ||
+    localProfile.username ||
+    user?.user_metadata?.username ||
+    ""
+  ).trim();
+  const rawFullName = (
+    userProfile?.fullName ||
+    localProfile.fullName ||
+    user?.user_metadata?.full_name ||
+    ""
+  ).trim();
+  const effectiveFullName =
+    rawFullName && rawFullName.toLowerCase() !== emailPrefix.toLowerCase() ? rawFullName : "";
+  const signOutLabel = effectiveUsername || effectiveFullName || user?.email || "";
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -337,7 +375,7 @@ export function Sidebar({
           <button
             onClick={onSignOut}
             className="w-full flex items-center justify-between p-[7px_10px] rounded-[7px] text-[12.5px] text-[var(--muted2)] cursor-pointer hover:bg-[var(--border)] hover:text-red-600 dark:hover:text-red-400 transition-all font-medium text-left"
-            title="Sign out of your account"
+            title={signOutLabel ? `Sign out (${signOutLabel})` : "Sign out of your account"}
           >
             <div className="flex items-center gap-[9px] min-w-0">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="opacity-70 flex-shrink-0">
@@ -347,9 +385,12 @@ export function Sidebar({
               </svg>
               <span className="truncate">Sign out</span>
             </div>
-            {user?.email && (
-              <span className="text-[10px] text-[var(--muted)] truncate max-w-[80px] ml-1">
-                {user.email.split("@")[0]}
+            {signOutLabel && (
+              <span
+                className="text-[11px] text-[var(--muted)] truncate max-w-[125px] ml-1.5"
+                title={signOutLabel}
+              >
+                {signOutLabel}
               </span>
             )}
           </button>

@@ -184,7 +184,14 @@ export function useVoice({
   };
 
   const matchInterrupt = (text: string): boolean => {
-    return INTERRUPT_PATTERNS.some((p) => p.test(text));
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    // Only treat short, explicit stop commands (<= 5 words) as barge-in interrupts
+    // so Rex's own voice from speakers (e.g., saying "wait", "quiet", "pause" in a sentence)
+    // cannot accidentally self-interrupt.
+    const wordCount = trimmed.split(/\s+/).length;
+    if (wordCount > 5) return false;
+    return INTERRUPT_PATTERNS.some((p) => p.test(trimmed));
   };
 
   // ── Audio Level Analyzer Setup ──────────────────────────────────
@@ -410,7 +417,7 @@ export function useVoice({
       // We MUST isolate and suppress this so the agent never talks to itself.
       if (speaking || inEchoCooldown) {
         const isInterrupt = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
-        const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(spokenFinal || spokenInterim);
+        const hasExplicitWake = Boolean(spokenFinal) && /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(spokenFinal);
 
         if (isInterrupt) {
           onInterrupt?.();
@@ -419,15 +426,15 @@ export function useVoice({
           pendingInterimRef.current = "";
           lastEmittedFinalRef.current = "";
         } else if (hasExplicitWake) {
-          onInterrupt?.();
-          lastAiSpeechEndTimeRef.current = 0;
-          setMode("active_conversation");
-          modeRef.current = "active_conversation";
-          const command = stripWake(finalText || interimText);
+          const command = stripWake(finalText);
           if (command && command.trim().length > 1) {
+            onInterrupt?.();
+            lastAiSpeechEndTimeRef.current = 0;
+            setMode("active_conversation");
+            modeRef.current = "active_conversation";
             onTranscript(
-              normalizeSpokenTranscript(command, { isInterim: !spokenFinal }),
-              Boolean(spokenFinal)
+              normalizeSpokenTranscript(command, { isInterim: false }),
+              true
             );
           }
         }

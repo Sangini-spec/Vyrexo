@@ -42,6 +42,12 @@ export async function GET() {
         elevenCharCount = sub.character_count ?? 0;
         elevenCharLimit = sub.character_limit ?? 10000;
         elevenStatus = "connected";
+      } else {
+        const errBody = await res.json().catch(() => null);
+        if (errBody?.detail?.status === "missing_permissions") {
+          // Scoped TTS-only key is active and valid
+          elevenStatus = "connected";
+        }
       }
     } catch {
       elevenStatus = "ready";
@@ -146,7 +152,7 @@ export async function POST(request: NextRequest) {
         ? getChariotConfig().chariotApiKey || ""
         : getOpenAIConfig().openAiApiKey || "");
     const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : undefined;
-    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_turbo_v2_5" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
+    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_v4_turbo" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
     const testOnly = Boolean(body.testOnly) || !explicitKey;
 
     if (!apiKey) {

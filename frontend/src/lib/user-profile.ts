@@ -34,11 +34,13 @@ export function loadUserProfile(
   fallbackUser?: { id?: string; email?: string; user_metadata?: { full_name?: string; username?: string } } | null
 ): UserProfile {
   const effectiveUserId = userId || fallbackUser?.id || "";
+  const emailPrefix = fallbackUser?.email ? fallbackUser.email.split("@")[0].trim() : "";
+  const rawMetaFullName = (fallbackUser?.user_metadata?.full_name || "").trim();
   const defaultFullName =
-    fallbackUser?.user_metadata?.full_name ||
-    (fallbackUser?.email ? fallbackUser.email.split("@")[0] : "") ||
-    "";
-  const defaultUsername = fallbackUser?.user_metadata?.username || "";
+    rawMetaFullName && rawMetaFullName.toLowerCase() !== emailPrefix.toLowerCase()
+      ? rawMetaFullName
+      : "";
+  const defaultUsername = (fallbackUser?.user_metadata?.username || "").trim();
 
   if (typeof window === "undefined") {
     return {
@@ -53,9 +55,19 @@ export function loadUserProfile(
     const raw = localStorage.getItem(primaryKey) || localStorage.getItem(PROFILE_STORAGE_FALLBACK);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<UserProfile>;
+      const parsedUsername =
+        typeof parsed.username === "string" && parsed.username.trim()
+          ? parsed.username.trim()
+          : defaultUsername;
+      const rawParsedFullName =
+        typeof parsed.fullName === "string" ? parsed.fullName.trim() : "";
+      const cleanedFullName =
+        rawParsedFullName && rawParsedFullName.toLowerCase() !== emailPrefix.toLowerCase()
+          ? rawParsedFullName
+          : defaultFullName;
       return {
-        username: typeof parsed.username === "string" ? parsed.username.trim() : defaultUsername,
-        fullName: typeof parsed.fullName === "string" && parsed.fullName.trim() ? parsed.fullName.trim() : defaultFullName,
+        username: parsedUsername,
+        fullName: cleanedFullName,
         occupation: typeof parsed.occupation === "string" ? parsed.occupation.trim() : "",
         age: typeof parsed.age === "string" ? parsed.age.trim() : "",
         dateOfBirth: typeof parsed.dateOfBirth === "string" ? parsed.dateOfBirth.trim() : "",

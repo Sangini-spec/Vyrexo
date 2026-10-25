@@ -55,6 +55,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    const onProfileUpdated = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      setUser((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          user_metadata: {
+            ...(prev.user_metadata || {}),
+            username: detail.username ?? prev.user_metadata?.username,
+            full_name: detail.fullName || prev.user_metadata?.full_name,
+          },
+        } as User;
+      });
+    };
+    window.addEventListener("vyrexo-profile-updated", onProfileUpdated);
+    return () => window.removeEventListener("vyrexo-profile-updated", onProfileUpdated);
+  }, []);
+
+  useEffect(() => {
     // Check if user previously chose guest mode
     try {
       if (localStorage.getItem("vyrexo_guest") === "true") {

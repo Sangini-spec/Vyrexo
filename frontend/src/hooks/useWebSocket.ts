@@ -249,13 +249,16 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         });
       };
 
-      // 1. Try server neural TTS first if audio player is connected
-      if (onAudioRef.current) {
-        try {
-          const abortCtrl = new AbortController();
-          activeTtsAbortRef.current = abortCtrl;
-          const timeoutId = setTimeout(() => abortCtrl.abort(), 40000);
+      // Signal that voice synthesis is preparing so the UI/mic knows Rex is about to speak
+      emit("voice.output.preparing", { emotion: settings.emotion, text });
 
+      // 1. Try server neural TTS first if audio player is connected
+      let wasAborted = false;
+      if (onAudioRef.current) {
+        const abortCtrl = new AbortController();
+        activeTtsAbortRef.current = abortCtrl;
+        const timeoutId = setTimeout(() => abortCtrl.abort(), 40000);
+        try {
           const res = await fetch("/api/voice/speak", {
             method: "POST",
             headers: {
@@ -275,7 +278,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             const buffer = await res.arrayBuffer();
             if (buffer.byteLength > 100 && !abortCtrl.signal.aborted) {
               activeTtsAbortRef.current = null;
-              emit("voice.output.started", { emotion: settings.emotion });
+              emit("voice.output.started", { emotion: settings.emotion, text });
               onStarted?.();
               onAudioRef.current(buffer);
               emit("voice.output.completed", {});
@@ -284,26 +287,35 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             }
           }
         } catch {
-          // Fall through to browser speech synthesis
+          clearTimeout(timeoutId);
+          if (abortCtrl.signal.aborted) {
+            wasAborted = true;
+          }
         } finally {
-          activeTtsAbortRef.current = null;
+          if (activeTtsAbortRef.current === abortCtrl) {
+            activeTtsAbortRef.current = null;
+          }
         }
+      }
+
+      if (wasAborted) {
+        return;
       }
 
       // 2. Resilient Browser SpeechSynthesis fallback
       activeSpeechCancelRef.current = speakHumanizedText(text, settings, {
         onStart: () => {
-          emit("voice.output.started", { emotion: settings.emotion });
+          emit("voice.output.started", { emotion: settings.emotion, text, browserFallback: true });
           onStarted?.();
         },
         onEnd: () => {
           activeSpeechCancelRef.current = null;
-          emit("voice.output.completed", {});
+          emit("voice.output.completed", { browserFallback: true });
           onDone?.();
         },
         onError: () => {
           activeSpeechCancelRef.current = null;
-          emit("voice.output.completed", {});
+          emit("voice.output.completed", { browserFallback: true });
           onStarted?.();
           onDone?.();
         },

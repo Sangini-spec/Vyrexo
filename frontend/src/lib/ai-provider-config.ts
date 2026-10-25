@@ -544,7 +544,11 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
     process.env.ELEVENLABS_API_KEY ||
     process.env.XI_API_KEY
   )?.trim();
-  const envModel = process.env.ELEVENLABS_MODEL?.trim() || "eleven_turbo_v2_5";
+  const rawModel = process.env.ELEVENLABS_MODEL?.trim();
+  const envModel =
+    !rawModel || rawModel === "eleven_turbo_v2_5" || rawModel === "eleven_turbo_v2"
+      ? "eleven_v4_turbo"
+      : rawModel;
 
   if (envKey) {
     return {
@@ -566,10 +570,12 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
  */
 export function saveElevenLabsConfig(
   apiKey: string,
-  model: string = "eleven_turbo_v2_5"
+  model: string = "eleven_v4_turbo"
 ): void {
   process.env.ELEVENLABS_API_KEY = apiKey.trim();
-  process.env.ELEVENLABS_MODEL = model.trim() || "eleven_turbo_v2_5";
+  const cleanModel = model.trim();
+  process.env.ELEVENLABS_MODEL =
+    !cleanModel || cleanModel === "eleven_turbo_v2_5" ? "eleven_v4_turbo" : cleanModel;
 }
 
 /**
@@ -603,7 +609,7 @@ export async function testElevenLabsConnection(
 ): Promise<ElevenLabsBenchmarkResult> {
   const cfg = getElevenLabsConfig();
   const apiKey = explicitKey?.trim() || cfg.elevenLabsApiKey;
-  const modelName = explicitModel?.trim() || cfg.elevenLabsModel || "eleven_turbo_v2_5";
+  const modelName = explicitModel?.trim() || cfg.elevenLabsModel || "eleven_v4_turbo";
 
   if (!apiKey) {
     return {
@@ -633,7 +639,40 @@ export async function testElevenLabsConnection(
     const body = await res.json().catch(() => null);
 
     if (!res.ok) {
+      const statusDetail = body?.detail?.status || "";
       const errMsg = body?.detail?.message || body?.message || `HTTP ${res.status} from ElevenLabs API`;
+
+      // Scoped ElevenLabs API keys often enable Text-to-Speech without `user_read` permission.
+      // Verify directly via a tiny TTS probe on `eleven_v4_turbo`.
+      if (res.status === 401 && (statusDetail === "missing_permissions" || /missing_permissions|user_read/i.test(errMsg))) {
+        const ttsProbe = await fetch(
+          "https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB?output_format=mp3_44100_128",
+          {
+            method: "POST",
+            headers: {
+              "xi-api-key": apiKey,
+              "Content-Type": "application/json",
+              Accept: "audio/mpeg",
+            },
+            body: JSON.stringify({
+              text: "Ready.",
+              model_id: modelName || "eleven_v4_turbo",
+              voice_settings: { stability: 0.35, similarity_boost: 0.85 },
+            }),
+          }
+        );
+
+        const totalLatency = Date.now() - startTime;
+        if (ttsProbe.ok) {
+          return {
+            ok: true,
+            latencyMs: totalLatency,
+            model: modelName || "eleven_v4_turbo",
+            message: `ElevenLabs v4 Turbo connected and verified via live TTS probe (${totalLatency}ms).`,
+          };
+        }
+      }
+
       return {
         ok: false,
         latencyMs,

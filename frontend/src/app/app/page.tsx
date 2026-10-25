@@ -13,7 +13,7 @@ import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { ConnectProjectModal } from "@/components/shared/ConnectProjectModal";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useVoice } from "@/hooks/useVoice";
-import { useAudioPlayer } from "@/hooks/useAudioPlayer";
+import { useAudioPlayer, unlockAudioPlayback } from "@/hooks/useAudioPlayer";
 import { useAuth } from "@/lib/auth-context";
 import type { ServerMessage } from "@/lib/ws-protocol";
 import { primeSpeechSynthesis, speakHumanizedText } from "@/lib/voice-synthesizer";
@@ -525,8 +525,21 @@ export default function App() {
       .then((d) => {
         if (d?.ok && d.profile) {
           const srv = d.profile as Partial<UserProfile>;
+          const localTs = loaded.updatedAt ? new Date(loaded.updatedAt).getTime() : 0;
+          const srvTs = srv.updatedAt ? new Date(srv.updatedAt).getTime() : 0;
+          const localHasData = Boolean(
+            loaded.username ||
+              loaded.fullName ||
+              loaded.occupation ||
+              loaded.aboutUserInstructions ||
+              loaded.responseStyleInstructions
+          );
+          if (localHasData && localTs >= srvTs) {
+            return;
+          }
           if (
             srv.username ||
+            srv.fullName ||
             srv.occupation ||
             srv.aboutUserInstructions ||
             srv.responseStyleInstructions ||
@@ -534,10 +547,16 @@ export default function App() {
             srv.dateOfBirth ||
             srv.gender
           ) {
+            const emailPrefix = user.email ? user.email.split("@")[0].trim() : "";
+            const rawSrvFullName = (srv.fullName || loaded.fullName || "").trim();
+            const cleanFullName =
+              rawSrvFullName && rawSrvFullName.toLowerCase() !== emailPrefix.toLowerCase()
+                ? rawSrvFullName
+                : "";
             const merged = saveUserProfile(
               {
                 username: srv.username || loaded.username || "",
-                fullName: srv.fullName || loaded.fullName || user.user_metadata?.full_name || "",
+                fullName: cleanFullName,
                 occupation: srv.occupation || loaded.occupation || "",
                 age: srv.age || loaded.age || "",
                 dateOfBirth: srv.dateOfBirth || loaded.dateOfBirth || "",
@@ -559,7 +578,11 @@ export default function App() {
       setUserProfile(loadUserProfile(user.id, user));
     };
     window.addEventListener("vyrexo-profile-updated", onProfileUpdated);
-    return () => window.removeEventListener("vyrexo-profile-updated", onProfileUpdated);
+    window.addEventListener("storage", onProfileUpdated);
+    return () => {
+      window.removeEventListener("vyrexo-profile-updated", onProfileUpdated);
+      window.removeEventListener("storage", onProfileUpdated);
+    };
   }, [user]);
 
   // ── Sessions (persisted + renamable, strictly scoped per user) ──────────────
@@ -845,6 +868,7 @@ export default function App() {
   const lastRexSpeechEndTimeRef = useRef(0);
   const recentAiSpeechRef = useRef<Array<{ text: string; time: number }>>([]);
   const isBuildingRef = useRef(false);
+  const isSynthesizingVoiceRef = useRef(false);
   const recordAiSpeech = useCallback((text: string) => {
     if (!text || !text.trim()) return;
     recentAiSpeechRef.current = [
@@ -867,7 +891,7 @@ export default function App() {
     }
     if (!wasPlayingRef.current) return; // never started; nothing to reset
     const t = setTimeout(() => {
-      if (isPlayingRef.current) return; // next utterance already started
+      if (isPlayingRef.current || isSynthesizingVoiceRef.current) return; // next utterance already started or preparing
       wasPlayingRef.current = false;
       lastRexSpeechEndTimeRef.current = Date.now();
       setOrbState((prev) => {
@@ -884,6 +908,7 @@ export default function App() {
   const audioMutedRef = useRef(false);
   const muteAudio = useCallback(() => {
     audioMutedRef.current = true;
+    isSynthesizingVoiceRef.current = false;
     mutePlayer(); // hard stop + block all playback until a new turn
   }, [mutePlayer]);
   const unmuteAudio = useCallback(() => {
@@ -906,10 +931,12 @@ export default function App() {
     if (!text) return;
     pendingRexRef.current = null;
     setChatLog((prev) => [...prev, { role: "assistant", text }]);
-    if (isBuildingRef.current) {
+    if (isBuildingRef.current || isSynthesizingVoiceRef.current) {
       setOrbState("thinking");
-    } else {
+    } else if (!isPlayingRef.current) {
       setOrbState((prev) => (prev === "thinking" ? (voiceListeningRef.current ? "listening" : "idle") : prev));
+    }
+    if (!isBuildingRef.current) {
       const isLongText = text.length > 180 || text.includes("\n");
       if (isLongText) {
         const firstLine = text.replace(/^[#*>\-\s]+/, "").split("\n")[0].slice(0, 140);
@@ -984,28 +1011,64 @@ export default function App() {
         break;
       }
 
+      case "voice.output.preparing":
+        isSynthesizingVoiceRef.current = true;
+        if (msg.payload?.emotion) {
+          setActiveEmotion(msg.payload.emotion as EmotionTone);
+        }
+        break;
+
       case "voice.output.start":
-      case "voice.output.started":
-        // Rex is starting a NEW utterance — make sure the player is live so his
-        // voice can never get permanently stuck muted (the "responds in text but
-        // not by voice" bug). This is safe because interrupt/hush now DRAIN and
-        // SUPPRESS speech at the backend: after a stop, no voice.output.started
-        // fires until the user's next turn clears suppression, so there's no
-        // stale audio to sneak back in.
+      case "voice.output.started": {
+        isSynthesizingVoiceRef.current = false;
         unmuteAudio();
-        beginUtterance();
+        const fallbackSpokenText = (msg.payload?.text as string) || pendingRexRef.current || "";
+        const fallbackEmotion = (msg.payload?.emotion as EmotionTone) || "warm";
+        const isBrowserFallback = Boolean(msg.payload?.browserFallback);
+        if (!isBrowserFallback) {
+          beginUtterance(() => {
+            if (fallbackSpokenText && !audioMutedRef.current) {
+              setOrbState("speaking");
+              speakHumanizedText(
+                fallbackSpokenText,
+                { voice: "adam", speed: "normal", emotion: fallbackEmotion },
+                {
+                  onStart: () => setOrbState("speaking"),
+                  onEnd: () => {
+                    lastRexSpeechEndTimeRef.current = Date.now();
+                    setOrbState(
+                      isBuildingRef.current
+                        ? "thinking"
+                        : voiceListeningRef.current
+                        ? "listening"
+                        : "idle"
+                    );
+                  },
+                }
+              );
+            }
+          });
+        }
         flushPendingRex(); // reveal Rex's text exactly as his voice begins
         setOrbState("speaking");
         if (msg.payload?.emotion) {
           setActiveEmotion(msg.payload.emotion as EmotionTone);
         }
         break;
+      }
 
       case "voice.output.end":
       case "voice.output.completed":
-        endUtterance();
-        // Do not force orbState to listening/idle here; audioIsPlaying lifecycle
-        // governs the orb state until all audio finishes physically playing.
+        isSynthesizingVoiceRef.current = false;
+        if (msg.payload?.browserFallback) {
+          lastRexSpeechEndTimeRef.current = Date.now();
+          setOrbState((prev) => {
+            if (isBuildingRef.current) return "thinking";
+            return prev === "speaking" ? (voiceListeningRef.current ? "listening" : "idle") : prev;
+          });
+        } else {
+          endUtterance();
+        }
         break;
 
       case "agent.narration": {
@@ -1022,13 +1085,13 @@ export default function App() {
       case "conversation.turn.completed": {
         // Rex's reply. Hold it and reveal it when his voice starts (synced),
         // rather than popping the text up a beat early. Fallback timer shows it
-        // promptly within 500ms if no audio stream arrives. Full text → Chat tab.
+        // if no audio stream arrives within 3.5s. Full text → Chat tab.
         const responseText = (msg.payload.text as string) || "";
         if (responseText.trim()) {
           recordAiSpeech(responseText);
           flushPendingRex(); // show any earlier pending reply first
           pendingRexRef.current = responseText;
-          pendingRexTimerRef.current = setTimeout(flushPendingRex, 500);
+          pendingRexTimerRef.current = setTimeout(flushPendingRex, 3500);
         }
         break;
       }
@@ -1301,6 +1364,23 @@ export default function App() {
       const effectiveEmotion: EmotionTone =
         (emotion as EmotionTone) || detectEmotionFromContext(userPrompt || spokenText, spokenText);
       setActiveEmotion(effectiveEmotion);
+      isSynthesizingVoiceRef.current = true;
+
+      const triggerBrowserFallback = () => {
+        if (audioMutedRef.current) return;
+        setOrbState("speaking");
+        speakHumanizedText(
+          spokenText,
+          { voice: currentVoice, speed: currentSpeed, emotion: effectiveEmotion },
+          {
+            onStart: () => setOrbState("speaking"),
+            onEnd: () => {
+              lastRexSpeechEndTimeRef.current = Date.now();
+              setOrbState(voiceListeningRef.current ? "listening" : "idle");
+            },
+          }
+        );
+      };
 
       try {
         const res = await fetch("/api/voice/speak", {
@@ -1318,9 +1398,11 @@ export default function App() {
         });
         if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
           const buffer = await res.arrayBuffer();
-          if (buffer.byteLength > 100) {
+          if (buffer.byteLength > 100 && !audioMutedRef.current) {
+            isSynthesizingVoiceRef.current = false;
             unmuteAudio();
-            beginUtterance();
+            setOrbState("speaking");
+            beginUtterance(triggerBrowserFallback);
             pushChunk(buffer);
             endUtterance();
             return;
@@ -1328,12 +1410,8 @@ export default function App() {
         }
       } catch {}
 
-      // Fallback only if server audio endpoint fails
-      speakHumanizedText(
-        spokenText,
-        { voice: currentVoice, speed: currentSpeed, emotion: emotion as any },
-        { onEnd: () => setOrbState(voiceListeningRef.current ? "listening" : "idle") }
-      );
+      isSynthesizingVoiceRef.current = false;
+      triggerBrowserFallback();
     },
     [unmuteAudio, beginUtterance, pushChunk, endUtterance]
   );
@@ -1351,7 +1429,11 @@ export default function App() {
       if (!raw) return;
       const lower = raw.toLowerCase().replace(/[.!?,]/g, "").trim();
       const isStop = isStopPhrase(lower);
-      const rexTalking = isPlayingRef.current || speakingRef.current || wasPlayingRef.current;
+      const rexTalking =
+        isPlayingRef.current ||
+        speakingRef.current ||
+        wasPlayingRef.current ||
+        isSynthesizingVoiceRef.current;
 
       // ── BARGE-IN ──────────────────────────────────────────────────────────
       // Only explicit stop words ("stop", "wait", "pause", "quiet", "cancel")
@@ -1381,7 +1463,7 @@ export default function App() {
         return;
       }
 
-      // 2. Suppress acoustic spill while Rex is talking
+      // 2. Suppress acoustic spill while Rex is talking or synthesizing voice
       if (rexTalking) {
         console.debug("[voice] Suppressing transcript received while Rex was speaking (acoustic spill):", raw);
         setTranscript("");
@@ -1406,6 +1488,7 @@ export default function App() {
       }
 
       // 5. Genuine user request -> send to Rex with instant zero-lag responsiveness!
+      unlockAudioPlayback();
       primeSpeechSynthesis();
       unmuteAudio(); // new turn → allow Rex's reply to play
       setPendingProposal(null);
@@ -1442,7 +1525,6 @@ export default function App() {
         ]);
         setNarration(fastResult.spoken);
         recordAiSpeech(fastResult.spoken);
-        setOrbState("speaking");
         playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm", cleanText);
         sendMessage({ type: "text.input", payload: { text: cleanText, fastPath: true } });
         setTranscript("");
@@ -1457,6 +1539,7 @@ export default function App() {
   );
 
   const handleActivated = useCallback(() => {
+    unlockAudioPlayback();
     primeSpeechSynthesis();
     setOrbState("listening");
     setNarration("I'm listening...");
@@ -1479,7 +1562,11 @@ export default function App() {
     onActivated: handleActivated,
     onDeactivated: handleDeactivated,
     onInterrupt: handleInterruptVoice,
-    isAiSpeaking: isPlayingRef.current || orbState === "speaking" || wasPlayingRef.current,
+    isAiSpeaking:
+      isPlayingRef.current ||
+      orbState === "speaking" ||
+      wasPlayingRef.current ||
+      isSynthesizingVoiceRef.current,
   });
 
   // Keep the mic-live mirror in sync for the orb-reset effect above.
@@ -1490,6 +1577,7 @@ export default function App() {
   // Clicking the orb: while Rex is talking or working, it's a STOP button —
   // silence + halt immediately. Otherwise it triggers push-to-talk.
   const handleOrbClick = useCallback(() => {
+    unlockAudioPlayback();
     primeSpeechSynthesis();
     if (isPlayingRef.current || orbState === "speaking" || orbState === "thinking") {
       muteAudio();
@@ -2811,7 +2899,9 @@ export default function App() {
         setTranscript(text);
         setNarration(fastResult.spoken);
         recordAiSpeech(fastResult.spoken);
-        setOrbState("speaking");
+        unlockAudioPlayback();
+        primeSpeechSynthesis();
+        setOrbState("thinking");
         playUnifiedVoice(fastResult.spoken, fastResult.emotion || "warm", text);
         sendMessage({ type: "text.input", payload: { text, fastPath: true } });
         return;
@@ -2894,6 +2984,7 @@ export default function App() {
           collapsed={sidebarCollapsed}
           width={sidebarWidth}
           user={user}
+          userProfile={userProfile}
           onSignOut={signOut}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
           onSessionClick={handleSessionClick}
@@ -2937,14 +3028,18 @@ export default function App() {
                 {(
                   userProfile.username?.[0] ||
                   userProfile.fullName?.[0] ||
+                  user.user_metadata?.username?.[0] ||
                   user.user_metadata?.full_name?.[0] ||
                   user.email?.[0] ||
                   "U"
                 ).toUpperCase()}
               </div>
               <span className="text-xs text-[var(--text)] font-medium pr-1 group-hover:text-[var(--ice)] transition-colors">
-                {userProfile.fullName || user.user_metadata?.full_name || user.email?.split("@")[0]}
-                {userProfile.username ? ` (${userProfile.username})` : ""}
+                {userProfile.username ||
+                  userProfile.fullName ||
+                  user.user_metadata?.username ||
+                  user.user_metadata?.full_name ||
+                  user.email}
               </span>
             </a>
           </div>
@@ -3009,6 +3104,7 @@ export default function App() {
         collapsed={sidebarCollapsed}
         width={sidebarWidth}
         user={user}
+        userProfile={userProfile}
         onSignOut={signOut}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
         onSessionClick={handleSessionClick}

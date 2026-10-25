@@ -28,13 +28,13 @@ function writeDiskProfiles(data: Record<string, UserProfile>): void {
 
 export function getServerUserProfile(userId?: string | null): UserProfile | null {
   const key = (userId || "default").trim() || "default";
-  if (memoryProfiles.has(key)) {
-    return memoryProfiles.get(key) || null;
-  }
   const disk = readDiskProfiles();
   if (disk[key]) {
     memoryProfiles.set(key, disk[key]);
     return disk[key];
+  }
+  if (memoryProfiles.has(key)) {
+    return memoryProfiles.get(key) || null;
   }
   if (disk["default"]) {
     return disk["default"];

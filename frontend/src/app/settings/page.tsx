@@ -163,9 +163,6 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!user) return;
     const localProf = loadUserProfile(user.id, user);
-    if (!localProf.fullName && user.user_metadata?.full_name) {
-      localProf.fullName = user.user_metadata.full_name;
-    }
     setProfile(localProf);
 
     fetch(`/api/profile?user_id=${encodeURIComponent(user.id)}`, {
@@ -175,8 +172,21 @@ export default function SettingsPage() {
       .then((data) => {
         if (data?.ok && data.profile) {
           const srv = data.profile as Partial<UserProfile>;
+          const localTs = localProf.updatedAt ? new Date(localProf.updatedAt).getTime() : 0;
+          const srvTs = srv.updatedAt ? new Date(srv.updatedAt).getTime() : 0;
+          const localHasData = Boolean(
+            localProf.username ||
+              localProf.fullName ||
+              localProf.occupation ||
+              localProf.aboutUserInstructions ||
+              localProf.responseStyleInstructions
+          );
+          if (localHasData && localTs >= srvTs) {
+            return;
+          }
           if (
             srv.username ||
+            srv.fullName ||
             srv.occupation ||
             srv.aboutUserInstructions ||
             srv.responseStyleInstructions ||
@@ -184,9 +194,15 @@ export default function SettingsPage() {
             srv.dateOfBirth ||
             srv.gender
           ) {
+            const emailPrefix = user.email ? user.email.split("@")[0].trim() : "";
+            const rawSrvFullName = (srv.fullName || localProf.fullName || "").trim();
+            const cleanFullName =
+              rawSrvFullName && rawSrvFullName.toLowerCase() !== emailPrefix.toLowerCase()
+                ? rawSrvFullName
+                : "";
             const merged: UserProfile = {
               username: srv.username || localProf.username || "",
-              fullName: srv.fullName || localProf.fullName || user.user_metadata?.full_name || "",
+              fullName: cleanFullName,
               occupation: srv.occupation || localProf.occupation || "",
               age: srv.age || localProf.age || "",
               dateOfBirth: srv.dateOfBirth || localProf.dateOfBirth || "",
@@ -367,10 +383,17 @@ export default function SettingsPage() {
 
   if (loading || !user) return null;
 
+  const emailPrefix = user.email?.split("@")[0]?.trim() || "";
+  const cleanFullName =
+    profile.fullName && profile.fullName.toLowerCase() !== emailPrefix.toLowerCase()
+      ? profile.fullName
+      : "";
   const displayFullName =
-    profile.fullName || user.user_metadata?.full_name || user.email?.split("@")[0] || "User";
+    profile.username || cleanFullName || user.user_metadata?.username || user.email || "User";
+  const signOutIdentifier =
+    profile.username?.trim() || cleanFullName || user.email || "";
   const avatarInitial =
-    (profile.username || displayFullName || user.email || "U")[0]?.toUpperCase() || "U";
+    (profile.username || cleanFullName || user.email || "U")[0]?.toUpperCase() || "U";
 
   return (
     <div
@@ -382,7 +405,13 @@ export default function SettingsPage() {
       {/* Top Navigation Header */}
       <div className="w-full flex items-center justify-between px-6 sm:px-10 py-4 border-b border-[var(--border)] bg-[var(--surface)]/70 backdrop-blur-xl sticky top-0 z-30">
         <div className="flex items-center gap-4">
-          <a href="/app" className="flex items-center group">
+          <a
+            href="/app"
+            onClick={() => {
+              if (user) saveUserProfile(profile, user.id);
+            }}
+            className="flex items-center group"
+          >
             <VyrexoLogo size="md" />
           </a>
           <span className="text-[var(--muted)] text-sm">/</span>
@@ -392,7 +421,7 @@ export default function SettingsPage() {
           <button
             onClick={signOut}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-xs font-medium text-[var(--muted2)] hover:text-red-500 hover:border-red-500/40 hover:bg-red-500/10 transition-all cursor-pointer shadow-sm"
-            title="Sign out of your account"
+            title={signOutIdentifier ? `Sign out (${signOutIdentifier})` : "Sign out of your account"}
           >
             <svg
               width="13"
@@ -408,10 +437,18 @@ export default function SettingsPage() {
               <line x1="21" y1="12" x2="9" y2="12" />
             </svg>
             <span>Sign out</span>
+            {signOutIdentifier && (
+              <span className="text-[11px] text-[var(--muted)] ml-1 pl-1.5 border-l border-[var(--border2)] max-w-[140px] truncate">
+                {signOutIdentifier}
+              </span>
+            )}
           </button>
           <ThemeToggle />
           <a
             href="/app"
+            onClick={() => {
+              if (user) saveUserProfile(profile, user.id);
+            }}
             className="px-3 py-1.5 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-xs font-medium text-[var(--text)] hover:border-[var(--steel)] transition-colors shadow-sm"
           >
             Back to app
@@ -520,11 +557,28 @@ export default function SettingsPage() {
 
             {/* Section 1: Identification & Username */}
             <div className="p-6 rounded-2xl border border-[var(--border2)] bg-[var(--surface)] space-y-4">
-              <div>
-                <h3 className="text-sm font-bold text-[var(--text)]">Identification</h3>
-                <p className="text-xs text-[var(--muted2)] mt-0.5">
-                  Set the username Rex will use to address you in conversation.
-                </p>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h3 className="text-sm font-bold text-[var(--text)]">Identification</h3>
+                  <p className="text-xs text-[var(--muted2)] mt-0.5">
+                    Set the username Rex will use to address you and display in the sidebar.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {profileSaved && (
+                    <span className="text-xs font-medium text-emerald-400">
+                      Saved!
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleSaveProfile}
+                    disabled={savingProfile}
+                    className="px-4 py-1.5 bg-[var(--midnight)] text-white text-xs font-semibold rounded-lg hover:bg-[var(--steel)] transition-all cursor-pointer shadow-sm disabled:opacity-60"
+                  >
+                    {savingProfile ? "Saving..." : "Save Profile"}
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -535,7 +589,14 @@ export default function SettingsPage() {
                   <input
                     type="text"
                     value={profile.username}
-                    onChange={(e) => setProfile((prev) => ({ ...prev, username: e.target.value }))}
+                    onChange={(e) => {
+                      const nextVal = e.target.value;
+                      setProfile((prev) => {
+                        const updated = { ...prev, username: nextVal };
+                        if (user) saveUserProfile(updated, user.id);
+                        return updated;
+                      });
+                    }}
                     placeholder="e.g. Sangini"
                     className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
                   />
@@ -548,7 +609,14 @@ export default function SettingsPage() {
                   <input
                     type="text"
                     value={profile.fullName}
-                    onChange={(e) => setProfile((prev) => ({ ...prev, fullName: e.target.value }))}
+                    onChange={(e) => {
+                      const nextVal = e.target.value;
+                      setProfile((prev) => {
+                        const updated = { ...prev, fullName: nextVal };
+                        if (user) saveUserProfile(updated, user.id);
+                        return updated;
+                      });
+                    }}
                     placeholder="e.g. Sangini Tripathi"
                     className="w-full px-3.5 py-2.5 rounded-xl border border-[var(--border2)] bg-[var(--input)] text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:outline-none focus:border-[var(--steel)] transition-colors"
                   />
