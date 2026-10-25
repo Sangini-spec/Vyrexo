@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "rm -rf .next/dev .next-dev && node scripts/ensure-build.mjs && next dev -p 3000 -H 0.0.0.0",
-    "build": "NODE_ENV=production next build && node scripts/prepare-standalone.mjs",
-    "start": "next start -p 3000 -H 0.0.0.0",
+    "dev": "rm -f .next/dev/lock .next-dev/lock && next dev -p 3000 -H 0.0.0.0",
+    "build": "NODE_ENV=production next build",
+    "start": "next start -H 0.0.0.0",
     "lint": "next lint"
   },
   "dependencies": {
