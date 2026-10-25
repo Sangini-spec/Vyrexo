@@ -12,6 +12,9 @@ import {
   getSessionOwner,
   isBlockedLegacySessionId,
   deleteUserSession,
+  normalizeUserPrimaryKey,
+  getUserIdentityAliases,
+  areSameUserIdentity,
 } from "@/lib/session-persistent-storage";
 import {
   isPlaceholderOrBadSessionName,
@@ -31,6 +34,7 @@ const sessionStore: Map<string, SessionRecord[]> =
   ((globalThis as any).__vyrexo_sessions_store = new Map<string, SessionRecord[]>());
 
 function healAndEnrichSessions(userId: string, list: SessionRecord[]): SessionRecord[] {
+  const canonical = normalizeUserPrimaryKey(userId) || userId;
   let changed = false;
   const seenIds = new Set<string>();
   const healed: SessionRecord[] = [];
@@ -42,13 +46,13 @@ function healAndEnrichSessions(userId: string, list: SessionRecord[]): SessionRe
     }
 
     // Strict user boundary: never include a session that belongs to a different user
-    if (s.user_id && s.user_id !== userId) {
+    if (s.user_id && !areSameUserIdentity(s.user_id, canonical)) {
       changed = true;
       continue;
     }
 
     const owner = getSessionOwner(s.id);
-    if (owner && owner !== userId) {
+    if (owner && !areSameUserIdentity(owner, canonical)) {
       changed = true;
       continue;
     }
@@ -67,13 +71,13 @@ function healAndEnrichSessions(userId: string, list: SessionRecord[]): SessionRe
       icon = "🚆";
     }
 
-    if (semanticName !== s.name || icon !== s.icon || s.user_id !== userId) {
+    if (semanticName !== s.name || icon !== s.icon || s.user_id !== canonical) {
       changed = true;
     }
 
     healed.push({
       ...s,
-      user_id: userId,
+      user_id: canonical,
       name: semanticName,
       icon,
     });
@@ -85,51 +89,71 @@ function healAndEnrichSessions(userId: string, list: SessionRecord[]): SessionRe
 
   if (changed) {
     try {
-      writePersistedSessions(userId, healed);
+      writePersistedSessions(canonical, healed);
     } catch {}
   }
 
   return healed;
 }
 
-function getUserSessions(userId: string): SessionRecord[] {
-  if (!userId) return [];
+function getUserSessions(userId: string, email?: string | null): SessionRecord[] {
+  const aliases = getUserIdentityAliases(userId, email);
+  if (aliases.length === 0) return [];
+  const canonical = normalizeUserPrimaryKey(userId, email) || aliases[0];
 
-  const inMem = sessionStore.get(userId);
-  if (inMem) {
-    const healed = healAndEnrichSessions(userId, inMem);
-    sessionStore.set(userId, healed);
-    return healed;
+  for (const key of aliases) {
+    const inMem = sessionStore.get(key);
+    if (inMem && inMem.length > 0) {
+      const healed = healAndEnrichSessions(canonical, inMem);
+      for (const a of aliases) sessionStore.set(a, healed);
+      return healed;
+    }
   }
 
   try {
-    const persisted = readPersistedSessions(userId);
+    const persisted = readPersistedSessions(canonical, email);
     if (persisted && persisted.length > 0) {
-      const healed = healAndEnrichSessions(userId, persisted);
-      sessionStore.set(userId, healed);
+      const healed = healAndEnrichSessions(canonical, persisted);
+      for (const a of aliases) sessionStore.set(a, healed);
       return healed;
     }
   } catch {}
 
   // Brand-new user or user with no sessions: return strictly empty list
-  sessionStore.set(userId, []);
+  for (const a of aliases) sessionStore.set(a, []);
   return [];
 }
 
-function saveUserSessions(userId: string, list: SessionRecord[]): void {
-  if (!userId) return;
+function saveUserSessions(userId: string, list: SessionRecord[], email?: string | null): void {
+  const aliases = getUserIdentityAliases(userId, email);
+  if (aliases.length === 0) return;
+  const canonical = normalizeUserPrimaryKey(userId, email) || aliases[0];
   const sanitized = list
-    .filter((s) => s && s.id && !isBlockedLegacySessionId(s.id) && (!s.user_id || s.user_id === userId))
-    .map((s) => ({ ...s, user_id: userId }));
-  sessionStore.set(userId, sanitized);
+    .filter(
+      (s) =>
+        s &&
+        s.id &&
+        !isBlockedLegacySessionId(s.id) &&
+        (!s.user_id || areSameUserIdentity(s.user_id, canonical))
+    )
+    .map((s) => ({ ...s, user_id: canonical }));
+  for (const a of aliases) sessionStore.set(a, sanitized);
   try {
-    writePersistedSessions(userId, sanitized);
+    writePersistedSessions(canonical, sanitized, email);
   } catch {}
 }
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   if (!userId) {
     return NextResponse.json({
@@ -138,7 +162,7 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const sessions = getUserSessions(userId);
+  const sessions = getUserSessions(userId, rawEmail);
   return NextResponse.json({
     ok: true,
     sessions,
@@ -148,7 +172,15 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const userId = (body.user_id || request.headers.get("x-user-id") || "").trim();
+    const rawUserId = (body.user_id || request.headers.get("x-user-id") || "").trim();
+    const rawEmail = (
+      body.email ||
+      request.headers.get("x-user-email") ||
+      (rawUserId.includes("@") ? rawUserId : "")
+    )
+      .trim()
+      .toLowerCase();
+    const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
     if (!userId) {
       return NextResponse.json(
         { ok: false, error: "Authentication required: user_id is missing" },
@@ -166,7 +198,7 @@ export async function POST(request: NextRequest) {
 
     // Prevent any user from claiming or modifying a session owned by another user
     const existingOwner = getSessionOwner(sessionId);
-    if (existingOwner && existingOwner !== userId) {
+    if (existingOwner && !areSameUserIdentity(existingOwner, userId)) {
       return NextResponse.json(
         { ok: false, error: "Forbidden: session belongs to another user" },
         { status: 403 }
@@ -248,7 +280,15 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get("id");
-  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
   const clearAll = searchParams.get("clear_all") === "true";
   const olderThanDaysStr = searchParams.get("older_than_days");
 
@@ -260,20 +300,20 @@ export async function DELETE(request: NextRequest) {
   }
 
   if (clearAll) {
-    const userSessions = getUserSessions(userId);
+    const userSessions = getUserSessions(userId, rawEmail);
     for (const s of userSessions) {
       clearSessionChatHistory(s.id);
       removeSessionConnectedProject(s.id);
       deleteUserSession(s.id, userId);
     }
-    saveUserSessions(userId, []);
+    saveUserSessions(userId, [], rawEmail);
     return NextResponse.json({ ok: true, message: "All sessions and chats for user cleared" });
   }
 
   if (olderThanDaysStr) {
     const days = parseFloat(olderThanDaysStr) || 1;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    const current = getUserSessions(userId);
+    const current = getUserSessions(userId, rawEmail);
     const kept: SessionRecord[] = [];
     const removedIds: string[] = [];
 
@@ -288,7 +328,7 @@ export async function DELETE(request: NextRequest) {
       }
     }
 
-    saveUserSessions(userId, kept);
+    saveUserSessions(userId, kept, rawEmail);
     return NextResponse.json({
       ok: true,
       removedCount: removedIds.length,
@@ -299,17 +339,18 @@ export async function DELETE(request: NextRequest) {
 
   if (sessionId) {
     const existingOwner = getSessionOwner(sessionId);
-    if (existingOwner && existingOwner !== userId) {
+    if (existingOwner && !areSameUserIdentity(existingOwner, userId)) {
       return NextResponse.json(
         { ok: false, error: "Forbidden: session belongs to another user" },
         { status: 403 }
       );
     }
 
-    const current = getUserSessions(userId);
+    const current = getUserSessions(userId, rawEmail);
     saveUserSessions(
       userId,
-      current.filter((s) => s.id !== sessionId)
+      current.filter((s) => s.id !== sessionId),
+      rawEmail
     );
     clearSessionChatHistory(sessionId);
     removeSessionConnectedProject(sessionId);

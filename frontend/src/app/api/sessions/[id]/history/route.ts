@@ -7,7 +7,12 @@ import {
   SessionChatTurn,
   verifySessionProjectOwnership,
 } from "@/lib/project-session-store";
-import { getSessionOwner, isBlockedLegacySessionId } from "@/lib/session-persistent-storage";
+import {
+  getSessionOwner,
+  isBlockedLegacySessionId,
+  normalizeUserPrimaryKey,
+  areSameUserIdentity,
+} from "@/lib/session-persistent-storage";
 
 export async function GET(
   request: NextRequest,
@@ -15,14 +20,22 @@ export async function GET(
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   if (!id || isBlockedLegacySessionId(id)) {
     return NextResponse.json({ ok: true, sessionId: id, turns: [] });
   }
 
   const owner = getSessionOwner(id);
-  if (owner && userId && owner !== userId) {
+  if (owner && userId && !areSameUserIdentity(owner, userId)) {
     return NextResponse.json({ ok: false, error: "Forbidden", turns: [] }, { status: 403 });
   }
 
@@ -67,14 +80,22 @@ export async function POST(
   try {
     const { id } = await params;
     const body = await request.json();
-    const userId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
+    const rawUserId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
+    const rawEmail = (
+      body.email ||
+      request.headers.get("x-user-email") ||
+      (rawUserId.includes("@") ? rawUserId : "")
+    )
+      .trim()
+      .toLowerCase();
+    const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
     if (!id || isBlockedLegacySessionId(id)) {
       return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 403 });
     }
 
     const owner = getSessionOwner(id);
-    if (owner && userId && owner !== userId) {
+    if (owner && userId && !areSameUserIdentity(owner, userId)) {
       return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
     }
 
@@ -116,19 +137,28 @@ export async function DELETE(
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   if (!id || isBlockedLegacySessionId(id)) {
     return NextResponse.json({ ok: false, error: "Invalid session ID" }, { status: 400 });
   }
 
   const owner = getSessionOwner(id);
-  if (owner && userId && owner !== userId) {
+  if (owner && userId && !areSameUserIdentity(owner, userId)) {
     return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 });
   }
 
   clearSessionChatHistory(id);
   return NextResponse.json({ ok: true, sessionId: id, message: "History cleared" });
 }
+
 
 

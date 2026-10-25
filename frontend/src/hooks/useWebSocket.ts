@@ -41,7 +41,7 @@ import {
 } from "@/lib/project-spec";
 import { generateRichDomainFallback } from "@/lib/domain-templates";
 import { detectEmotionFromContext } from "@/lib/emotion-detector";
-import { loadUserProfile, personalizeGreetingWithUsername } from "@/lib/user-profile";
+import { loadUserProfile, personalizeGreetingWithUsername, getVoiceStorageKey } from "@/lib/user-profile";
 import { normalizeSpokenTranscript } from "@/lib/speech-normalizer";
 
 export function checkFastPathGreetingOrCommand(text: string, username?: string): {
@@ -111,10 +111,10 @@ export function checkFastPathGreetingOrCommand(text: string, username?: string):
     };
   }
 
-  // Greetings & casual pleasantries ("Hi", "Hey", "What's up", "What are you doing")
+  // Greetings & casual pleasantries ("Rex", "Hey Rex", "Hi", "Hey", "What's up", "What are you doing")
   if (
-    /^(he|hey|hi|hello|yo|sup|wassup|whats up|what's up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
-    /^(he|hey|hi|hello|yo)\s+(rex|there|team|friend|mate)$/i.test(t) ||
+    /^(rex|he|hey|hi|hello|yo|sup|wassup|whats up|what's up|what s up|good morning|good afternoon|good evening)$/i.test(t) ||
+    /^(he|hey|hi|hello|yo|ok|okay|oh|sup|dear)\s+(rex|there|team|friend|mate|buddy)$/i.test(t) ||
     /^(hey|hi|hello|yo)?\s*(rex\s+)?(what('s|s)?\s*up|sup|wassup|whats\s+good|what\s+are\s+you\s+doing|what\s+you\s+doing)\s*(rex|today)?$/i.test(t)
   ) {
     const p = personalizeGreetingWithUsername(
@@ -258,7 +258,10 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
       let settings: VoiceSettings = DEFAULT_VOICE_SETTINGS;
       if (typeof window !== "undefined") {
         try {
-          const stored = localStorage.getItem("vyrexo_voice");
+          const voiceKey = getVoiceStorageKey(userId);
+          const stored =
+            (voiceKey ? localStorage.getItem(voiceKey) : null) ||
+            localStorage.getItem("vyrexo_voice");
           if (stored) {
             const parsed = JSON.parse(stored);
             settings = {

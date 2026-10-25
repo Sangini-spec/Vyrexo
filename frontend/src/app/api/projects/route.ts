@@ -17,6 +17,8 @@ import {
   getSessionOwner,
   getUserSessions,
   saveUserSession,
+  normalizeUserPrimaryKey,
+  areSameUserIdentity,
 } from "@/lib/session-persistent-storage";
 import fs from "fs";
 import path from "path";
@@ -272,7 +274,15 @@ export async function GET(req: NextRequest) {
     searchParams.get("sessionId") ||
     ""
   ).trim();
-  const userId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    req.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   // 1. Collect all technical projects created by this user across their sessions
   const userProjectsList: Array<{
@@ -290,7 +300,7 @@ export async function GET(req: NextRequest) {
   }> = [];
 
   if (userId) {
-    const userSessions = getUserSessions(userId);
+    const userSessions = getUserSessions(userId, rawEmail);
     const seenSessionIds = new Set<string>();
 
     for (const s of userSessions) {
@@ -428,7 +438,15 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const sessionId: string = (body.sessionId || body.session || "").trim();
-    const userId: string = (body.userId || body.user_id || req.headers.get("x-user-id") || "").trim();
+    const rawUserId: string = (body.userId || body.user_id || req.headers.get("x-user-id") || "").trim();
+    const rawEmail: string = (
+      body.email ||
+      req.headers.get("x-user-email") ||
+      (rawUserId.includes("@") ? rawUserId : "")
+    )
+      .trim()
+      .toLowerCase();
+    const userId: string = normalizeUserPrimaryKey(rawUserId, rawEmail);
     const isExplicitLocalFolder = body.source === "local_folder" || Array.isArray(body.files);
     const mode: "files" | "server_path" =
       body.mode || (!isExplicitLocalFolder && body.path ? "server_path" : "files");
@@ -441,7 +459,7 @@ export async function POST(req: NextRequest) {
     }
 
     const existingOwner = getSessionOwner(sessionId);
-    if (existingOwner && userId && existingOwner !== userId) {
+    if (existingOwner && userId && !areSameUserIdentity(existingOwner, userId)) {
       return NextResponse.json(
         { error: "Forbidden: session belongs to another user." },
         { status: 403 }
@@ -618,7 +636,15 @@ export async function DELETE(req: NextRequest) {
     searchParams.get("sessionId") ||
     ""
   ).trim();
-  const userId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || req.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    req.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   if (!sessionId || isBlockedLegacySessionId(sessionId)) {
     return NextResponse.json({ ok: false, removed: false }, { status: 400 });
@@ -631,3 +657,4 @@ export async function DELETE(req: NextRequest) {
   const removed = removeSessionConnectedProject(sessionId);
   return NextResponse.json({ ok: true, removed, sessionId });
 }
+

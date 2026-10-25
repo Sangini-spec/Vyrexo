@@ -107,10 +107,42 @@ export function useVoice({
   const wasAiSpeakingRef = useRef<boolean>(isAiSpeaking);
   const lastInterruptTimeRef = useRef<number>(0);
   const lastBackchannelHumTimeRef = useRef<number>(0);
+  const onTranscriptRef = useRef(onTranscript);
+  const onActivatedRef = useRef(onActivated);
+  const onDeactivatedRef = useRef(onDeactivated);
+  const onInterruptRef = useRef(onInterrupt);
   const onBackchannelRef = useRef(onBackchannel);
   const isSelfEchoRef = useRef(isSelfEcho);
   const bleedPrefixLengthRef = useRef<Record<number, number>>({});
   const resultInterruptedRef = useRef<Record<number, boolean>>({});
+  const lastSeenResultLengthRef = useRef<Record<number, number>>({});
+
+  const consumeCurrentRecognitionBuffer = useCallback(() => {
+    for (const k of Object.keys(lastSeenResultLengthRef.current)) {
+      const idx = Number(k);
+      bleedPrefixLengthRef.current[idx] = lastSeenResultLengthRef.current[idx] || 0;
+    }
+    resultInterruptedRef.current = {};
+    accumulatedTurnRef.current = "";
+    pendingInterimRef.current = "";
+    lastEmittedFinalRef.current = "";
+  }, []);
+
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+  }, [onTranscript]);
+
+  useEffect(() => {
+    onActivatedRef.current = onActivated;
+  }, [onActivated]);
+
+  useEffect(() => {
+    onDeactivatedRef.current = onDeactivated;
+  }, [onDeactivated]);
+
+  useEffect(() => {
+    onInterruptRef.current = onInterrupt;
+  }, [onInterrupt]);
 
   useEffect(() => {
     onBackchannelRef.current = onBackchannel;
@@ -139,34 +171,35 @@ export function useVoice({
   const ECHO_COOLDOWN_MS = 380;
 
   useEffect(() => {
-    const userRecentlyInterrupted = Date.now() - lastInterruptTimeRef.current < 3000;
+    // Only ignore a stale isAiSpeaking=true within 300ms of an interrupt while muteAudio flushes.
+    // Once Rex genuinely starts speaking a new response (or after a turn completes), isAiSpeakingRef
+    // MUST become true so the user can barge in again and again on every subsequent turn!
+    const justInterrupted = Date.now() - lastInterruptTimeRef.current < 300;
+    if (justInterrupted && isAiSpeaking) {
+      isAiSpeakingRef.current = false;
+      wasAiSpeakingRef.current = false;
+      lastAiSpeechEndTimeRef.current = 0;
+      return;
+    }
     if (isAiSpeaking) {
-      // Only wipe mic buffers if the user is NOT currently in the middle of an active barge-in turn
-      if (!userRecentlyInterrupted) {
-        accumulatedTurnRef.current = "";
-        pendingInterimRef.current = "";
-        lastEmittedFinalRef.current = "";
-        if (turnSilenceTimerRef.current) {
-          clearTimeout(turnSilenceTimerRef.current);
-          turnSilenceTimerRef.current = null;
-        }
+      lastInterruptTimeRef.current = 0;
+      consumeCurrentRecognitionBuffer();
+      if (turnSilenceTimerRef.current) {
+        clearTimeout(turnSilenceTimerRef.current);
+        turnSilenceTimerRef.current = null;
       }
     } else if (wasAiSpeakingRef.current && !isAiSpeaking) {
       lastAiSpeechEndTimeRef.current = Date.now();
-      if (!userRecentlyInterrupted) {
-        accumulatedTurnRef.current = "";
-        pendingInterimRef.current = "";
-        lastEmittedFinalRef.current = "";
-        if (turnSilenceTimerRef.current) {
-          clearTimeout(turnSilenceTimerRef.current);
-          turnSilenceTimerRef.current = null;
-        }
+      consumeCurrentRecognitionBuffer();
+      if (turnSilenceTimerRef.current) {
+        clearTimeout(turnSilenceTimerRef.current);
+        turnSilenceTimerRef.current = null;
       }
       resetActiveInactivityTimerRef.current();
     }
     wasAiSpeakingRef.current = isAiSpeaking;
     isAiSpeakingRef.current = isAiSpeaking;
-  }, [isAiSpeaking]);
+  }, [isAiSpeaking, consumeCurrentRecognitionBuffer]);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -352,16 +385,21 @@ export function useVoice({
               if (matchWakeWord(transcript)) {
                 setMode("active_conversation");
                 modeRef.current = "active_conversation";
-                onActivated();
+                onActivatedRef.current();
                 const cmd = stripWake(transcript);
                 if (cmd) {
-                  onTranscript(normalizeSpokenTranscript(cmd, { isInterim: false }), true);
+                  onTranscriptRef.current(normalizeSpokenTranscript(cmd, { isInterim: false }), true);
                 } else {
-                  onTranscript("Hey Rex", true);
+                  onTranscriptRef.current("Hey Rex", true);
                 }
               }
             } else if (modeRef.current === "active_conversation") {
-              onTranscript(transcript, true);
+              const cmd = stripWake(transcript);
+              if (!cmd && matchWakeWord(transcript)) {
+                onTranscriptRef.current("Hey Rex", true);
+              } else {
+                onTranscriptRef.current(transcript, true);
+              }
             }
           }
         } catch (e) {
@@ -374,7 +412,7 @@ export function useVoice({
     } catch {
       isTranscribingRef.current = false;
     }
-  }, [onTranscript, onActivated]);
+  }, []);
 
   useEffect(() => {
     commitFallbackAudioRef.current = commitFallbackAudio;
@@ -436,6 +474,7 @@ export function useVoice({
       lastActivityRef.current = Date.now();
       bleedPrefixLengthRef.current = {};
       resultInterruptedRef.current = {};
+      lastSeenResultLengthRef.current = {};
       setLastError(null);
     };
     recognition.onaudiostart = () => {
@@ -447,25 +486,34 @@ export function useVoice({
 
     recognition.onresult = (event: any) => {
       lastActivityRef.current = Date.now();
-      const speaking = isAiSpeakingRef.current;
       const now = Date.now();
-      const inEchoCooldown = now - lastAiSpeechEndTimeRef.current < ECHO_COOLDOWN_MS;
+      // Only suppress speaking flag for 350ms right after an interrupt while audio player mutes;
+      // as soon as Rex speaks a new response, speaking=true so consecutive barge-ins always work!
+      const inActiveBargeIn = now - lastInterruptTimeRef.current < 350;
+      const speaking = !inActiveBargeIn && isAiSpeakingRef.current;
+      const inEchoCooldown =
+        !inActiveBargeIn && now - lastAiSpeechEndTimeRef.current < ECHO_COOLDOWN_MS;
       const isEchoWindow = speaking || inEchoCooldown;
 
       let finalText = "";
       let interimText = "";
       let detectedBargeInThisEvent = false;
 
+      for (let k = 0; k < event.results.length; k++) {
+        lastSeenResultLengthRef.current[k] = (event.results[k]?.[0]?.transcript || "").length;
+      }
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const rawTranscript: string = event.results[i][0].transcript || "";
         const isFinalResult: boolean = Boolean(event.results[i].isFinal);
         const alreadyInterruptedInResult = Boolean(resultInterruptedRef.current[i]);
-        const prevBleedLen = bleedPrefixLengthRef.current[i] || 0;
+        const rawPrevBleedLen = bleedPrefixLengthRef.current[i] || 0;
+        const prevBleedLen = rawPrevBleedLen <= rawTranscript.length ? rawPrevBleedLen : 0;
 
         if (isEchoWindow && !alreadyInterruptedInResult) {
           // Check both the newly added delta after any speaker bleed AND full buffer extraction
           const deltaSlice = rawTranscript.slice(prevBleedLen).trim();
-          const extractedFromFull = extractUserInterruptFromBuffer(rawTranscript);
+          const extractedFromFull = extractUserInterruptFromBuffer(rawTranscript.slice(prevBleedLen));
           const extractedFromDelta = extractUserInterruptFromBuffer(deltaSlice);
           const isDeltaSelfEcho = isSelfEchoRef.current ? isSelfEchoRef.current(deltaSlice) : false;
           const deltaWords = deltaSlice
@@ -473,14 +521,20 @@ export function useVoice({
             .trim()
             .split(/\s+/)
             .filter((w) => w.length > 1);
+          const startsWithNaturalBargeLead =
+            /^(no|yes|yeah|nah|nope|wait|hold|stop|pause|listen|hey|hi|hello|rex|ok|okay|actually|but|well|what|why|how|can|could|would|will|i\s+think|i\s+want|i\s+need|i\s+don'?t|i\s+mean|let'?s|let\s+me|tell\s+me|never)\b/i.test(
+              deltaSlice
+            );
 
           if (extractedFromDelta.matched || matchInterrupt(deltaSlice)) {
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             const userPortion = extractedFromDelta.matched ? extractedFromDelta.extractedText : deltaSlice;
             const matchIdx = rawTranscript.toLowerCase().lastIndexOf(userPortion.toLowerCase());
-            if (matchIdx >= 0) {
+            if (matchIdx >= prevBleedLen) {
               bleedPrefixLengthRef.current[i] = matchIdx;
+            } else {
+              bleedPrefixLengthRef.current[i] = prevBleedLen;
             }
             const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i] || prevBleedLen);
             if (isFinalResult) finalText += cleanChunk;
@@ -489,19 +543,19 @@ export function useVoice({
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             const matchIdx = rawTranscript.toLowerCase().lastIndexOf(extractedFromFull.extractedText.toLowerCase());
-            bleedPrefixLengthRef.current[i] = matchIdx >= 0 ? matchIdx : 0;
+            bleedPrefixLengthRef.current[i] = matchIdx >= prevBleedLen ? matchIdx : prevBleedLen;
             const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i]);
             if (isFinalResult) finalText += cleanChunk;
             else interimText += cleanChunk;
-          } else if (/\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(deltaSlice)) {
+          } else if (/\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(deltaSlice) || /^rex$/i.test(deltaSlice)) {
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
+            bleedPrefixLengthRef.current[i] = prevBleedLen;
             if (isFinalResult) finalText += deltaSlice;
             else interimText += deltaSlice;
-          } else if (!isDeltaSelfEcho && deltaWords.length >= 2) {
+          } else if (!isDeltaSelfEcho && (deltaWords.length >= 2 || startsWithNaturalBargeLead)) {
             // Phrase-Independent Barge-In:
             // The user started speaking any natural sentence in the middle of Rex's speech
-            // (e.g., "Hey Rex, I get your point, but what about this?" or "Actually what if we try...")
             // and it is NOT an echo of Rex's own voice!
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
@@ -513,11 +567,9 @@ export function useVoice({
             // Verified speaker bleed matching Rex's own voice output -> advance bleed offset
             bleedPrefixLengthRef.current[i] = rawTranscript.length;
           }
-          // Note: if !isDeltaSelfEcho && deltaWords.length === 1, we do NOT advance bleedPrefixLengthRef yet,
-          // so as soon as the user speaks their 2nd word, the 1st word is preserved intact!
         } else {
           // Either Rex is not speaking, or the user already barged in during this result index:
-          // strip any recorded speaker bleed prefix from index `i` so only the user's words remain!
+          // strip any recorded speaker bleed / prior-turn prefix from index `i` so only current turn words remain!
           const cleanChunk = prevBleedLen > 0 ? rawTranscript.slice(prevBleedLen) : rawTranscript;
           if (isFinalResult) {
             finalText += cleanChunk;
@@ -551,7 +603,14 @@ export function useVoice({
         lastInterruptTimeRef.current = Date.now();
         lastAiSpeechEndTimeRef.current = 0;
         isAiSpeakingRef.current = false;
-        onInterrupt?.();
+        wasAiSpeakingRef.current = false;
+        // Transition to active_conversation (LISTENING) BEFORE calling onInterrupt so the UI
+        // immediately enters LISTENING mode and never drops into READY (idle) mode!
+        setMode("active_conversation");
+        modeRef.current = "active_conversation";
+        activatedThisUtteranceRef.current = true;
+        onInterruptRef.current?.();
+        onActivatedRef.current();
         // Play a warm human active-listening backchannel hum ("Mmm-hmm") when the user barges in
         // with a conversational thought (skip hum only if they issued a bare silence command like "Stop Rex" / "Shut up")
         const combinedBargeText = (finalText || interimText).trim();
@@ -559,8 +618,6 @@ export function useVoice({
           lastBackchannelHumTimeRef.current = Date.now();
           onBackchannelRef.current?.("barge_in");
         }
-        setMode("active_conversation");
-        modeRef.current = "active_conversation";
         resetActiveInactivityTimerRef.current();
       }
 
@@ -572,28 +629,29 @@ export function useVoice({
           setMode("active_conversation");
           modeRef.current = "active_conversation";
           activatedThisUtteranceRef.current = true;
-          onActivated();
+          onActivatedRef.current();
           resetActiveInactivityTimerRef.current();
 
           const command = stripWake(triggerSource);
           accumulatedTurnRef.current = command;
-          if (command) {
-            onTranscript(normalizeSpokenTranscript(command, { isInterim: true }), false);
+          const liveDisplay = command || triggerSource;
+          if (liveDisplay) {
+            onTranscriptRef.current(normalizeSpokenTranscript(liveDisplay, { isInterim: true }), false);
           }
 
           if (turnSilenceTimerRef.current) {
             clearTimeout(turnSilenceTimerRef.current);
           }
-          const wakePauseMs = spokenFinal ? 650 : 1200;
+          const wakePauseMs = spokenFinal ? 550 : 950;
           turnSilenceTimerRef.current = setTimeout(() => {
             if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
             const fullText = accumulatedTurnRef.current.trim();
+            lastInterruptTimeRef.current = 0;
+            consumeCurrentRecognitionBuffer();
             if (fullText && fullText.length > 1) {
-              accumulatedTurnRef.current = "";
-              onTranscript(normalizeSpokenTranscript(fullText, { isInterim: false }), true);
+              onTranscriptRef.current(normalizeSpokenTranscript(fullText, { isInterim: false }), true);
             } else {
-              accumulatedTurnRef.current = "";
-              onTranscript("Hey Rex", true);
+              onTranscriptRef.current("Hey Rex", true);
             }
           }, wakePauseMs);
         }
@@ -608,35 +666,37 @@ export function useVoice({
           spokenFinal.includes("goodbye rex") ||
           spokenFinal.includes("bye rex") ||
           spokenFinal.includes("stop listening") ||
-          spokenInterim.includes("goodbye rex");
+          spokenFinal.includes("pause listening") ||
+          spokenInterim.includes("goodbye rex") ||
+          spokenInterim.includes("stop listening") ||
+          spokenInterim.includes("pause listening");
 
         if (deactivate) {
           if (turnSilenceTimerRef.current) {
             clearTimeout(turnSilenceTimerRef.current);
             turnSilenceTimerRef.current = null;
           }
-          accumulatedTurnRef.current = "";
-          pendingInterimRef.current = "";
+          lastInterruptTimeRef.current = 0;
+          consumeCurrentRecognitionBuffer();
           setMode("waiting_for_wake");
           modeRef.current = "waiting_for_wake";
           activatedThisUtteranceRef.current = false;
-          lastEmittedFinalRef.current = "";
-          onDeactivated();
+          onDeactivatedRef.current();
           return;
         }
 
-        // 2. Check instant stop or continuation/withdrawal/redirect phrases
+        // 2. Check instant stop or continuation/withdrawal/redirect phrases ONLY if AI is currently speaking
         const isImmediateStop = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
-        if (isImmediateStop) {
-          // Throttle onInterrupt so we silence Rex immediately on the first syllable without resetting UI state on every subsequent syllable
+        if (isImmediateStop && isAiSpeakingRef.current && !detectedBargeInThisEvent) {
           if (Date.now() - lastInterruptTimeRef.current > 600) {
             lastInterruptTimeRef.current = Date.now();
-            onInterrupt?.();
+            isAiSpeakingRef.current = false;
+            onInterruptRef.current?.();
           }
         }
 
         // 3. Accumulate spoken text across comma pauses (so "Never mind, stop building it. I don't want to work on this application"
-        // or "Wait, I have something else to add on" is captured in full without being cut off at the first comma!)
+        // or "No I think we should..." is captured in full without being cut off at the first pause!)
         if (finalText) {
           const trimmedFinal = (isBareStopCommand(finalText) ? finalText : stripWake(finalText)).trim();
           if (trimmedFinal) {
@@ -660,9 +720,16 @@ export function useVoice({
           accumulatedTurnRef.current + (cleanInterim ? " " + cleanInterim : "")
         ).trim();
         const combinedLive = normalizeSpokenTranscript(combinedLiveRaw, { isInterim: true });
+        const hasStandaloneWakeWord =
+          !combinedLive && (matchWakeWord(spokenFinal) || matchWakeWord(spokenInterim));
 
         if (combinedLive) {
-          onTranscript(combinedLive, false);
+          onTranscriptRef.current(combinedLive, false);
+        } else if (hasStandaloneWakeWord) {
+          const rawWakeDisplay = (finalText || interimText).trim();
+          if (rawWakeDisplay) {
+            onTranscriptRef.current(normalizeSpokenTranscript(rawWakeDisplay, { isInterim: true }), false);
+          }
         }
 
         // 4. Adaptive Low-Latency Conversational Turn Detection
@@ -675,10 +742,12 @@ export function useVoice({
         const wordCount = lowerLive.split(/\s+/).filter(Boolean).length;
 
         const endsWithFillerOrConnector =
-          /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of)\s*$/i.test(
+          /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of|think|want|need|feel|believe|mean|know|say|said|ask|wonder|hope|guess|suppose|suggest|recommend|prefer|if|whether|when|where|why|how|what|which|who|about|from|into|by|as)\s*$/i.test(
             lowerLive
           ) ||
-          /^(um|uh|ah|er|hmm|like|and|or|so)\b$/i.test(lowerLive);
+          /^(um|uh|ah|er|hmm|like|and|or|so|no|yes|yeah|well|actually|wait|hold on|hey|ok|okay)\b$/i.test(
+            lowerLive
+          );
 
         const isShortGreetingOrReply =
           wordCount <= 6 &&
@@ -701,24 +770,33 @@ export function useVoice({
           onBackchannelRef.current?.("listening_hum");
         }
 
-        let pauseDurationMs = 1150;
+        let pauseDurationMs = 1250;
         if (isCompleteBareStop && hasFinalizedClause) {
-          // Give 650ms after "Stop", "Wait", "Pause Rex", "Never mind" so if the user continues after a comma
+          // Give 750ms after "Stop", "Wait", "Pause Rex", "Never mind" so if the user continues after a comma
           // ("Wait, I have something else to add on" or "Never mind, stop building it"), the full sentence is captured!
-          pauseDurationMs = 650;
+          pauseDurationMs = 750;
         } else if (isShortGreetingOrReply && hasFinalizedClause) {
-          pauseDurationMs = 420;
+          pauseDurationMs = 450;
         } else if (isShortGreetingOrReply || isCompleteBareStop) {
-          pauseDurationMs = 800;
+          pauseDurationMs = 850;
+        } else if (hasFinalizedClause && !endsWithFillerOrConnector && wordCount >= 4) {
+          pauseDurationMs = 1200;
         } else if (hasFinalizedClause && !endsWithFillerOrConnector) {
-          pauseDurationMs = 1100;
+          // Short 1-3 word clause like "No I think" — give extra breathing room so the user can finish their sentence
+          pauseDurationMs = 1750;
         } else {
-          pauseDurationMs = 2000;
+          pauseDurationMs = 2100;
         }
 
         if (combinedLive.length > 0) {
           turnSilenceTimerRef.current = setTimeout(() => {
-            if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
+            const recentlyInterrupted = Date.now() - lastInterruptTimeRef.current < 8000;
+            if (
+              modeRef.current !== "active_conversation" ||
+              (!recentlyInterrupted && isAiSpeakingRef.current)
+            ) {
+              return;
+            }
             const fullText = accumulatedTurnRef.current.trim() || combinedLive.trim();
 
             const cleanText = normalizeSpokenTranscript(
@@ -729,16 +807,34 @@ export function useVoice({
               { isInterim: false }
             );
 
+            lastInterruptTimeRef.current = 0;
+            consumeCurrentRecognitionBuffer();
+
             if (cleanText.length > 1 && !/^(or|and|so|but|um|uh|ah|er|hmm)[.!?]?$/i.test(cleanText)) {
-              accumulatedTurnRef.current = "";
-              pendingInterimRef.current = "";
-              lastEmittedFinalRef.current = "";
-              onTranscript(cleanText, true);
-            } else {
-              accumulatedTurnRef.current = "";
-              pendingInterimRef.current = "";
+              onTranscriptRef.current(cleanText, true);
             }
           }, pauseDurationMs);
+        } else if (hasStandaloneWakeWord) {
+          // User spoke "Rex" / "Hey Rex" (either finalizing the wake word that just transitioned
+          // from waiting_for_wake -> active_conversation, or calling "Rex" while in active_conversation).
+          const wakeDelayMs = spokenFinal ? 500 : 900;
+          turnSilenceTimerRef.current = setTimeout(() => {
+            const recentlyInterrupted = Date.now() - lastInterruptTimeRef.current < 8000;
+            if (
+              modeRef.current !== "active_conversation" ||
+              (!recentlyInterrupted && isAiSpeakingRef.current)
+            ) {
+              return;
+            }
+            const fullText = accumulatedTurnRef.current.trim();
+            lastInterruptTimeRef.current = 0;
+            consumeCurrentRecognitionBuffer();
+            if (fullText && fullText.length > 1) {
+              onTranscriptRef.current(normalizeSpokenTranscript(fullText, { isInterim: false }), true);
+            } else {
+              onTranscriptRef.current("Hey Rex", true);
+            }
+          }, wakeDelayMs);
         }
       }
     };
@@ -772,12 +868,12 @@ export function useVoice({
     recognition.onend = () => {
       if (modeRef.current !== "idle") {
         if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-        restartTimerRef.current = setTimeout(() => restartRef.current(false), 180);
+        restartTimerRef.current = setTimeout(() => restartRef.current(false), 80);
       }
     };
 
     return recognition;
-  }, [onTranscript, onActivated, onDeactivated, onInterrupt]);
+  }, [consumeCurrentRecognitionBuffer]);
 
   const startRecognition = useCallback((fresh = false) => {
     if (modeRef.current === "idle") return;
@@ -880,11 +976,11 @@ export function useVoice({
         if (modeRef.current === "active_conversation" && !isAiSpeakingRef.current) {
           setMode("waiting_for_wake");
           modeRef.current = "waiting_for_wake";
-          onDeactivated();
+          onDeactivatedRef.current();
         }
       }, 45000);
     }
-  }, [onDeactivated]);
+  }, []);
 
   // Start listening immediately and hands-free
   const startListening = useCallback(
@@ -895,7 +991,7 @@ export function useVoice({
       lastActivityRef.current = Date.now();
 
       if (forceActive) {
-        onActivated();
+        onActivatedRef.current();
         resetActiveInactivityTimer();
       }
 
@@ -909,7 +1005,7 @@ export function useVoice({
       }
       return true;
     },
-    [ensureMediaStream, onActivated, resetActiveInactivityTimer, startRecognition]
+    [ensureMediaStream, resetActiveInactivityTimer, startRecognition]
   );
 
   useEffect(() => {
@@ -947,8 +1043,26 @@ export function useVoice({
       recognitionRef.current = null;
     }
 
-    onDeactivated();
-  }, [onDeactivated]);
+    onDeactivatedRef.current();
+  }, []);
+
+  // Pause active conversation back into wake-word ("waiting_for_wake") / Ready mode
+  // (used when user says "Stop Rex", "Pause", "Pause Rex", etc.)
+  const pauseToWakeWord = useCallback(() => {
+    if (activeInactivityTimerRef.current) {
+      clearTimeout(activeInactivityTimerRef.current);
+      activeInactivityTimerRef.current = null;
+    }
+    if (turnSilenceTimerRef.current) {
+      clearTimeout(turnSilenceTimerRef.current);
+      turnSilenceTimerRef.current = null;
+    }
+    lastInterruptTimeRef.current = 0;
+    consumeCurrentRecognitionBuffer();
+    activatedThisUtteranceRef.current = false;
+    setMode("waiting_for_wake");
+    modeRef.current = "waiting_for_wake";
+  }, [consumeCurrentRecognitionBuffer]);
 
   // Toggle push-to-talk or switch between wake & active
   const forceActivate = useCallback(() => {
@@ -957,18 +1071,13 @@ export function useVoice({
     } else if (modeRef.current === "waiting_for_wake") {
       setMode("active_conversation");
       modeRef.current = "active_conversation";
-      onActivated();
+      onActivatedRef.current();
       resetActiveInactivityTimer();
     } else {
-      if (activeInactivityTimerRef.current) {
-        clearTimeout(activeInactivityTimerRef.current);
-        activeInactivityTimerRef.current = null;
-      }
-      setMode("waiting_for_wake");
-      modeRef.current = "waiting_for_wake";
-      onDeactivated();
+      pauseToWakeWord();
+      onDeactivatedRef.current();
     }
-  }, [startListening, onActivated, onDeactivated, resetActiveInactivityTimer]);
+  }, [startListening, resetActiveInactivityTimer, pauseToWakeWord]);
 
   // Toggle full microphone on/off
   const toggleMic = useCallback(async () => {
@@ -1043,6 +1152,7 @@ export function useVoice({
     requestPermission,
     startListening,
     stopListening,
+    pauseToWakeWord,
     forceActivate,
     toggleMic,
   };

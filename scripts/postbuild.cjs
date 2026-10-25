@@ -134,6 +134,57 @@ if (fs.existsSync(path.join(appSourceDir, "scripts"))) {
   );
 }
 
+// 5b. Sync session-projects.json inside /.data from /workspaces/session-*/.vyrexo-project.json
+// and copy /.data + /workspaces/session-* into standalone so deployed Cloud Run preserves
+// user profiles, chat sessions, chat histories, and workspace projects.
+const rootDataDir = path.join(rootDir, ".data");
+const rootWorkspacesDir = path.join(rootDir, "workspaces");
+if (fs.existsSync(rootWorkspacesDir)) {
+  const sessionProjectsMap = {};
+  const sessionProjectsPath = path.join(rootDataDir, "session-projects.json");
+  if (fs.existsSync(sessionProjectsPath)) {
+    try {
+      Object.assign(
+        sessionProjectsMap,
+        JSON.parse(fs.readFileSync(sessionProjectsPath, "utf8"))
+      );
+    } catch {}
+  }
+
+  for (const entry of fs.readdirSync(rootWorkspacesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("session-")) continue;
+    const srcWs = path.join(rootWorkspacesDir, entry.name);
+    const destWs = path.join(stagingStandalone, "workspaces", entry.name);
+    copyDereferenced(srcWs, destWs);
+
+    const metaPath = path.join(srcWs, ".vyrexo-project.json");
+    if (fs.existsSync(metaPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+        if (parsed && (parsed.project || parsed.connected)) {
+          sessionProjectsMap[entry.name] = {
+            project: parsed.project,
+            connected: parsed.connected,
+          };
+        }
+      } catch {}
+    }
+  }
+
+  if (Object.keys(sessionProjectsMap).length > 0) {
+    fs.mkdirSync(rootDataDir, { recursive: true });
+    fs.writeFileSync(
+      sessionProjectsPath,
+      JSON.stringify(sessionProjectsMap, null, 2) + "\n",
+      "utf8"
+    );
+  }
+}
+
+if (fs.existsSync(rootDataDir)) {
+  copyDereferenced(rootDataDir, path.join(stagingStandalone, ".data"));
+}
+
 // 6. Flatten & dereference node_modules so zero symlinks exist
 const destNodeModules = path.join(stagingStandalone, "node_modules");
 buildFlatNodeModules(path.join(srcStandaloneDir, "node_modules"), destNodeModules);

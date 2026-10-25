@@ -5,6 +5,9 @@ import {
   getSessionOwner,
   isBlockedLegacySessionId,
   deleteUserSession,
+  normalizeUserPrimaryKey,
+  getUserIdentityAliases,
+  areSameUserIdentity,
 } from "@/lib/session-persistent-storage";
 import {
   clearSessionChatHistory,
@@ -23,7 +26,15 @@ export async function PATCH(
 ) {
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
-  const userId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (body.user_id || body.userId || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    body.email ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
   const requestedName = (body.name || "").trim();
 
   if (!id || isBlockedLegacySessionId(id)) {
@@ -31,7 +42,7 @@ export async function PATCH(
   }
 
   const existingOwner = getSessionOwner(id);
-  if (existingOwner && userId && existingOwner !== userId) {
+  if (existingOwner && userId && !areSameUserIdentity(existingOwner, userId)) {
     return NextResponse.json(
       { ok: false, error: "Forbidden: session belongs to another user" },
       { status: 403 }
@@ -47,8 +58,9 @@ export async function PATCH(
 
   try {
     if (targetUserId) {
+      const aliases = getUserIdentityAliases(targetUserId, rawEmail);
       const store: Map<string, any[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
-      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId) || [];
+      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId, rawEmail) || [];
       const idx = list.findIndex((s: any) => s.id === id);
       if (idx >= 0) {
         const existingName = list[idx].name;
@@ -59,8 +71,10 @@ export async function PATCH(
               ? existingName
               : semanticName;
         list[idx] = { ...list[idx], name: finalName, updatedAt: Date.now() };
-        if (store) store.set(targetUserId, list);
-        writePersistedSessions(targetUserId, list);
+        if (store) {
+          for (const a of aliases) store.set(a, list);
+        }
+        writePersistedSessions(targetUserId, list, rawEmail);
         return NextResponse.json({
           ok: true,
           sessionId: id,
@@ -83,14 +97,22 @@ export async function DELETE(
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const userId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawUserId = (searchParams.get("user_id") || request.headers.get("x-user-id") || "").trim();
+  const rawEmail = (
+    searchParams.get("email") ||
+    request.headers.get("x-user-email") ||
+    (rawUserId.includes("@") ? rawUserId : "")
+  )
+    .trim()
+    .toLowerCase();
+  const userId = normalizeUserPrimaryKey(rawUserId, rawEmail);
 
   if (!id) {
     return NextResponse.json({ ok: false, error: "Session ID required" }, { status: 400 });
   }
 
   const existingOwner = getSessionOwner(id);
-  if (existingOwner && userId && existingOwner !== userId) {
+  if (existingOwner && userId && !areSameUserIdentity(existingOwner, userId)) {
     return NextResponse.json(
       { ok: false, error: "Forbidden: session belongs to another user" },
       { status: 403 }
@@ -102,10 +124,13 @@ export async function DELETE(
   try {
     const store: Map<string, any[]> | undefined = (globalThis as any).__vyrexo_sessions_store;
     if (targetUserId) {
-      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId) || [];
+      const aliases = getUserIdentityAliases(targetUserId, rawEmail);
+      const list = store?.get(targetUserId) || readPersistedSessions(targetUserId, rawEmail) || [];
       const filtered = list.filter((s: any) => s.id !== id);
-      if (store) store.set(targetUserId, filtered);
-      writePersistedSessions(targetUserId, filtered);
+      if (store) {
+        for (const a of aliases) store.set(a, filtered);
+      }
+      writePersistedSessions(targetUserId, filtered, rawEmail);
     }
     clearSessionChatHistory(id);
     removeSessionConnectedProject(id);
@@ -117,4 +142,5 @@ export async function DELETE(
     sessionId: id,
   });
 }
+
 

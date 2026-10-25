@@ -31,6 +31,74 @@ const BLOCKED_LEGACY_SESSION_IDS = new Set([
   "railgo-train-booking",
 ]);
 
+// Known development UUID <-> canonical email primary key mappings
+const USER_IDENTITY_ALIASES: Record<string, string[]> = {
+  "sanginitripathi8@gmail.com": [
+    "sanginitripathi8@gmail.com",
+    "b636edec-74a0-4961-8521-887fd8a90c69",
+  ],
+  "b636edec-74a0-4961-8521-887fd8a90c69": [
+    "sanginitripathi8@gmail.com",
+    "b636edec-74a0-4961-8521-887fd8a90c69",
+  ],
+};
+
+export function normalizeUserPrimaryKey(
+  userId?: string | null,
+  email?: string | null
+): string {
+  const cleanEmail = (email || "").trim().toLowerCase();
+  if (cleanEmail && cleanEmail.includes("@")) {
+    return cleanEmail;
+  }
+  const cleanId = (userId || "").trim();
+  if (!cleanId || cleanId === "default") return "";
+  const lowerId = cleanId.toLowerCase();
+  if (lowerId.includes("@")) return lowerId;
+  if (lowerId === "b636edec-74a0-4961-8521-887fd8a90c69") {
+    return "sanginitripathi8@gmail.com";
+  }
+  return cleanId;
+}
+
+export function getUserIdentityAliases(
+  userId?: string | null,
+  email?: string | null
+): string[] {
+  const canonical = normalizeUserPrimaryKey(userId, email);
+  const rawId = (userId || "").trim();
+  const rawEmail = (email || "").trim().toLowerCase();
+  const set = new Set<string>();
+
+  if (canonical) set.add(canonical);
+  if (rawEmail && rawEmail.includes("@")) set.add(rawEmail);
+  if (rawId && rawId !== "default") set.add(rawId);
+
+  for (const k of Array.from(set)) {
+    const mapped = USER_IDENTITY_ALIASES[k.toLowerCase()];
+    if (mapped) {
+      for (const a of mapped) set.add(a);
+    }
+  }
+
+  return Array.from(set);
+}
+
+export function areSameUserIdentity(
+  userA?: string | null,
+  userB?: string | null
+): boolean {
+  if (!userA || !userB) return false;
+  const trimA = userA.trim();
+  const trimB = userB.trim();
+  if (!trimA || !trimB) return false;
+  if (trimA.toLowerCase() === trimB.toLowerCase()) return true;
+
+  const aliasesA = getUserIdentityAliases(trimA);
+  const lowerB = trimB.toLowerCase();
+  return aliasesA.some((a) => a.toLowerCase() === lowerB);
+}
+
 export function isBlockedLegacySessionId(sessionId?: string | null): boolean {
   if (!sessionId) return true;
   return BLOCKED_LEGACY_SESSION_IDS.has(sessionId);
@@ -112,21 +180,21 @@ function writeDiskTombstones(data: Record<string, string[]>): void {
 }
 
 /**
- * Returns the user_id that owns a given sessionId, or null if no user owns it.
+ * Returns the canonical user_id that owns a given sessionId, or null if no user owns it.
  */
 export function getSessionOwner(sessionId: string): string | null {
   if (!sessionId || isBlockedLegacySessionId(sessionId)) return null;
 
   for (const [uid, list] of Array.from(memorySessions.entries())) {
     if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
-      return uid;
+      return normalizeUserPrimaryKey(uid) || uid;
     }
   }
 
   const diskData = readDiskSessions();
   for (const [uid, list] of Object.entries(diskData)) {
     if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
-      return uid;
+      return normalizeUserPrimaryKey(uid) || uid;
     }
   }
 
@@ -134,7 +202,7 @@ export function getSessionOwner(sessionId: string): string | null {
   if (globalStore) {
     for (const [uid, list] of Array.from(globalStore.entries())) {
       if (Array.isArray(list) && list.some((s) => s.id === sessionId)) {
-        return uid;
+        return normalizeUserPrimaryKey(uid) || uid;
       }
     }
   }
@@ -157,68 +225,88 @@ export function canUserAccessSession(
 
   const owner = getSessionOwner(sessionId);
   if (owner) {
-    return owner === userId;
+    return areSameUserIdentity(owner, userId);
   }
 
   return !requireExistingOwnership;
 }
 
 /**
- * Get all sessions strictly created by and assigned to `userId`.
+ * Get all sessions strictly created by and assigned to `userId` (and its canonical email/UUID aliases).
  * Brand-new users always receive an empty list `[]`.
  */
-export function getUserSessions(userId?: string | null): SessionRecord[] {
-  if (!userId) return [];
+export function getUserSessions(userId?: string | null, email?: string | null): SessionRecord[] {
+  const aliases = getUserIdentityAliases(userId, email);
+  if (aliases.length === 0) return [];
+  const canonical = normalizeUserPrimaryKey(userId, email) || aliases[0];
 
-  let userList = memorySessions.get(userId);
-  if (!userList) {
-    const diskData = readDiskSessions();
-    if (diskData[userId] && Array.isArray(diskData[userId])) {
-      userList = diskData[userId];
-      memorySessions.set(userId, userList);
-    } else {
-      userList = [];
-      memorySessions.set(userId, userList);
+  const diskData = readDiskSessions();
+  const diskTombstones = readDiskTombstones();
+
+  const combinedTombstones = new Set<string>();
+  for (const key of aliases) {
+    const memT = memoryTombstones.get(key);
+    if (memT) memT.forEach((id) => combinedTombstones.add(id));
+    const dT = diskTombstones[key];
+    if (Array.isArray(dT)) dT.forEach((id) => combinedTombstones.add(id));
+  }
+  memoryTombstones.set(canonical, combinedTombstones);
+
+  const seenIds = new Set<string>();
+  const mergedList: SessionRecord[] = [];
+
+  for (const key of aliases) {
+    const memList = memorySessions.get(key);
+    const dList = diskData[key];
+    const sourceList = Array.isArray(memList) && memList.length > 0 ? memList : Array.isArray(dList) ? dList : [];
+    for (const s of sourceList) {
+      if (
+        s &&
+        s.id &&
+        !seenIds.has(s.id) &&
+        !isBlockedLegacySessionId(s.id) &&
+        (!s.user_id || areSameUserIdentity(s.user_id, canonical)) &&
+        !combinedTombstones.has(s.id)
+      ) {
+        seenIds.add(s.id);
+        mergedList.push({
+          ...s,
+          user_id: canonical,
+        });
+      }
     }
   }
 
-  let tombstones = memoryTombstones.get(userId);
-  if (!tombstones) {
-    const diskTombstones = readDiskTombstones();
-    tombstones = new Set(diskTombstones[userId] || []);
-    memoryTombstones.set(userId, tombstones);
+  const sorted = mergedList.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  for (const key of aliases) {
+    memorySessions.set(key, sorted);
   }
-
-  const activeSessions = (userList || []).filter(
-    (s) =>
-      s &&
-      s.id &&
-      !isBlockedLegacySessionId(s.id) &&
-      (!s.user_id || s.user_id === userId) &&
-      !tombstones?.has(s.id)
-  );
-
-  return [...activeSessions].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return sorted;
 }
 
 /**
  * Save or update a session record on disk, enforcing strict user ownership.
  */
-export function saveUserSession(userId: string, record: SessionRecord): SessionRecord | null {
-  if (!userId || !record?.id || isBlockedLegacySessionId(record.id)) return null;
+export function saveUserSession(userId: string, record: SessionRecord, email?: string | null): SessionRecord | null {
+  const aliases = getUserIdentityAliases(userId, email);
+  if (aliases.length === 0 || !record?.id || isBlockedLegacySessionId(record.id)) return null;
+  const canonical = normalizeUserPrimaryKey(userId, email) || aliases[0];
 
   const existingOwner = getSessionOwner(record.id);
-  if (existingOwner && existingOwner !== userId) {
+  if (existingOwner && !areSameUserIdentity(existingOwner, canonical)) {
     return null;
   }
 
-  const current = getUserSessions(userId);
-  const tombstones = memoryTombstones.get(userId) || new Set<string>();
+  const current = getUserSessions(canonical, email);
+  const tombstones = memoryTombstones.get(canonical) || new Set<string>();
 
   if (tombstones.has(record.id)) {
     tombstones.delete(record.id);
     const diskTombstones = readDiskTombstones();
-    diskTombstones[userId] = Array.from(tombstones);
+    for (const key of aliases) {
+      diskTombstones[key] = Array.from(tombstones);
+      memoryTombstones.set(key, tombstones);
+    }
     writeDiskTombstones(diskTombstones);
   }
 
@@ -226,7 +314,7 @@ export function saveUserSession(userId: string, record: SessionRecord): SessionR
   const now = Date.now();
   const updatedRecord: SessionRecord = {
     ...record,
-    user_id: userId,
+    user_id: canonical,
     updatedAt: now,
   };
 
@@ -238,10 +326,11 @@ export function saveUserSession(userId: string, record: SessionRecord): SessionR
     nextList = [updatedRecord, ...current];
   }
 
-  memorySessions.set(userId, nextList);
-
   const diskData = readDiskSessions();
-  diskData[userId] = nextList;
+  for (const key of aliases) {
+    memorySessions.set(key, nextList);
+    diskData[key] = nextList;
+  }
   writeDiskSessions(diskData);
 
   return updatedRecord;
@@ -252,22 +341,24 @@ export function saveUserSession(userId: string, record: SessionRecord): SessionR
  */
 export function renameUserSession(sessionId: string, newName: string, userId?: string): SessionRecord | null {
   const cleanName = newName.trim();
-  if (!cleanName || !userId || isBlockedLegacySessionId(sessionId)) return null;
+  const aliases = getUserIdentityAliases(userId);
+  if (!cleanName || aliases.length === 0 || isBlockedLegacySessionId(sessionId)) return null;
+  const canonical = normalizeUserPrimaryKey(userId) || aliases[0];
 
   const existingOwner = getSessionOwner(sessionId);
-  if (existingOwner && existingOwner !== userId) {
+  if (existingOwner && !areSameUserIdentity(existingOwner, canonical)) {
     return null;
   }
 
   const diskData = readDiskSessions();
-  const userList = [...getUserSessions(userId)];
+  const userList = [...getUserSessions(canonical)];
   const targetIdx = userList.findIndex((s) => s.id === sessionId);
   let updatedRecord: SessionRecord;
 
   if (targetIdx >= 0) {
     userList[targetIdx] = {
       ...userList[targetIdx],
-      user_id: userId,
+      user_id: canonical,
       name: cleanName,
       updatedAt: Date.now(),
     };
@@ -275,7 +366,7 @@ export function renameUserSession(sessionId: string, newName: string, userId?: s
   } else {
     updatedRecord = {
       id: sessionId,
-      user_id: userId,
+      user_id: canonical,
       name: cleanName,
       icon: "🚀",
       createdAt: Date.now(),
@@ -284,8 +375,10 @@ export function renameUserSession(sessionId: string, newName: string, userId?: s
     userList.unshift(updatedRecord);
   }
 
-  memorySessions.set(userId, userList);
-  diskData[userId] = userList;
+  for (const key of aliases) {
+    memorySessions.set(key, userList);
+    diskData[key] = userList;
+  }
   writeDiskSessions(diskData);
 
   return updatedRecord;
@@ -295,24 +388,28 @@ export function renameUserSession(sessionId: string, newName: string, userId?: s
  * Delete a session permanently by its ID, strictly scoped to `userId`.
  */
 export function deleteUserSession(sessionId: string, userId?: string): boolean {
-  if (!userId || !sessionId) return false;
+  const aliases = getUserIdentityAliases(userId);
+  if (aliases.length === 0 || !sessionId) return false;
+  const canonical = normalizeUserPrimaryKey(userId) || aliases[0];
 
   const existingOwner = getSessionOwner(sessionId);
-  if (existingOwner && existingOwner !== userId) {
+  if (existingOwner && !areSameUserIdentity(existingOwner, canonical)) {
     return false;
   }
 
   const diskData = readDiskSessions();
   const diskTombstones = readDiskTombstones();
+  const current = getUserSessions(canonical).filter((s) => s.id !== sessionId);
 
-  const current = diskData[userId] || memorySessions.get(userId) || [];
-  diskData[userId] = current.filter((s) => s.id !== sessionId);
-  memorySessions.set(userId, diskData[userId]);
-
-  const tSet = memoryTombstones.get(userId) || new Set(diskTombstones[userId] || []);
+  const tSet = memoryTombstones.get(canonical) || new Set(diskTombstones[canonical] || []);
   tSet.add(sessionId);
-  memoryTombstones.set(userId, tSet);
-  diskTombstones[userId] = Array.from(tSet);
+
+  for (const key of aliases) {
+    diskData[key] = current;
+    memorySessions.set(key, current);
+    memoryTombstones.set(key, tSet);
+    diskTombstones[key] = Array.from(tSet);
+  }
 
   writeDiskSessions(diskData);
   writeDiskTombstones(diskTombstones);
@@ -326,23 +423,26 @@ export function deleteUserSession(sessionId: string, userId?: string): boolean {
  * Clear all sessions strictly for the specified user (never touches other users' sessions).
  */
 export function clearAllUserSessions(userId: string): void {
-  if (!userId) return;
-  const current = getUserSessions(userId);
+  const aliases = getUserIdentityAliases(userId);
+  if (aliases.length === 0) return;
+  const canonical = normalizeUserPrimaryKey(userId) || aliases[0];
+  const current = getUserSessions(canonical);
   const diskTombstones = readDiskTombstones();
-  const tSet = memoryTombstones.get(userId) || new Set(diskTombstones[userId] || []);
+  const tSet = memoryTombstones.get(canonical) || new Set(diskTombstones[canonical] || []);
 
   for (const s of current) {
     tSet.add(s.id);
     deleteChatHistory(s.id);
   }
 
-  memoryTombstones.set(userId, tSet);
-  diskTombstones[userId] = Array.from(tSet);
-  writeDiskTombstones(diskTombstones);
-
-  memorySessions.set(userId, []);
   const diskData = readDiskSessions();
-  diskData[userId] = [];
+  for (const key of aliases) {
+    memoryTombstones.set(key, tSet);
+    diskTombstones[key] = Array.from(tSet);
+    memorySessions.set(key, []);
+    diskData[key] = [];
+  }
+  writeDiskTombstones(diskTombstones);
   writeDiskSessions(diskData);
 }
 
@@ -350,9 +450,11 @@ export function clearAllUserSessions(userId: string): void {
  * Clear sessions older than given days for a specific user.
  */
 export function clearOlderUserSessions(days: number, userId: string): { deletedCount: number; deletedIds: string[] } {
-  if (!userId) return { deletedCount: 0, deletedIds: [] };
+  const aliases = getUserIdentityAliases(userId);
+  if (aliases.length === 0) return { deletedCount: 0, deletedIds: [] };
+  const canonical = normalizeUserPrimaryKey(userId) || aliases[0];
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const current = getUserSessions(userId);
+  const current = getUserSessions(canonical);
   const kept: SessionRecord[] = [];
   const removedIds: string[] = [];
 
@@ -366,16 +468,17 @@ export function clearOlderUserSessions(days: number, userId: string): { deletedC
   }
 
   const diskTombstones = readDiskTombstones();
-  const tSet = memoryTombstones.get(userId) || new Set(diskTombstones[userId] || []);
+  const tSet = memoryTombstones.get(canonical) || new Set(diskTombstones[canonical] || []);
   removedIds.forEach((id) => tSet.add(id));
 
-  memoryTombstones.set(userId, tSet);
-  diskTombstones[userId] = Array.from(tSet);
-  writeDiskTombstones(diskTombstones);
-
-  memorySessions.set(userId, kept);
   const diskData = readDiskSessions();
-  diskData[userId] = kept;
+  for (const key of aliases) {
+    memoryTombstones.set(key, tSet);
+    diskTombstones[key] = Array.from(tSet);
+    memorySessions.set(key, kept);
+    diskData[key] = kept;
+  }
+  writeDiskTombstones(diskTombstones);
   writeDiskSessions(diskData);
 
   return { deletedCount: removedIds.length, deletedIds: removedIds };
@@ -446,25 +549,27 @@ export function deleteChatHistory(sessionId: string): void {
 
 // ── Compatibility Exports for Session & Chat Persistence ─────────────────────
 
-export function readPersistedSessions(userId: string): SessionRecord[] {
-  if (!userId) return [];
-  const diskData = readDiskSessions();
-  if (diskData[userId] && Array.isArray(diskData[userId])) {
-    return diskData[userId].filter(
-      (s) => s && s.id && !isBlockedLegacySessionId(s.id) && (!s.user_id || s.user_id === userId)
-    );
-  }
-  return [];
+export function readPersistedSessions(userId: string, email?: string | null): SessionRecord[] {
+  return getUserSessions(userId, email);
 }
 
-export function writePersistedSessions(userId: string, sessions: SessionRecord[]): void {
-  if (!userId) return;
+export function writePersistedSessions(
+  userId: string,
+  sessions: SessionRecord[],
+  email?: string | null
+): void {
+  const aliases = getUserIdentityAliases(userId, email);
+  if (aliases.length === 0) return;
+  const canonical = normalizeUserPrimaryKey(userId, email) || aliases[0];
   const sanitized = sessions
     .filter((s) => s && s.id && !isBlockedLegacySessionId(s.id))
-    .map((s) => ({ ...s, user_id: userId }));
-  memorySessions.set(userId, sanitized);
+    .map((s) => ({ ...s, user_id: canonical }));
+
   const diskData = readDiskSessions();
-  diskData[userId] = sanitized;
+  for (const key of aliases) {
+    memorySessions.set(key, sanitized);
+    diskData[key] = sanitized;
+  }
   writeDiskSessions(diskData);
 }
 

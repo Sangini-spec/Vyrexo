@@ -200,6 +200,12 @@ export function useAudioPlayer() {
             advanceOrFinish();
             return;
           }
+          // If the browser kept AudioContext suspended (e.g. hands-free voice wake word before any click),
+          // never start a BufferSourceNode on a suspended clock (it would produce no sound and never fire onended).
+          if ((ctx.state as string) !== "running") {
+            playViaHtmlAudio();
+            return;
+          }
           // Copy buffer because decodeAudioData detaches the ArrayBuffer
           const arrayBufCopy = item.bytes.buffer.slice(
             item.bytes.byteOffset,
@@ -213,13 +219,31 @@ export function useAudioPlayer() {
                 advanceOrFinish();
                 return;
               }
+              if ((ctx.state as string) !== "running") {
+                playViaHtmlAudio();
+                return;
+              }
               const source = ctx.createBufferSource();
               source.buffer = decodedBuffer;
               source.connect(ctx.destination);
               activeSourceNodeRef.current = source;
               isStartingPlaybackRef.current = false;
 
+              let finished = false;
+              const maxDurationMs = Math.max(1200, Math.ceil((decodedBuffer.duration || 3) * 1000) + 800);
+              const safetyTimer = setTimeout(() => {
+                if (finished) return;
+                finished = true;
+                if (activeSourceNodeRef.current === source) {
+                  activeSourceNodeRef.current = null;
+                }
+                advanceOrFinish();
+              }, maxDurationMs);
+
               source.onended = () => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(safetyTimer);
                 if (activeSourceNodeRef.current === source) {
                   activeSourceNodeRef.current = null;
                 }
@@ -229,6 +253,8 @@ export function useAudioPlayer() {
               try {
                 source.start(0);
               } catch {
+                finished = true;
+                clearTimeout(safetyTimer);
                 activeSourceNodeRef.current = null;
                 playViaHtmlAudio();
               }

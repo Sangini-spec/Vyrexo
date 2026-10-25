@@ -16,6 +16,8 @@ import {
   type UserProfile,
   loadUserProfile,
   saveUserProfile,
+  getCanonicalUserKey,
+  getVoiceStorageKey,
   personalizeGreetingWithUsername,
 } from "@/lib/user-profile";
 
@@ -162,16 +164,32 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const localProf = loadUserProfile(user.id, user);
+    const canonicalKey = getCanonicalUserKey(user, user.email);
+    const localProf = loadUserProfile(canonicalKey || user.id, user);
     setProfile(localProf);
 
-    fetch(`/api/profile?user_id=${encodeURIComponent(user.id)}`, {
-      headers: { "x-user-id": user.id },
+    const emailQuery = user.email ? `&email=${encodeURIComponent(user.email.toLowerCase())}` : "";
+    fetch(`/api/profile?user_id=${encodeURIComponent(canonicalKey || user.id)}${emailQuery}`, {
+      headers: {
+        "x-user-id": canonicalKey || user.id,
+        ...(user.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+      },
     })
       .then((r) => r.json())
       .then((data) => {
         if (data?.ok && data.profile) {
           const srv = data.profile as Partial<UserProfile>;
+          const srvOwner = (srv.ownerEmail || "").trim().toLowerCase();
+          if (srvOwner && canonicalKey && canonicalKey.includes("@") && srvOwner !== canonicalKey) {
+            return;
+          }
+          if (
+            canonicalKey === "sanginitripathi8@gmail.com" &&
+            typeof srv.username === "string" &&
+            srv.username.trim().toLowerCase() === "babe"
+          ) {
+            return;
+          }
           const localTs = localProf.updatedAt ? new Date(localProf.updatedAt).getTime() : 0;
           const srvTs = srv.updatedAt ? new Date(srv.updatedAt).getTime() : 0;
           const localHasData = Boolean(
@@ -211,9 +229,10 @@ export default function SettingsPage() {
                 srv.aboutUserInstructions || localProf.aboutUserInstructions || "",
               responseStyleInstructions:
                 srv.responseStyleInstructions || localProf.responseStyleInstructions || "",
+              ownerEmail: canonicalKey || undefined,
             };
             setProfile(merged);
-            saveUserProfile(merged, user.id);
+            saveUserProfile(merged, canonicalKey || user.id, user.email);
           }
         }
       })
@@ -221,7 +240,9 @@ export default function SettingsPage() {
   }, [user]);
 
   useEffect(() => {
-    const stored = localStorage.getItem("vyrexo_voice");
+    if (!user) return;
+    const voiceKey = getVoiceStorageKey(user, user.email);
+    const stored = localStorage.getItem(voiceKey);
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
@@ -233,8 +254,11 @@ export default function SettingsPage() {
         }
         if (parsed.speed) setSpeed(parsed.speed);
       } catch {}
+    } else {
+      setSelectedVoice("adam");
+      setSpeed("normal");
     }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     return () => {
@@ -273,7 +297,8 @@ export default function SettingsPage() {
   const handleSaveProfile = async () => {
     if (!user) return;
     setSavingProfile(true);
-    const savedLocal = saveUserProfile(profile, user.id);
+    const canonicalKey = getCanonicalUserKey(user, user.email);
+    const savedLocal = saveUserProfile(profile, canonicalKey || user.id, user.email);
     setProfile(savedLocal);
 
     try {
@@ -281,10 +306,12 @@ export default function SettingsPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-user-id": user.id,
+          "x-user-id": canonicalKey || user.id,
+          ...(user.email ? { "x-user-email": user.email.toLowerCase() } : {}),
         },
         body: JSON.stringify({
-          user_id: user.id,
+          user_id: canonicalKey || user.id,
+          email: user.email ? user.email.toLowerCase() : undefined,
           profile: savedLocal,
         }),
       });
@@ -373,8 +400,9 @@ export default function SettingsPage() {
   };
 
   const handleSaveVoice = () => {
+    const voiceKey = getVoiceStorageKey(user, user?.email);
     localStorage.setItem(
-      "vyrexo_voice",
+      voiceKey,
       JSON.stringify({ voice: selectedVoice, speed, emotion: "auto" })
     );
     setVoiceSaved(true);
@@ -408,7 +436,7 @@ export default function SettingsPage() {
           <a
             href="/app"
             onClick={() => {
-              if (user) saveUserProfile(profile, user.id);
+              if (user) saveUserProfile(profile, getCanonicalUserKey(user, user.email) || user.id, user.email);
             }}
             className="flex items-center group"
           >
@@ -447,7 +475,7 @@ export default function SettingsPage() {
           <a
             href="/app"
             onClick={() => {
-              if (user) saveUserProfile(profile, user.id);
+              if (user) saveUserProfile(profile, getCanonicalUserKey(user, user.email) || user.id, user.email);
             }}
             className="px-3 py-1.5 rounded-lg border border-[var(--border2)] bg-[var(--surface)] text-xs font-medium text-[var(--text)] hover:border-[var(--steel)] transition-colors shadow-sm"
           >

@@ -4,7 +4,11 @@
  * for each user session, ensuring persistent cognitive context across turns.
  */
 
-import { isBlockedLegacySessionId, getSessionOwner } from "./session-persistent-storage";
+import {
+  isBlockedLegacySessionId,
+  getSessionOwner,
+  areSameUserIdentity,
+} from "./session-persistent-storage";
 
 export interface SessionProject {
   id: string;
@@ -58,7 +62,7 @@ export function verifySessionProjectOwnership(sessionId: string, userId?: string
     null;
 
   if (recordedOwner && userId) {
-    return recordedOwner === userId;
+    return areSameUserIdentity(recordedOwner, userId);
   }
   return true;
 }

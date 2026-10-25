@@ -34,6 +34,8 @@ import {
 import {
   loadUserProfile,
   saveUserProfile,
+  getCanonicalUserKey,
+  getVoiceStorageKey,
   personalizeGreetingWithUsername,
   DEFAULT_USER_PROFILE,
   type UserProfile,
@@ -171,10 +173,10 @@ function checkClientFastPath(rawText: string, username?: string): FastPathRespon
   const t = normalizedInput.trim().toLowerCase().replace(/[,!?;:.]/g, " ").replace(/\s+/g, " ").trim();
   if (!t) return null;
 
-  // Instant greetings ("Hi", "Hey", "Hello", "Hey Rex", "Good morning", etc.)
+  // Instant greetings ("Rex", "Hey Rex", "Hi", "Hey", "Hello", "Good morning", etc.)
   if (
-    /^(he|hey|hi|hello|yo|howdy|good morning|good afternoon|good evening)$/i.test(t) ||
-    /^(he|hey|hi|hello|yo|good morning|good afternoon|good evening)\s+(rex|there|friend|mate|buddy)$/i.test(t)
+    /^(rex|he|hey|hi|hello|yo|howdy|good morning|good afternoon|good evening)$/i.test(t) ||
+    /^(he|hey|hi|hello|yo|ok|okay|oh|sup|dear|good morning|good afternoon|good evening)\s+(rex|there|friend|mate|buddy)$/i.test(t)
   ) {
     const personalized = personalizeGreetingWithUsername(
       "Hi! I am good, what about you?",
@@ -328,8 +330,11 @@ function checkIsSelfEcho(
   const cleanInput = userText.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
   if (!cleanInput) return false;
 
-  // Never block an explicit stop, pause, build-termination, continuation, or redirect phrase
-  if (isStopPhrase(cleanInput)) {
+  // Never block an explicit stop, pause, build-termination, continuation, redirect, or wake-word greeting
+  if (
+    isStopPhrase(cleanInput) ||
+    /^(?:hey|hi|hello|yo|ok|okay|oh|sup|dear)?\s*rex$/i.test(cleanInput)
+  ) {
     return false;
   }
 
@@ -582,19 +587,39 @@ export default function App() {
 
   // ── User Profile & Rex Personalization ──────────────────────
   const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_USER_PROFILE);
+  const canonicalUserKey = useMemo(
+    () => getCanonicalUserKey(user, user?.email) || user?.id || "",
+    [user]
+  );
 
   useEffect(() => {
     if (!user) return;
-    const loaded = loadUserProfile(user.id, user);
+    const canonical = getCanonicalUserKey(user, user.email) || user.id;
+    const loaded = loadUserProfile(canonical, user);
     setUserProfile(loaded);
 
-    fetch(`/api/profile?user_id=${encodeURIComponent(user.id)}`, {
-      headers: { "x-user-id": user.id },
+    const emailQuery = user.email ? `&email=${encodeURIComponent(user.email.toLowerCase())}` : "";
+    fetch(`/api/profile?user_id=${encodeURIComponent(canonical)}${emailQuery}`, {
+      headers: {
+        "x-user-id": canonical,
+        ...(user.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+      },
     })
       .then((r) => r.json())
       .then((d) => {
         if (d?.ok && d.profile) {
           const srv = d.profile as Partial<UserProfile>;
+          const srvOwner = (srv.ownerEmail || "").trim().toLowerCase();
+          if (srvOwner && canonical.includes("@") && srvOwner !== canonical) {
+            return;
+          }
+          if (
+            canonical === "sanginitripathi8@gmail.com" &&
+            typeof srv.username === "string" &&
+            srv.username.trim().toLowerCase() === "babe"
+          ) {
+            return;
+          }
           const localTs = loaded.updatedAt ? new Date(loaded.updatedAt).getTime() : 0;
           const srvTs = srv.updatedAt ? new Date(srv.updatedAt).getTime() : 0;
           const localHasData = Boolean(
@@ -635,8 +660,10 @@ export default function App() {
                   srv.aboutUserInstructions || loaded.aboutUserInstructions || "",
                 responseStyleInstructions:
                   srv.responseStyleInstructions || loaded.responseStyleInstructions || "",
+                ownerEmail: canonical.includes("@") ? canonical : undefined,
               },
-              user.id
+              canonical,
+              user.email
             );
             setUserProfile(merged);
           }
@@ -645,7 +672,7 @@ export default function App() {
       .catch(() => {});
 
     const onProfileUpdated = () => {
-      setUserProfile(loadUserProfile(user.id, user));
+      setUserProfile(loadUserProfile(canonical, user));
     };
     window.addEventListener("vyrexo-profile-updated", onProfileUpdated);
     window.addEventListener("storage", onProfileUpdated);
@@ -655,7 +682,7 @@ export default function App() {
     };
   }, [user]);
 
-  // ── Sessions (persisted + renamable, strictly scoped per user) ──────────────
+  // ── Sessions (persisted + renamable, strictly scoped per user email primary key) ──────────────
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const loadedUserIdRef = useRef<string | null>(null);
@@ -673,14 +700,14 @@ export default function App() {
   }, []);
 
   const userStorageKeys = useMemo(() => {
-    const uid = user?.id || "";
+    const uid = canonicalUserKey;
     return {
       sessions: uid ? `vyrexo_sessions_${uid}` : "",
       activeSession: uid ? `vyrexo_active_session_${uid}` : "",
       sessionProjects: uid ? `vyrexo_session_projects_${uid}` : "",
       chatHistory: (sessionId: string) => (uid ? `vyrexo_chat_history_${uid}_${sessionId}` : ""),
     };
-  }, [user?.id]);
+  }, [canonicalUserKey]);
 
   // Reset all in-memory state when the authenticated user changes or signs out,
   // and purge legacy unscoped keys so one user's sessions never leak to another user.
@@ -694,7 +721,7 @@ export default function App() {
       localStorage.removeItem("vyrexo_chat_history_session-default-2");
     } catch {}
 
-    const currentUid = user?.id || null;
+    const currentUid = canonicalUserKey || null;
     if (loadedUserIdRef.current !== currentUid) {
       loadedUserIdRef.current = currentUid;
       setSessions([]);
@@ -710,22 +737,49 @@ export default function App() {
       sessionPreviewsRef.current = {};
       sessionProjectsRef.current = {};
     }
-  }, [user?.id]);
+  }, [canonicalUserKey]);
 
-  // Load the sidebar list from the DB (strictly scoped to the logged-in user).
+  // Load the sidebar list from the DB (strictly scoped to the logged-in user's canonical email primary key).
   // For a brand-new user with no created sessions, the sidebar remains completely empty.
   useEffect(() => {
-    if (!user?.id || sessionsLoaded) return;
+    if (!canonicalUserKey || sessionsLoaded) return;
     let cancelled = false;
-    const uid = user.id;
+    const uid = canonicalUserKey;
+    const rawUserId = user?.id || uid;
+    const userEmail = user?.email ? user.email.toLowerCase() : "";
     const sessionsKey = `vyrexo_sessions_${uid}`;
+    const legacySessionsKey = rawUserId !== uid ? `vyrexo_sessions_${rawUserId}` : "";
     const projectsKey = `vyrexo_session_projects_${uid}`;
+
+    const isSameOwner = (ownerId?: string): boolean => {
+      if (!ownerId) return true;
+      const lower = ownerId.toLowerCase();
+      if (lower === uid.toLowerCase() || lower === rawUserId.toLowerCase()) return true;
+      if (
+        uid === "sanginitripathi8@gmail.com" &&
+        lower === "b636edec-74a0-4961-8521-887fd8a90c69"
+      ) {
+        return true;
+      }
+      return false;
+    };
 
     const readLocal = (): StoredSession[] => {
       try {
-        const raw = localStorage.getItem(sessionsKey);
-        const p = raw ? JSON.parse(raw) : null;
-        return Array.isArray(p) ? p : [];
+        const rawPrimary = localStorage.getItem(sessionsKey);
+        const rawLegacy = legacySessionsKey ? localStorage.getItem(legacySessionsKey) : null;
+        const p1 = rawPrimary ? JSON.parse(rawPrimary) : [];
+        const p2 = rawLegacy ? JSON.parse(rawLegacy) : [];
+        const combined = [
+          ...(Array.isArray(p1) ? p1 : []),
+          ...(Array.isArray(p2) ? p2 : []),
+        ];
+        const seen = new Set<string>();
+        return combined.filter((item) => {
+          if (!item?.id || seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        });
       } catch {
         return [];
       }
@@ -740,7 +794,9 @@ export default function App() {
         }
       } catch {}
       try {
-        const rawTurns = localStorage.getItem(`vyrexo_chat_history_${uid}_${s.id}`);
+        const rawTurns =
+          localStorage.getItem(`vyrexo_chat_history_${uid}_${s.id}`) ||
+          (rawUserId !== uid ? localStorage.getItem(`vyrexo_chat_history_${rawUserId}_${s.id}`) : null);
         if (rawTurns) {
           const parsed = JSON.parse(rawTurns);
           if (Array.isArray(parsed)) localTurns = parsed;
@@ -766,19 +822,24 @@ export default function App() {
 
     (async () => {
       const local = readLocal()
-        .filter((s) => s?.id && !isBlockedSessionId(s.id) && (!("user_id" in s) || (s as any).user_id === uid))
+        .filter((s) => s?.id && !isBlockedSessionId(s.id) && (!("user_id" in s) || isSameOwner((s as any).user_id)))
         .map((s) => healSessionRecord(s));
       let dbList: StoredSession[] | null = null;
+      const emailParam = userEmail ? `&email=${encodeURIComponent(userEmail)}` : "";
+      const reqHeaders: Record<string, string> = {
+        "x-user-id": uid,
+        ...(userEmail ? { "x-user-email": userEmail } : {}),
+      };
       try {
-        const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(uid)}`, {
-          headers: { "x-user-id": uid },
+        const r = await fetch(`/api/sessions?user_id=${encodeURIComponent(uid)}${emailParam}`, {
+          headers: reqHeaders,
         });
         const d = await r.json();
         if (d?.ok && Array.isArray(d.sessions)) {
           dbList = d.sessions
             .filter(
               (s: { id: string; user_id?: string }) =>
-                s?.id && !isBlockedSessionId(s.id) && (!s.user_id || s.user_id === uid)
+                s?.id && !isBlockedSessionId(s.id) && isSameOwner(s.user_id)
             )
             .map((s: { id: string; name?: string; icon?: string; createdAt?: number }) => healSessionRecord(s));
         }
@@ -802,8 +863,16 @@ export default function App() {
           try {
             const res = await fetch("/api/sessions", {
               method: "POST",
-              headers: { "Content-Type": "application/json", "x-user-id": uid },
-              body: JSON.stringify({ id: s.id, user_id: uid, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+              headers: { "Content-Type": "application/json", ...reqHeaders },
+              body: JSON.stringify({
+                id: s.id,
+                user_id: uid,
+                email: userEmail || undefined,
+                name: s.name,
+                icon: s.icon,
+                createdAt: s.createdAt,
+                forceRename: true,
+              }),
             });
             if (res.ok) {
               toMigrate.push(s);
@@ -814,8 +883,16 @@ export default function App() {
           try {
             await fetch("/api/sessions", {
               method: "POST",
-              headers: { "Content-Type": "application/json", "x-user-id": uid },
-              body: JSON.stringify({ id: s.id, user_id: uid, name: s.name, icon: s.icon, createdAt: s.createdAt, forceRename: true }),
+              headers: { "Content-Type": "application/json", ...reqHeaders },
+              body: JSON.stringify({
+                id: s.id,
+                user_id: uid,
+                email: userEmail || undefined,
+                name: s.name,
+                icon: s.icon,
+                createdAt: s.createdAt,
+                forceRename: true,
+              }),
             });
           } catch {}
         }
@@ -830,7 +907,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, sessionsLoaded, isBlockedSessionId]);
+  }, [canonicalUserKey, user?.id, user?.email, sessionsLoaded, isBlockedSessionId]);
 
   useEffect(() => {
     if (sessionsLoaded && userStorageKeys.sessions) {
@@ -954,8 +1031,9 @@ export default function App() {
   // Mirrors "is the mic live" (voiceMode is declared further down, so a ref keeps
   // this effect independent of declaration order).
   const voiceListeningRef = useRef(false);
+  const lastSpokenBargeInTimeRef = useRef(0);
   useEffect(() => {
-    if (audioIsPlaying) {
+    if (audioIsPlaying && !audioMutedRef.current) {
       wasPlayingRef.current = true;
       setOrbState("speaking");
       return;
@@ -964,6 +1042,11 @@ export default function App() {
     const t = setTimeout(() => {
       if (isPlayingRef.current || isSynthesizingVoiceRef.current) return; // next utterance already started or preparing
       wasPlayingRef.current = false;
+      if (Date.now() - lastSpokenBargeInTimeRef.current < 5000) {
+        // User barged in — stay in LISTENING mode so we capture their entire spoken response!
+        setOrbState("listening");
+        return;
+      }
       lastRexSpeechEndTimeRef.current = Date.now();
       setOrbState((prev) => {
         if (isBuildingRef.current) return "thinking";
@@ -980,6 +1063,9 @@ export default function App() {
   const muteAudio = useCallback(() => {
     audioMutedRef.current = true;
     isSynthesizingVoiceRef.current = false;
+    wasPlayingRef.current = false;
+    isPlayingRef.current = false;
+    speakingRef.current = false;
     mutePlayer(); // hard stop + block all playback until a new turn
   }, [mutePlayer]);
   const unmuteAudio = useCallback(() => {
@@ -1415,34 +1501,48 @@ export default function App() {
   }, [pushChunk]);
 
   const fallbackSessionId = useMemo(
-    () => `s_live_${(user?.id || "workspace").replace(/[^a-zA-Z0-9_-]/g, "")}`,
-    [user?.id]
+    () => `s_live_${(canonicalUserKey || "workspace").replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [canonicalUserKey]
   );
 
   const { status: wsStatus, connect, disconnect, sendMessage } = useWebSocket({
     sessionId: activeSession || fallbackSessionId,
-    userId: user?.id,
+    userId: canonicalUserKey || user?.id,
     onMessage: onServerMessage,
     onAudio: onAudioMessage,
   });
 
-  const handleInterruptVoice = useCallback(() => {
-    muteAudio();
-    clearPendingRex();
-    if (isBuildingRef.current) {
-      lastBuildInterruptedTimeRef.current = Date.now();
-      setSteps((prev) =>
-        prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
-      );
-    }
-    isBuildingRef.current = false;
-    isSynthesizingVoiceRef.current = false;
-    try { window.speechSynthesis.cancel(); } catch {}
-    sendMessage({ type: "execution.interrupt", payload: {} });
-    setOrbState(voiceListeningRef.current ? "listening" : "idle");
-    setNarration("Stopped — I'm all ears! Tell me what you'd like instead.");
-    setTranscript("");
-  }, [muteAudio, clearPendingRex, sendMessage]);
+  const handleInterruptVoice = useCallback(
+    (fromManualClick = false) => {
+      muteAudio();
+      clearPendingRex();
+      if (isBuildingRef.current) {
+        lastBuildInterruptedTimeRef.current = Date.now();
+        setSteps((prev) =>
+          prev.map((s) => (s.status === "running" ? { ...s, status: "pending" as const } : s))
+        );
+      }
+      isBuildingRef.current = false;
+      isSynthesizingVoiceRef.current = false;
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+      sendMessage({ type: "execution.interrupt", payload: {} });
+
+      if (fromManualClick) {
+        setOrbState(voiceListeningRef.current ? "listening" : "idle");
+        setNarration("Stopped — I'm all ears! Tell me what you'd like instead.");
+        setTranscript("");
+      } else {
+        // Triggered by spoken barge-in: immediately enter LISTENING mode and keep transcript intact!
+        lastSpokenBargeInTimeRef.current = Date.now();
+        voiceListeningRef.current = true;
+        setOrbState("listening");
+        setNarration("Mmm-hmm, I'm listening — go ahead...");
+      }
+    },
+    [muteAudio, clearPendingRex, sendMessage]
+  );
 
   // Unified voice synthesis: keeps Rex's voice 100% consistent across all turns
   const playUnifiedVoice = useCallback(
@@ -1451,7 +1551,8 @@ export default function App() {
       let currentSpeed: "slow" | "normal" | "fast" = "normal";
       if (typeof window !== "undefined") {
         try {
-          const stored = localStorage.getItem("vyrexo_voice");
+          const voiceKey = getVoiceStorageKey(user, user?.email);
+          const stored = localStorage.getItem(voiceKey);
           if (stored) {
             const parsed = JSON.parse(stored);
             if (parsed.voice) currentVoice = parsed.voice;
@@ -1472,8 +1573,17 @@ export default function App() {
           spokenText,
           { voice: currentVoice, speed: currentSpeed, emotion: effectiveEmotion },
           {
-            onStart: () => setOrbState("speaking"),
+            onStart: () => {
+              if (!audioMutedRef.current) setOrbState("speaking");
+            },
             onEnd: () => {
+              if (
+                audioMutedRef.current ||
+                Date.now() - lastSpokenBargeInTimeRef.current < 5000
+              ) {
+                setOrbState("listening");
+                return;
+              }
               lastRexSpeechEndTimeRef.current = Date.now();
               setOrbState(voiceListeningRef.current ? "listening" : "idle");
             },
@@ -1512,7 +1622,7 @@ export default function App() {
       isSynthesizingVoiceRef.current = false;
       triggerBrowserFallback();
     },
-    [unmuteAudio, beginUtterance, pushChunk, endUtterance]
+    [unmuteAudio, beginUtterance, pushChunk, endUtterance, user]
   );
 
   // Voice synthesis is now driven by the backend (Edge-TTS streamed over WebSocket).
@@ -1630,7 +1740,7 @@ export default function App() {
       // 3. Suppress single-word noise fragments in the 380ms post-speech hardware drain window
       const now = Date.now();
       const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
-      const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(effectiveRaw);
+      const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(effectiveRaw) || /\brex\b/i.test(effectiveRaw);
       if (timeSinceRexSpoke < 380 && !hasExplicitWake && !isStop && !isBuildTermination && spokenWordCount < 2) {
         console.debug("[voice] Suppressing 1-word fragment in echo cooldown:", effectiveRaw);
         setTranscript("");
@@ -1646,9 +1756,11 @@ export default function App() {
       setNarration("Thinking...");
 
       const cleanText = normalizeSpokenTranscript(effectiveRaw, { isInterim: false });
+      const effectiveUsername =
+        userProfile.username || loadUserProfile(canonicalUserKey, user).username;
 
       // Check lightweight client fast-path for simple greetings or common commands (<10ms instant response)
-      const fastResult = !wasBuildingRecently && !isBuildTermination ? checkClientFastPath(cleanText, userProfile.username) : null;
+      const fastResult = !wasBuildingRecently && !isBuildTermination ? checkClientFastPath(cleanText, effectiveUsername) : null;
       if (fastResult) {
         if (fastResult.action === "preview") {
           setActiveRightTab("preview");
@@ -1685,26 +1797,44 @@ export default function App() {
       sendMessage({ type: "text.input", payload: { text: cleanText } });
       setTranscript("");
     },
-    [sendMessage, muteAudio, unmuteAudio, clearPendingRex, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, triggerListeningHum, userProfile.username, audioIsPlaying]
+    [sendMessage, muteAudio, unmuteAudio, clearPendingRex, recordAiSpeech, handleInterruptVoice, playUnifiedVoice, triggerListeningHum, userProfile.username, canonicalUserKey, user, audioIsPlaying]
   );
+
+  const createSessionRef = useRef<() => string>(() => "");
 
   const handleActivated = useCallback(() => {
     unlockAudioPlayback();
     primeSpeechSynthesis();
+    voiceListeningRef.current = true;
+    if (!activeSessionRef.current && createSessionRef.current) {
+      createSessionRef.current();
+    }
     setOrbState("listening");
+    if (Date.now() - lastSpokenBargeInTimeRef.current < 3000) {
+      // Activated via spoken barge-in: keep the user's live barge-in transcript visible!
+      setNarration("Mmm-hmm, I'm listening — go ahead...");
+      return;
+    }
     setNarration("I'm listening...");
     setTranscript("");
   }, []);
 
   const handleDeactivated = useCallback(() => {
+    voiceListeningRef.current = false;
     setOrbState("idle");
     setNarration("Say 'Rex' to start, or click the orb");
   }, []);
+
+  const handleSpokenInterrupt = useCallback(() => {
+    handleInterruptVoice(false);
+  }, [handleInterruptVoice]);
 
   const handleBackchannel = useCallback(
     (reason: "barge_in" | "listening_hum") => {
       triggerListeningHum();
       if (reason === "barge_in") {
+        lastSpokenBargeInTimeRef.current = Date.now();
+        voiceListeningRef.current = true;
         setOrbState("listening");
         setNarration("Mmm-hmm, I'm listening — go ahead...");
       }
@@ -1722,15 +1852,16 @@ export default function App() {
     onTranscript: handleVoiceTranscript,
     onActivated: handleActivated,
     onDeactivated: handleDeactivated,
-    onInterrupt: handleInterruptVoice,
+    onInterrupt: handleSpokenInterrupt,
     onBackchannel: handleBackchannel,
     isSelfEcho: handleCheckSelfEcho,
     isAiSpeaking:
-      audioIsPlaying ||
-      isPlayingRef.current ||
-      orbState === "speaking" ||
-      wasPlayingRef.current ||
-      isSynthesizingVoiceRef.current,
+      !audioMutedRef.current &&
+      (audioIsPlaying ||
+        isPlayingRef.current ||
+        orbState === "speaking" ||
+        wasPlayingRef.current ||
+        isSynthesizingVoiceRef.current),
   });
 
   // Keep the mic-live mirror in sync for the orb-reset effect above.
@@ -1739,12 +1870,13 @@ export default function App() {
   }, [voiceMode]);
 
   // Clicking the orb: while Rex is talking or working, it's a STOP button —
-  // silence + halt immediately. Otherwise it triggers push-to-talk.
+  // silence + halt immediately and switch to push-to-talk listening.
   const handleOrbClick = useCallback(() => {
     unlockAudioPlayback();
     primeSpeechSynthesis();
     if (isPlayingRef.current || isBuildingRef.current || orbState === "speaking" || orbState === "thinking") {
-      handleInterruptVoice();
+      handleInterruptVoice(true);
+      forceActivate();
       return;
     }
     forceActivate();
@@ -1757,7 +1889,7 @@ export default function App() {
 
   // ── Auto-persist active session chat log to localStorage & backend ────────
   useEffect(() => {
-    if (!activeSession || !user?.id || chatLog.length === 0) return;
+    if (!activeSession || !canonicalUserKey || chatLog.length === 0) return;
     const chatKey = userStorageKeys.chatHistory(activeSession);
     if (chatKey) {
       try {
@@ -1768,9 +1900,14 @@ export default function App() {
     const timer = setTimeout(() => {
       fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-user-id": user.id },
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": canonicalUserKey,
+          ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+        },
         body: JSON.stringify({
-          user_id: user.id,
+          user_id: canonicalUserKey,
+          email: user?.email ? user.email.toLowerCase() : undefined,
           turns: chatLog.map((c) => ({
             role: c.role,
             text: c.text,
@@ -1783,7 +1920,7 @@ export default function App() {
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [activeSession, chatLog, user?.id, userStorageKeys]);
+  }, [activeSession, chatLog, canonicalUserKey, user?.email, userStorageKeys]);
 
   const handleSessionClick = useCallback(
     (id: string) => {
@@ -1805,14 +1942,20 @@ export default function App() {
       }
       setSteps([]);
       setOrbState(voiceListeningRef.current ? "listening" : "idle");
-      setNarration("Say 'Rex' to start, or click the orb");
+      setNarration(
+        voiceListeningRef.current ? "I'm listening..." : "Say 'Rex' to start, or click the orb"
+      );
 
       // Instantly restore this session's saved conversation from user-scoped localStorage
       let initialTurns: Array<{ role: string; text: string; images?: string[]; docs?: string[] }> = [];
       const chatKey = userStorageKeys.chatHistory(id);
       if (chatKey) {
         try {
-          const raw = localStorage.getItem(chatKey);
+          const raw =
+            localStorage.getItem(chatKey) ||
+            (user?.id && user.id !== canonicalUserKey
+              ? localStorage.getItem(`vyrexo_chat_history_${user.id}_${id}`)
+              : null);
           if (raw) {
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) initialTurns = parsed;
@@ -1880,8 +2023,13 @@ export default function App() {
       sentProjectPathRef.current = sessProj ? sessProj.path : "";
       setProjectBound(!!sessProj);
 
-      const uidParam = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
-      const headers: Record<string, string> = user?.id ? { "x-user-id": user.id } : {};
+      const uidParam = canonicalUserKey ? `&user_id=${encodeURIComponent(canonicalUserKey)}` : "";
+      const headers: Record<string, string> = canonicalUserKey
+        ? {
+            "x-user-id": canonicalUserKey,
+            ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+          }
+        : {};
 
       // Verify with backend for this specific user + session and load all session files into Files tab
       fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidParam}`, { headers })
@@ -1965,7 +2113,7 @@ export default function App() {
       // Restore and synchronize this session's saved conversation with the backend
       historyReqRef.current = id;
       fetch(
-        `/api/sessions/${encodeURIComponent(id)}/history${user?.id ? `?user_id=${encodeURIComponent(user.id)}` : ""}`,
+        `/api/sessions/${encodeURIComponent(id)}/history${canonicalUserKey ? `?user_id=${encodeURIComponent(canonicalUserKey)}` : ""}`,
         { headers }
       )
         .then((r) => r.json())
@@ -1991,7 +2139,7 @@ export default function App() {
         })
         .catch(() => {});
     },
-    [activeSession, disconnect, isBlockedSessionId, user?.id, userStorageKeys]
+    [activeSession, disconnect, isBlockedSessionId, canonicalUserKey, user?.id, user?.email, userStorageKeys, muteAudio, clearPendingRex]
   );
 
   // Create a brand-new session: persist it to the DB, add to the list, activate.
@@ -2026,41 +2174,66 @@ export default function App() {
 
     const now = Date.now();
     setSessions((prev) => [{ id, name: "New Session", icon, createdAt: now }, ...prev]);
-    if (user?.id) {
+    if (canonicalUserKey) {
       fetch("/api/sessions", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-user-id": user.id },
-        body: JSON.stringify({ id, user_id: user.id, name: "New Session", icon, createdAt: now }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": canonicalUserKey,
+          ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+        },
+        body: JSON.stringify({
+          id,
+          user_id: canonicalUserKey,
+          email: user?.email ? user.email.toLowerCase() : undefined,
+          name: "New Session",
+          icon,
+          createdAt: now,
+        }),
       }).catch(() => {});
     }
     handleSessionClick(id);
     return id;
-  }, [handleSessionClick, user?.id, sessions.length, userStorageKeys, userProfile.username]);
+  }, [handleSessionClick, canonicalUserKey, user?.email, sessions.length, userStorageKeys, userProfile.username]);
+
+  useEffect(() => {
+    createSessionRef.current = createSession;
+  }, [createSession]);
 
   const handleRenameSession = useCallback(
     (id: string, name: string) => {
       setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
-      if (!user?.id) return;
+      if (!canonicalUserKey) return;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "x-user-id": canonicalUserKey,
+        ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+      };
       fetch("/api/sessions", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-user-id": user.id },
-        body: JSON.stringify({ id, user_id: user.id, name, forceRename: true }),
+        headers,
+        body: JSON.stringify({ id, user_id: canonicalUserKey, name, forceRename: true }),
       }).catch(() => {});
       fetch(`/api/sessions/${encodeURIComponent(id)}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-user-id": user.id },
-        body: JSON.stringify({ name, user_id: user.id }),
+        headers,
+        body: JSON.stringify({ name, user_id: canonicalUserKey }),
       }).catch(() => {});
     },
-    [user?.id]
+    [canonicalUserKey, user?.email]
   );
 
   const handleDeleteSession = useCallback(
     (id: string) => {
       setSessions((prev) => prev.filter((s) => s.id !== id));
-      const uidQuery = user?.id ? `&user_id=${encodeURIComponent(user.id)}` : "";
-      const uidFirstQuery = user?.id ? `?user_id=${encodeURIComponent(user.id)}` : "";
-      const headers: Record<string, string> = user?.id ? { "x-user-id": user.id } : {};
+      const uidQuery = canonicalUserKey ? `&user_id=${encodeURIComponent(canonicalUserKey)}` : "";
+      const uidFirstQuery = canonicalUserKey ? `?user_id=${encodeURIComponent(canonicalUserKey)}` : "";
+      const headers: Record<string, string> = canonicalUserKey
+        ? {
+            "x-user-id": canonicalUserKey,
+            ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+          }
+        : {};
       fetch(`/api/sessions/${encodeURIComponent(id)}${uidFirstQuery}`, { method: "DELETE", headers }).catch(() => {});
       fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidQuery}`, { method: "DELETE", headers }).catch(() => {});
       fetch(`/api/sessions/${encodeURIComponent(id)}/history${uidFirstQuery}`, { method: "DELETE", headers }).catch(() => {});
@@ -2090,7 +2263,7 @@ export default function App() {
         setChatLog([]);
       }
     },
-    [activeSession, disconnect, user?.id, userStorageKeys]
+    [activeSession, disconnect, canonicalUserKey, user?.email, userStorageKeys]
   );
 
   const handleClearCurrentChat = useCallback(() => {
@@ -2100,12 +2273,17 @@ export default function App() {
       const chatKey = userStorageKeys.chatHistory(activeSession);
       if (chatKey) localStorage.removeItem(chatKey);
     } catch {}
-    const uidFirstQuery = user?.id ? `?user_id=${encodeURIComponent(user.id)}` : "";
+    const uidFirstQuery = canonicalUserKey ? `?user_id=${encodeURIComponent(canonicalUserKey)}` : "";
     fetch(`/api/sessions/${encodeURIComponent(activeSession)}/history${uidFirstQuery}`, {
       method: "DELETE",
-      headers: user?.id ? { "x-user-id": user.id } : undefined,
+      headers: canonicalUserKey
+        ? {
+            "x-user-id": canonicalUserKey,
+            ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+          }
+        : undefined,
     }).catch(() => {});
-  }, [activeSession, user?.id, userStorageKeys]);
+  }, [activeSession, canonicalUserKey, user?.email, userStorageKeys]);
 
   const handleDeleteOldChats = useCallback(
     async (days: number) => {
@@ -2124,15 +2302,21 @@ export default function App() {
         setActiveProject(null);
         setChatLog([]);
       }
-      if (!user?.id) return;
+      if (!canonicalUserKey) return;
       try {
         await fetch(
-          `/api/sessions?older_than_days=${days}&user_id=${encodeURIComponent(user.id)}`,
-          { method: "DELETE", headers: { "x-user-id": user.id } }
+          `/api/sessions?older_than_days=${days}&user_id=${encodeURIComponent(canonicalUserKey)}`,
+          {
+            method: "DELETE",
+            headers: {
+              "x-user-id": canonicalUserKey,
+              ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+            },
+          }
         );
       } catch {}
     },
-    [sessions, activeSession, disconnect, user?.id, userStorageKeys]
+    [sessions, activeSession, disconnect, canonicalUserKey, user?.email, userStorageKeys]
   );
 
   const handleClearAllHistory = useCallback(async () => {
@@ -2152,36 +2336,52 @@ export default function App() {
         localStorage.removeItem(userStorageKeys.activeSession);
       } catch {}
     }
-    if (user?.id) {
+    if (canonicalUserKey) {
       try {
         await fetch(
-          `/api/sessions?clear_all=true&user_id=${encodeURIComponent(user.id)}`,
-          { method: "DELETE", headers: { "x-user-id": user.id } }
+          `/api/sessions?clear_all=true&user_id=${encodeURIComponent(canonicalUserKey)}`,
+          {
+            method: "DELETE",
+            headers: {
+              "x-user-id": canonicalUserKey,
+              ...(user?.email ? { "x-user-email": user.email.toLowerCase() } : {}),
+            },
+          }
         );
       } catch {}
     }
-  }, [sessions, disconnect, user?.id, userStorageKeys]);
+  }, [sessions, disconnect, canonicalUserKey, user?.email, userStorageKeys]);
 
-  // Connect WS + start voice when session is selected
+  // Start hands-free wake-word listener once when user is authenticated in workspace
+  useEffect(() => {
+    if (!user) return;
+    startListening();
+    return () => {
+      stopListening();
+    };
+  }, [user, startListening, stopListening]);
+
+  // Connect WS when session is selected
   useEffect(() => {
     if (activeSession) {
       connect();
-      startListening();
       return () => {
         disconnect();
-        stopListening();
       };
     }
-  }, [activeSession, connect, disconnect, startListening, stopListening]);
+  }, [activeSession, connect, disconnect]);
 
   // Update narration when WS connects and push voice config to the backend
   useEffect(() => {
     if (wsStatus === "connected") {
-      setNarration("Say 'Rex' to start, or click the orb");
+      if (!voiceListeningRef.current && !isPlayingRef.current && !isBuildingRef.current) {
+        setNarration("Say 'Rex' to start, or click the orb");
+      }
 
       // Push the user's saved voice preference so backend TTS uses the right voice
       try {
-        const saved = localStorage.getItem("vyrexo_voice");
+        const voiceKey = getVoiceStorageKey(user, user?.email);
+        const saved = localStorage.getItem(voiceKey);
         if (saved) {
           const prefs = JSON.parse(saved);
           const rateMap: Record<string, string> = {
@@ -2201,7 +2401,7 @@ export default function App() {
         // Settings not set yet; backend will use default voice
       }
     }
-  }, [wsStatus, sendMessage]);
+  }, [wsStatus, sendMessage, user]);
 
   // Auto-restore active session on startup ONLY if the user already has sessions
   useEffect(() => {
@@ -3757,7 +3957,7 @@ export default function App() {
         onDisconnectProject={handleDisconnectProject}
         currentProjectPath={activeProject?.path}
         sessionId={activeSession || undefined}
-        userId={user?.id}
+        userId={canonicalUserKey || user?.id}
       />
     </div>
   );
