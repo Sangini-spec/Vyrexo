@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { AtSign, ArrowLeft, Lock, User, KeyRound, CheckCircle2 } from "lucide-react";
+import { AtSign, ArrowLeft, Lock, User, KeyRound, CheckCircle2, Eye, EyeOff } from "lucide-react";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { ThemeToggle } from "@/components/shared/ThemeToggle";
 import { VyrexoLogo } from "@/components/shared/VyrexoLogo";
@@ -40,6 +40,7 @@ export default function AuthPage() {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [resetSent, setResetSent] = useState(false);
@@ -331,7 +332,7 @@ export default function AuthPage() {
                       className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]"
                     />
                     <input
-                      type="password"
+                      type={showPassword ? "text" : "password"}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder={
@@ -339,8 +340,17 @@ export default function AuthPage() {
                       }
                       required
                       minLength={6}
-                      className="w-full rounded-lg border border-[var(--border2)] bg-[var(--input)] py-3 pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-[var(--muted)] outline-none transition-colors focus:border-[var(--steel)]"
+                      className="w-full rounded-lg border border-[var(--border2)] bg-[var(--input)] py-3 pl-9 pr-10 text-sm text-[var(--text)] placeholder:text-[var(--muted)] outline-none transition-colors focus:border-[var(--steel)]"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                      title={showPassword ? "Hide password" : "Show password"}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--text)] transition-colors cursor-pointer"
+                    >
+                      {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
                   </div>
 
                   {mode === "signin" && (

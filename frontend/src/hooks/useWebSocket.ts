@@ -34,6 +34,8 @@ import {
   isBuildOrImplementationIntent,
   isBuildTerminationCommand,
   formatBuildTerminationMessage,
+  isConversationalWithdrawalCommand,
+  formatConversationalWithdrawalMessage,
   isBareSilenceCommand,
   analyzeWholeSentenceSemantics,
 } from "@/lib/project-spec";
@@ -485,10 +487,13 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
         });
 
         // 1. Check for explicit or whole-sentence semantic build termination / mid-build cancellation
-        // e.g. "Hey Rex, I think I don't want to build this application anymore. Can you please stop running it?"
+        // ONLY when a build is actually active/recent OR the user explicitly mentioned build/building/project/application!
+        const hasExplicitBuildWord =
+          /\b(build|building|project|application|app|software|coding|scaffolding)\b/i.test(effectiveText);
         if (
-          sentenceSemantics.isBuildTermination ||
-          isBuildTerminationCommand(effectiveText, wasBuildingNowOrRecently)
+          (wasBuildingNowOrRecently || hasExplicitBuildWord) &&
+          (sentenceSemantics.isBuildTermination ||
+            isBuildTerminationCommand(effectiveText, wasBuildingNowOrRecently))
         ) {
           lastBuildInterruptedAtRef.current[requestSessionId] = 0;
           activeBuildingSessionsRef.current.delete(requestSessionId);
@@ -528,20 +533,27 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           return;
         }
 
-        // 4. General request withdrawal when not specifically about a build ("never mind", "forget that", "scratch that")
-        const isGeneralWithdraw =
-          /^(?:(?:hey\s+rex|rex|please|no)\s+)?(never\s*mind|nevermind|withdraw|forget\s+it|forget\s+that|scratch\s+that|cancel\s+that\s+question)$/i.test(
+        // 4. Short standalone request withdrawal when NOT building ("never mind", "withdraw that request", "forget that")
+        // Uses dynamic context-aware formatting based on the conversation history; longer/compound withdrawal sentences
+        // flow through to /api/chat so Rex answers dynamically based on the full situation.
+        const isShortStandaloneWithdraw =
+          !wasBuildingNowOrRecently &&
+          lowerInput.split(/\s+/).length <= 8 &&
+          (/^(?:(?:hey\s+rex|rex|please|no|ok|okay)\s+)*(?:you\s+can\s+)?(never\s*mind|nevermind|withdraw|withdraw\s+(?:that|the|this|my|the\s+last)\s+request|forget\s+it|forget\s+that|scratch\s+that|cancel\s+(?:that|the\s+last)\s+(?:question|request)|drop\s+(?:that|the\s+last)\s+(?:question|request))(?:\s+(?:rex|please|now))?$/i.test(
             lowerInput
-          );
+          ));
 
-        if (isGeneralWithdraw) {
+        if (isShortStandaloneWithdraw) {
           emit("agent.building.completed", {});
-          const cancelReply =
-            "Got it — I've dropped that right away. I'm listening! Tell me what you'd like to talk about instead.";
+          const cancelReply = formatConversationalWithdrawalMessage(
+            effectiveText,
+            preferredUsername,
+            sessionHistory
+          );
           sessionHistory.push({ role: "user", content: effectiveText });
           sessionHistory.push({ role: "assistant", content: cancelReply });
           emit("conversation.turn.completed", { text: cancelReply });
-          emit("agent.narration", { text: "Listening for your next thought." });
+          emit("agent.narration", { text: cancelReply });
           speakNarration(cancelReply, "calm");
           return;
         }
@@ -589,8 +601,14 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
           return;
         }
 
+        const isConversationalWithdrawal = isConversationalWithdrawalCommand(
+          effectiveText,
+          wasBuildingNowOrRecently
+        );
+
         // Whole-sentence semantic + LLM intent verification
-        let isGuidanceOrConversationOnly = sentenceSemantics.isGuidanceOrQuestion;
+        let isGuidanceOrConversationOnly =
+          sentenceSemantics.isGuidanceOrQuestion || isConversationalWithdrawal;
         let isExplicitBuildCommand =
           !isGuidanceOrConversationOnly &&
           sentenceSemantics.isAffirmativeBuildCommand &&
@@ -621,6 +639,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               headers: authHeaders,
               body: JSON.stringify({
                 text: effectiveText,
+                isCurrentlyBuilding: wasBuildingNowOrRecently,
                 isBuilding: wasBuildingNowOrRecently,
                 hasExistingProject: hasProjectInThisSession,
                 history: sessionHistory.slice(-6),
@@ -630,7 +649,10 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
             clearTimeout(intentTimer);
             if (intentRes.ok && isCurrentRequestValid()) {
               const intentJson = await intentRes.json();
-              if (intentJson?.intent === "TERMINATE_BUILD") {
+              if (
+                intentJson?.intent === "TERMINATE_BUILD" &&
+                (wasBuildingNowOrRecently || hasExplicitBuildWord)
+              ) {
                 lastBuildInterruptedAtRef.current[requestSessionId] = 0;
                 activeBuildingSessionsRef.current.delete(requestSessionId);
                 emit("agent.building.completed", {});
@@ -646,7 +668,10 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
                 emit("agent.narration", { text: "Paused — I'm listening whenever you're ready." });
                 emit("voice.output.completed", {});
                 return;
-              } else if (intentJson?.intent === "GUIDANCE_OR_CONVERSATION") {
+              } else if (
+                intentJson?.intent === "GUIDANCE_OR_CONVERSATION" ||
+                intentJson?.intent === "TERMINATE_BUILD"
+              ) {
                 isGuidanceOrConversationOnly = true;
                 isExplicitBuildCommand = false;
               } else if (intentJson?.intent === "EXECUTE_BUILD" && !sentenceSemantics.isGuidanceOrQuestion) {
@@ -817,6 +842,7 @@ export function useWebSocket({ sessionId, userId, onMessage, onAudio }: UseWebSo
               userProfile: currentUserProfile,
               forceBuildTask: isExplicitBuildCommand,
               conversationalOnly: isGuidanceOrConversationOnly,
+              isCurrentlyBuilding: wasBuildingNowOrRecently,
             }),
             signal: abortCtrl.signal,
           });

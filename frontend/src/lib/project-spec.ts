@@ -483,6 +483,48 @@ export function formatBuildTerminationMessage(username?: string | null): string 
   return "Okay, I have terminated the building process just as you requested.";
 }
 
+/**
+ * Generates a dynamic, situation-aware response when the user withdraws or drops a
+ * conversational request or previous question (when NO software build was running).
+ */
+export function formatConversationalWithdrawalMessage(
+  rawText: string,
+  username?: string | null,
+  history?: Array<{ role: string; content: string }>
+): string {
+  const cleanName = (username || "").trim();
+  const nameAddressing = cleanName ? `, ${cleanName}` : "";
+
+  // Inspect recent history (excluding the withdrawal turn itself) to understand the situation
+  const priorTurns = (history || []).filter(
+    (h) =>
+      h.content &&
+      h.content.trim().toLowerCase() !== (rawText || "").trim().toLowerCase()
+  );
+  const lastAssistantTurn = [...priorTurns]
+    .reverse()
+    .find((h) => h.role === "assistant")?.content || "";
+  const lastUserTurn = [...priorTurns]
+    .reverse()
+    .find((h) => h.role === "user")?.content || "";
+
+  const combinedContext = `${lastUserTurn} ${lastAssistantTurn}`.toLowerCase();
+
+  if (/\b(poem|poetry|langston hughes|verse|stanza|story|song|lyrics)\b/i.test(combinedContext)) {
+    return `Got it${nameAddressing} — I've withdrawn that last request and we'll step right away from the poetry and previous topic. I'm all ears! What would you like to talk about next?`;
+  }
+
+  if (/\b(shopping|buy|gift|recommend|suggestion)\b/i.test(combinedContext)) {
+    return `No problem at all${nameAddressing} — I've dropped that previous question right here. Tell me what's on your mind now and we'll go from there!`;
+  }
+
+  if (lastUserTurn && lastUserTurn.trim().length > 4) {
+    return `Understood${nameAddressing} — I've withdrawn your last request and set that previous question aside. Whenever you're ready, let me know what you'd like to discuss instead!`;
+  }
+
+  return `Got it${nameAddressing} — I've withdrawn that last request right away. I'm listening whenever you'd like to take the conversation in a new direction!`;
+}
+
 export function isBareSilenceCommand(rawText: string): boolean {
   if (!rawText) return false;
   const cleaned = rawText
@@ -535,18 +577,27 @@ function isSentenceSemanticBuildTermination(sentence: string, isCurrentlyBuildin
     return false;
   }
 
-  // 1. Negated desire / desistance / mind-change + build/run/project/app target anywhere in the sentence
+  // Explicit software build / project / app / code execution targets
+  const hasExplicitSoftwareBuildTarget =
+    /\b(build|building|the\s+build|this\s+build|building\s+process|code|coding|scaffold|scaffolding|app|application|project|software|website|web\s*app|platform|store|agents)\b/i.test(
+      s
+    );
+
+  // Broader targets that only imply build termination when a build is actually active
+  const hasActiveExecutionTarget =
+    hasExplicitSoftwareBuildTarget ||
+    (isCurrentlyBuilding &&
+      /\b(make|making|create|creating|develop|developing|generate|generating|run|running|work\s+on|working\s+on|execute|executing|continue|continuing|proceed|proceeding|system|process|it\s+anymore|this\s+anymore|that\s+anymore)\b/i.test(
+        s
+      ));
+
+  // 1. Negated desire / desistance / mind-change + build/project/app target anywhere in the sentence
   const hasNegativeDesireOrMindChange =
     /\b((?:don'?t|do\s+not|no\s+longer|not)\s+(?:really\s+|think\s+i\s+)?(?:want|wish|need|feel\s+like|care|intend|plan|like)\s+(?:you\s+)?(?:to\s+)?|changed\s+(?:my|our)\s+mind|having\s+second\s+thoughts|on\s+second\s+thought|decided\s+(?:not\s+to|against)|rather\s+not|prefer\s+not\s+to|let'?s\s+not|let\s+us\s+not|we\s+shouldn'?t|we\s+should\s+not|you\s+don'?t\s+(?:need|have)\s+to|no\s+need\s+to|don'?t\s+bother|not\s+interested\s+in)\b/i.test(
       s
     );
 
-  const hasBuildOrExecutionTarget =
-    /\b(build|building|make|making|create|creating|develop|developing|code|coding|generate|generating|scaffold|scaffolding|run|running|work\s+on|working\s+on|execute|executing|continue|continuing|proceed|proceeding|app|application|project|software|website|web\s*app|platform|store|system|agents|process|it\s+anymore|this\s+anymore|that\s+anymore)\b/i.test(
-      s
-    );
-
-  if (hasNegativeDesireOrMindChange && hasBuildOrExecutionTarget) {
+  if (hasNegativeDesireOrMindChange && hasActiveExecutionTarget) {
     return true;
   }
 
@@ -556,25 +607,33 @@ function isSentenceSemanticBuildTermination(sentence: string, isCurrentlyBuildin
       s
     );
 
-  const hasProcessOrArtifactObject =
-    /\b(building|the\s+build|this\s+build|running|running\s+it|running\s+this|running\s+that|running\s+the|working|working\s+on|coding|making|creating|developing|generating|scaffolding|executing|the\s+process|this\s+process|the\s+agents|the\s+project|this\s+project|that\s+project|the\s+app|this\s+app|that\s+app|the\s+application|this\s+application|that\s+application|the\s+software|this\s+software|the\s+website|this\s+website|the\s+request|this\s+request|my\s+request|what\s+you('re|\s+are)\s+doing|(?:stop|halt|terminate|abort|cancel|drop|scrap|quit)\s+(?:it|this|that)\b)/i.test(
+  // When NOT currently building, require an explicit build/project/app object so conversational withdrawals
+  // like "withdraw that request" or "cancel that question" never falsely claim a build was terminated!
+  const hasExplicitBuildArtifactObject =
+    /\b(building|the\s+build|this\s+build|building\s+process|the\s+agents|the\s+project|this\s+project|that\s+project|the\s+app|this\s+app|that\s+app|the\s+application|this\s+application|that\s+application|the\s+software|this\s+software|the\s+website|this\s+website|coding|scaffolding)\b/i.test(
+      s
+    );
+
+  const hasProcessOrArtifactObjectWhenBuilding =
+    hasExplicitBuildArtifactObject ||
+    /\b(running|running\s+it|running\s+this|running\s+that|running\s+the|working|working\s+on|making|creating|developing|generating|executing|the\s+process|this\s+process|the\s+request|this\s+request|that\s+request|last\s+request|my\s+request|what\s+you('re|\s+are)\s+doing|(?:stop|halt|terminate|abort|cancel|drop|scrap|quit|withdraw)\s+(?:it|this|that)\b)/i.test(
       s
     );
 
   if (
     hasCessationVerb &&
-    hasProcessOrArtifactObject &&
+    (isCurrentlyBuilding ? hasProcessOrArtifactObjectWhenBuilding : hasExplicitBuildArtifactObject) &&
     !/\b(stop\s+(?:by|at|for\s+a\s+moment\s+to\s+explain)|without\s+stopping|never\s+stop|don'?t\s+stop|do\s+not\s+stop)\b/i.test(s)
   ) {
     return true;
   }
 
-  // 3. Direct negative imperative ("don't build this", "do not run it anymore", "no need to build it")
+  // 3. Direct negative imperative ("don't build this", "do not build that app")
   if (
-    /\b(?:don'?t|do\s+not|please\s+don'?t|please\s+do\s+not|never\s*mind\s+don'?t)\s+(?:build|make|create|develop|code|scaffold|generate|run|continue|work\s+on)\s+(?:it|this|that|the|a|an|any|my|our)\b/i.test(
+    /\b(?:don'?t|do\s+not|please\s+don'?t|please\s+do\s+not|never\s*mind\s+don'?t)\s+(?:build|scaffold|code)\s+(?:it|this|that|the|a|an|any|my|our)\b/i.test(
       s
     ) ||
-    /\b(?:build|building|running|working\s+on|making|creating)\s+(?:this|that|it|the\s+app|the\s+application|the\s+project)\s+anymore\b/i.test(
+    /\b(?:build|building)\s+(?:this|that|it|the\s+app|the\s+application|the\s+project)\s+anymore\b/i.test(
       s
     )
   ) {
@@ -594,6 +653,41 @@ function isSentenceSemanticBuildTermination(sentence: string, isCurrentlyBuildin
   }
 
   return false;
+}
+
+/**
+ * Detects when a user is withdrawing, dropping, or canceling a conversational request or question
+ * when NO software build is running (e.g., "Rex, you can withdraw that request",
+ * "withdraw the last request", "you don't need to speak about the question I was asking before",
+ * "forget what I just asked", "never mind that question").
+ */
+export function isConversationalWithdrawalCommand(
+  rawText: string,
+  isCurrentlyBuilding = false
+): boolean {
+  if (isCurrentlyBuilding || !rawText || typeof rawText !== "string") return false;
+  if (isBuildTerminationCommand(rawText, false)) return false;
+
+  const s = rawText
+    .trim()
+    .toLowerCase()
+    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
+    .replace(/[.!?,;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return false;
+
+  return (
+    /\b(withdraw|cancel|drop|discard|forget|skip|scratch|leave|ignore)\s+(?:that|the|this|my|our)?\s*(?:last\s+|previous\s+|earlier\s+)?(?:request|question|query|prompt|topic|thought|message|what\s+i\s+(?:asked|said))\b/i.test(
+      s
+    ) ||
+    /\b(?:don'?t|do\s+not|no)\s+need\s+to\s+(?:speak|talk|answer|respond|reply|continue\s+talking)\s+(?:about|to)\s+(?:that|the|this|my|what\s+i)\b/i.test(
+      s
+    ) ||
+    /^(?:(?:hey\s+rex|rex|please|no|ok|okay)\s+)*(?:you\s+can\s+)?(?:withdraw|never\s*mind|nevermind|forget\s+(?:it|that|what\s+i\s+said|what\s+i\s+asked)|scratch\s+that|drop\s+that|skip\s+that)(?:\s+(?:rex|please|now))?$/i.test(
+      s
+    )
+  );
 }
 
 /**
@@ -705,11 +799,11 @@ export function extractUserInterruptFromBuffer(rawTranscript: string): {
     .trim()
     .replace(/\b(lyrics|lex|wrecks|rax|alex)\b/gi, "Rex");
 
-  // 1. Check if the entire string is already a bare silence command or semantic build termination
+  // 1. Check if the entire string is already a bare silence command, conversational withdrawal, or semantic build termination
   if (isBareSilenceCommand(normalized)) {
     return { matched: true, extractedText: normalized, isBareSilence: true };
   }
-  if (isBuildTerminationCommand(normalized, true)) {
+  if (isBuildTerminationCommand(normalized, false) || isConversationalWithdrawalCommand(normalized, false)) {
     return { matched: true, extractedText: normalized, isBareSilence: false };
   }
 

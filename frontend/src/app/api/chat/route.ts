@@ -53,6 +53,8 @@ import {
   generateDynamicEcommerceBrandName,
   isBuildTerminationCommand,
   formatBuildTerminationMessage,
+  isConversationalWithdrawalCommand,
+  formatConversationalWithdrawalMessage,
   analyzeWholeSentenceSemantics,
 } from "@/lib/project-spec";
 import { getChariotConfig, chatWithChariot } from "@/lib/ai-provider-config";
@@ -386,7 +388,8 @@ function classifyIntent(
   text: string,
   history: Array<{ role: string; content: string }> = [],
   sessionId?: string,
-  username?: string
+  username?: string,
+  isCurrentlyBuilding = false
 ): {
   isConversational: boolean;
   isExplicitTestRequest?: boolean;
@@ -417,7 +420,7 @@ function classifyIntent(
       Boolean(ensureSessionWorkspaceMaterialized(sessionId))
     : false;
 
-  if (isBuildTerminationCommand(cleanedText, false)) {
+  if (isBuildTerminationCommand(cleanedText, isCurrentlyBuilding)) {
     const termMsg = formatBuildTerminationMessage(username);
     return {
       isConversational: true,
@@ -428,7 +431,7 @@ function classifyIntent(
   }
 
   const sentenceSemantics = analyzeWholeSentenceSemantics(cleanedText, {
-    isCurrentlyBuilding: true,
+    isCurrentlyBuilding,
     hasExistingProject: hasExistingSessionProject,
     history,
   });
@@ -440,6 +443,13 @@ function classifyIntent(
       emotion: "calm",
       reply: termMsg,
       spokenReply: termMsg,
+    };
+  }
+
+  if (isConversationalWithdrawalCommand(cleanedText, isCurrentlyBuilding)) {
+    return {
+      isConversational: true,
+      emotion: "calm",
     };
   }
 
@@ -1068,6 +1078,7 @@ export async function POST(request: NextRequest) {
     const userId: string = (body.userId || body.user_id || request.headers.get("x-user-id") || "").trim();
     const forceBuildTask: boolean = Boolean(body.forceBuildTask);
     const conversationalOnly: boolean = Boolean(body.conversationalOnly);
+    const isCurrentlyBuilding: boolean = Boolean(body.isCurrentlyBuilding ?? body.isBuilding);
     const incomingImages: string[] = Array.isArray(body.images) ? body.images : [];
 
     // 1. Block legacy shared session IDs and verify session ownership
@@ -1134,7 +1145,7 @@ export async function POST(request: NextRequest) {
       userProfile = getServerUserProfile(userId);
     }
 
-    const intent = classifyIntent(text, history, sessionId, userProfile?.username);
+    const intent = classifyIntent(text, history, sessionId, userProfile?.username, isCurrentlyBuilding);
     const isCodingTask = !conversationalOnly && (forceBuildTask || !intent.isConversational);
     const routeDecision = recordAgentRouting({
       isCodingTask,
@@ -1702,6 +1713,7 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
    - When the user asks for guidance, mentorship, or an explanation of HOW to build a software idea end-to-end (e.g., "I don't know how to build this software. Can you guide me first? How can we build this specific idea end-to-end?"), act as an empowering senior engineering mentor: walk them through the complete end-to-end roadmap (1. Product & UX Architecture, 2. Frontend & Backend Stack, 3. Database & API Design, 4. Step-by-Step Implementation Phases, and 5. Testing & Deployment), and let them know that whenever they are ready, they can ask you to start building it together.
    - When discussing or naming e-commerce or shopping applications, NEVER use the hardcoded name "AuraMart" or "AuraBeauty" — always invent a fresh, unique brand name tailored to the specific features and niche requested.
    - When the user asks you to sing a song, recite a poem, tell a joke, tell a story, or engages in philosophical, personal, or life conversations (such as inner beauty vs outer beauty, human connection, meaning, etc.), write with vivid, natural spoken rhythm so that the ENTIRE response sounds wonderful when spoken aloud from start to finish.
+   - SITUATIONAL REQUEST WITHDRAWAL VS. BUILD TERMINATION: Not every request is a building request! If no software build is running and the user asks to withdraw their last request, cancel/drop their previous question, or says you don't need to speak about what they asked before (e.g., "you can withdraw that request", "withdraw the last request", "never mind that question", "you don't need to answer that"), respond dynamically and naturally based on the actual conversation context (e.g., gracefully acknowledging that you've set aside the previous question or topic and are ready for whatever they'd like to talk about next). NEVER say "I have terminated the building process" when no build was running!
    - Avoid generic boilerplate or repetitive phrases like "you can see the features in the chat".`;
 
         const requiresSearch = Boolean(
@@ -1786,6 +1798,16 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
     const lower = text.toLowerCase();
 
     if (!conversationalReply) {
+      if (isConversationalWithdrawalCommand(text, isCurrentlyBuilding)) {
+        const withdrawalReply = formatConversationalWithdrawalMessage(
+          text,
+          userProfile?.username,
+          history
+        );
+        conversationalReply = withdrawalReply;
+        spokenReply = withdrawalReply;
+      }
+
       const isFolderCapabilityInquiry =
         /\b(when i connect a folder|connect a folder|local computer|ability to read those files|read those files|make the updates and changes|within that folder|session to session|different sessions?)\b/i.test(
           lower
@@ -1796,7 +1818,9 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
           lower
         );
 
-      if (isFolderCapabilityInquiry) {
+      if (conversationalReply) {
+        // Already populated by situational withdrawal handler above
+      } else if (isFolderCapabilityInquiry) {
         conversationalReply = `### 🚀 Yes! Full Local Folder Reading, Summarization & In-Place Code Updates
 
 When you connect a folder from your local computer, here is exactly how Vyrexo handles it:
