@@ -121,17 +121,87 @@ function getGeminiClient(): GoogleGenAI | null {
  */
 function cleanSpokenArtifacts(raw: string): string {
   return raw
-    .replace(/\*+(?:takes?\s+a\s+(?:deep\s+|little\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ... ")
-    .replace(/\*+[^*]+?\*+/g, ", ... ")
-    .replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat)[^)]*\)/gi, ", ... ")
+    .replace(/\*+(?:takes?\s+a\s+(?:deep\s+|little\s+)?breath|breath[es]*|sigh[s]*|pause[s]*|chuckle[s]*|laugh[s]*|clears?\s+throat|[^*]+)\*+/gi, ", ")
+    .replace(/\*+[^*]+?\*+/g, ", ")
+    .replace(/\([^)]*(?:breath|pause|sigh|chuckle|clears?\s+throat)[^)]*\)/gi, ", ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ... ")
-    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ... ")
+    .replace(/\b(?:takes?\s+(?:a\s+)?(?:little\s+|deep\s+|quick\s+|gentle\s+)?breath|taking\s+a\s+breath|takes?\s+a\s+moment\s+to\s+breathe|breathes?\s+(?:in|out)?|takes?\s+a\s+pause|pauses?\s+briefly|deep\s+breath)\b[,.]?/gi, ", ")
+    .replace(/\s*,\s*\.\.\.\s*,?/g, ", ")
+    .replace(/\.{2,}/g, ".")
     .replace(/\s+/g, " ")
     .replace(/\s+([.,!?;:])/g, "$1")
     .replace(/([.!?])\1+/g, "$1")
     .replace(/^\s*[,.\s]+/, "")
     .trim();
+}
+
+function requiresDetailedOrLongResponse(
+  userPrompt: string,
+  hasAttachments = false,
+  isSearchTurn = false
+): boolean {
+  if (hasAttachments || isSearchTurn) return true;
+  const p = (userPrompt || "").toLowerCase().trim();
+
+  // Explicit factual, news, research, list/pointer, building, technical, or creative requests always get their full optimal length
+  if (
+    /\b(in\s+detail|detailed|deep\s+dive|elaborate|comprehensive|step[\s-]*by[\s-]*step|guide\s+me|can\s+you\s+guide|walk\s+me\s+through|end[\s-]*to[\s-]*end|roadmap|architecture|blueprint|code|coding|implement|scaffold|refactor|debug|error|stack\s+trace|review|summarize|read\s+the\s+files|connect\s+a\s+folder|poem|poetry|story|stories|tale|song|lyrics|sing\b|monologue|explain|how\s+can\s+we\s+build|news|cyber|cybersecurity|cyberattack|attack|attacks|breach|hack|vulnerability|latest|recent|recently|happened|happening|world|around\s+the\s+world|in\s+the\s+city|mention\s+these|pointers|points|list|top\s+\d+|\d+\s+news|facts|fact|research|compare|difference\s+between|what\s+are\s+the|tell\s+me\s+about|tell\s+me\s+the|give\s+me\s+the|overview|breakdown|analysis|features|tech\s+stack|project)\b/i.test(
+      p
+    )
+  ) {
+    return true;
+  }
+
+  // Only treat as short conversational chitchat when it is a personal, emotional, or casual social check-in
+  const isCasualOrEmpathetic =
+    /\b(how\s+are\s+you|how\s+is\s+your\s+day|what\s+about\s+you|what\s+are\s+you\s+doing|how\s+do\s+you\s+feel|understand\s+my\s+feeling|i\s+am\s+(?:tired|exhausted|happy|sad|stressed|overwhelmed|excited|good|great|fine|okay)|i\s+feel\s+|thank\s+you|thanks|withdraw|cancel\s+that|never\s+mind|forget\s+it|good\s+(?:morning|afternoon|evening|night)|nice\s+talking)\b/i.test(
+      p
+    ) || p.split(/\s+/).length <= 6;
+
+  return !isCasualOrEmpathetic;
+}
+
+/**
+ * Ensures casual, empathetic, and everyday personal check-ins stay warm, real, and concise
+ * (2-3 natural sentences, ~30-55 words), while factual, news, research, and building responses
+ * keep their full, optimal length and structured pointers without truncation.
+ */
+function enforceConciseConversationalLength(
+  rawReply: string,
+  userPrompt: string,
+  hasAttachments = false,
+  isSearchTurn = false
+): string {
+  const trimmed = (rawReply || "").trim();
+  if (!trimmed) return trimmed;
+  if (
+    requiresDetailedOrLongResponse(userPrompt, hasAttachments, isSearchTurn) ||
+    trimmed.includes("```") ||
+    /^\s*(?:[-*•]|\d+[\.\)])\s+/m.test(trimmed)
+  ) {
+    return trimmed;
+  }
+
+  // Collapse multi-paragraph rambles on casual turns and keep up to 3 complete, natural sentences
+  const normalized = trimmed.replace(/\n{2,}/g, " ").replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+  const sentences = normalized.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) || [normalized];
+  if (sentences.length <= 3 && normalized.length <= 310) {
+    return trimmed;
+  }
+
+  const kept: string[] = [];
+  let charCount = 0;
+  for (const s of sentences) {
+    const cleanS = s.trim();
+    if (!cleanS) continue;
+    if (kept.length >= 3 || (kept.length >= 2 && charCount + cleanS.length > 290)) {
+      break;
+    }
+    kept.push(cleanS);
+    charCount += cleanS.length + 1;
+  }
+
+  return kept.length > 0 ? kept.join(" ").trim() : normalized.slice(0, 280).trim();
 }
 
 function trimToSentenceBoundary(input: string, maxLen = 560): string {
@@ -183,14 +253,24 @@ function isCreativeOrConversationalTopic(userPrompt: string, responseText: strin
 }
 
 function isProjectTechnicalBreakdown(userPrompt: string, responseText: string): boolean {
-  if (isCreativeOrConversationalTopic(userPrompt, responseText)) {
+  const combined = `${userPrompt} ${responseText}`.toLowerCase();
+  // Never summarize songs, poems, stories, or jokes — speak those verbatim
+  if (
+    /\b(sing\b|song|lyrics|melody|chorus|verse|poem|poetry|rhyme|haiku|sonnet|stanza|story|stories|tale|fable|bedtime|narrative|once upon a time|joke|jokes|riddle|monologue|rap\b)\b/i.test(
+      combined
+    )
+  ) {
     return false;
   }
   if (/```[\s\S]*?```/.test(responseText)) {
     return true;
   }
-  const combined = `${userPrompt} ${responseText}`.toLowerCase();
-  // Only classify as a technical breakdown when actual engineering/code artifacts are discussed
+  // Summarize long multi-point lists (4+ bullet/numbered items) or long factual/news/technical breakdowns for voice
+  // so the Chat UI shows all 8-10 detailed pointers while Rex's spoken voice gives a crisp, natural spoken overview!
+  const bulletMatches = responseText.match(/^\s*(?:[-*•]|\d+[\.\)])\s+/gm) || [];
+  if (bulletMatches.length >= 4 && responseText.length > 500) {
+    return true;
+  }
   return /\b(tech stack|component hierarchy|indexed files|api endpoints|database schema|repository structure|workspace files|bun build|bun test|src\/components|package\.json)\b/i.test(
     combined
   );
@@ -229,7 +309,7 @@ function generateSpokenSummary(text: string, userPrompt = ""): string {
       .replace(/[*_`~#]/g, "")
       .replace(/^\s*[-*+•]\s+/gm, "")
       .replace(/^\s*(\d+)[\.\)]\s+/gm, "$1. ")
-      .replace(/\n{2,}/g, " ... ")
+      .replace(/\n{2,}/g, " ")
       .replace(/\n/g, " ")
       .replace(/\s+/g, " ")
       .trim();
@@ -1706,38 +1786,63 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
    - You have direct visibility into the "Code" tab files (listed above) and the running "Preview" tab.
    - When answering questions about the codebase, reference the actual files, types, and logic present in the workspace.
 
-4. VOICE & CONVERSATIONAL COMPLETENESS RULES:
-   - Provide a direct, articulate, senior-level response with authentic human vocal inflection.
-   - If the user explicitly asks for a "short answer", "brief answer", or "not long", respect that preference strictly (keep it concise, warm, and 2-4 sentences).
-   - When the user asks for personal shopping ideas, gift suggestions, or things to buy today to feel happy, give creative, thoughtful, real-world item suggestions (and NEVER talk about building an e-commerce app unless they explicitly asked you to code software).
-   - When the user asks for guidance, mentorship, or an explanation of HOW to build a software idea end-to-end (e.g., "I don't know how to build this software. Can you guide me first? How can we build this specific idea end-to-end?"), act as an empowering senior engineering mentor: walk them through the complete end-to-end roadmap (1. Product & UX Architecture, 2. Frontend & Backend Stack, 3. Database & API Design, 4. Step-by-Step Implementation Phases, and 5. Testing & Deployment), and let them know that whenever they are ready, they can ask you to start building it together.
+4. OPTIMAL RESPONSE LENGTH & FACT-BASED / NEWS / BUILDING PRECISION:
+   - EMPATHETIC & CASUAL PERSONAL CONVERSATIONS: When the user is having an emotional check-in, sharing feelings, or asking casual personal questions (e.g., "what about you, what are you doing?", "how is your day?", "I'm glad you understand my feeling"), keep your response **warm, genuine, and concise (1 short paragraph of 2 to 3 natural sentences, 30 to 55 words)**.
+   - FACT-BASED, NEWS, CYBERSECURITY & WEB-SEARCH QUESTIONS: When the user asks for real-world facts, latest news, recent cyber attacks around the world or in a city, or asks you to mention/list specific incidents:
+     * NEVER give a 1-sentence apology or vague theoretical generalizations!
+     * Use your live Google Search grounding to provide **real, concrete, up-to-date incidents and facts**.
+     * Format your answer with **clear, structured bullet points or numbered pointers (e.g., 6 to 10 real recent incidents/news items with specific organizations, attack types/CVEs, locations, and impact)** at the full optimal length the question requires.
+   - BUILDING, ARCHITECTURE & TECHNICAL QUESTIONS: Take the full, optimal response length required to give a thorough, logical, and actionable engineering answer.
+   - When the user asks for personal shopping ideas, gift suggestions, or things to buy today to feel happy, give concise, creative real-world item suggestions (and NEVER talk about building an e-commerce app unless they explicitly asked you to code software).
    - When discussing or naming e-commerce or shopping applications, NEVER use the hardcoded name "AuraMart" or "AuraBeauty" — always invent a fresh, unique brand name tailored to the specific features and niche requested.
-   - When the user asks you to sing a song, recite a poem, tell a joke, tell a story, or engages in philosophical, personal, or life conversations (such as inner beauty vs outer beauty, human connection, meaning, etc.), write with vivid, natural spoken rhythm so that the ENTIRE response sounds wonderful when spoken aloud from start to finish.
-   - SITUATIONAL REQUEST WITHDRAWAL VS. BUILD TERMINATION: Not every request is a building request! If no software build is running and the user asks to withdraw their last request, cancel/drop their previous question, or says you don't need to speak about what they asked before (e.g., "you can withdraw that request", "withdraw the last request", "never mind that question", "you don't need to answer that"), respond dynamically and naturally based on the actual conversation context (e.g., gracefully acknowledging that you've set aside the previous question or topic and are ready for whatever they'd like to talk about next). NEVER say "I have terminated the building process" when no build was running!
+   - SITUATIONAL REQUEST WITHDRAWAL VS. BUILD TERMINATION: Not every request is a building request! If no software build is running and the user asks to withdraw their last request, cancel/drop their previous question, or says you don't need to speak about what they asked before, respond concisely and naturally based on the actual conversation context. NEVER say "I have terminated the building process" when no build was running!
    - Avoid generic boilerplate or repetitive phrases like "you can see the features in the chat".`;
+
+        const recentUserContext = [
+          ...history
+            .filter((h) => h.role === "user")
+            .slice(-2)
+            .map((h) => h.content),
+          text,
+        ].join(" ");
 
         const requiresSearch = Boolean(
           intent.isWebSearch ||
-          /\b(news|headline|headlines|weather|stock|score|latest|recent|today|current|now|price|who won|release date|what should i buy|shopping|trending|recommend|suggestion|ideas what|best .* to buy)\b/i.test(
-            text
+          /\b(news|headline|headlines|cyber|cybersecurity|cyberattack|cyber\s+attack|attacks|hack|breach|ransomware|vulnerability|cve|weather|stock|score|latest|recent|recently|happened|happening|around\s+the\s+world|in\s+the\s+world|in\s+the\s+city|today|current|now|price|who\s+won|release\s+date|what\s+should\s+i\s+buy|shopping|trending|recommend|suggestion|ideas\s+what|best\s+.*\s+to\s+buy|incident|incidents|outage|world\s+events|global)\b/i.test(
+            recentUserContext
           )
         );
 
-        const candidateModels = [
-          "gemini-flash-latest",
-          "gemini-2.5-flash",
-          "gemini-3.1-flash-lite",
-          "gemini-3.8-flash",
-          "gemini-3.5-flash",
-        ];
+        const isDetailedTurn = requiresDetailedOrLongResponse(
+          recentUserContext,
+          imagesToInspect.length > 0,
+          requiresSearch
+        );
+
+        // For live web search, gemini-2.5-flash-lite completes Google Search grounding in ~4.2s with 8-10 sources
+        const candidateModels = requiresSearch
+          ? [
+              "gemini-2.5-flash-lite",
+              "gemini-2.5-flash",
+              "gemini-3.1-flash-lite",
+              "gemini-3.5-flash",
+            ]
+          : [
+              "gemini-2.5-flash",
+              "gemini-2.5-flash-lite",
+              "gemini-3.1-flash-lite",
+              "gemini-3.5-flash",
+            ];
         let response: any = null;
 
         for (const model of candidateModels) {
           try {
             const config: any = {
               systemInstruction,
-              maxOutputTokens: 2048,
-              ...(model.startsWith("gemini-3")
+              maxOutputTokens: isDetailedTurn ? 2048 : 320,
+              ...(model.startsWith("gemini-2.5")
+                ? { thinkingConfig: { thinkingBudget: 0 } }
+                : model.startsWith("gemini-3")
                 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
                 : {}),
               ...(requiresSearch ? { tools: [{ googleSearch: {} }] } : {}),
@@ -1749,9 +1854,10 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
               config,
             });
 
-            // 6.5s timeout per candidate model for ultra-fast failover
+            // Allow 9.5s when executing live Google Search grounding, or 4.5s for standard turns
+            const timeoutMs = requiresSearch ? 9500 : 4500;
             const timeoutPromise = new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("Timeout")), 6500)
+              setTimeout(() => reject(new Error("Timeout")), timeoutMs)
             );
 
             response = await Promise.race([callPromise, timeoutPromise]);
@@ -1763,7 +1869,12 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
         }
 
         if (response?.text) {
-          const reply = response.text;
+          const reply = enforceConciseConversationalLength(
+            response.text,
+            recentUserContext,
+            imagesToInspect.length > 0,
+            requiresSearch
+          );
           const spokenReply = generateSpokenSummary(reply, text);
 
           const grounding = response.candidates?.[0]?.groundingMetadata;

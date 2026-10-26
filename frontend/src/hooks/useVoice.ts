@@ -9,22 +9,25 @@ import {
 } from "@/lib/project-spec";
 
 const WAKE_PATTERNS = [
-  /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear)\s+rex\b/i,
+  /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear)\s+(?:rex|rick'?s?|riks|lex|wrecks|rax|racks|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/i,
   /\bhello\s+rex\b/i,
   /\bhey\s+rex\b/i,
   /\bhi\s+rex\b/i,
   /\bok\s+rex\b/i,
   /\boh\s+rex\b/i,
   /\brex\b/i,
+  /^(?:rick|riks|rick's|lex|wrecks|rax|racks|regs|brex|dex|tex|alex)$/i,
 ];
 
 const INTERRUPT_PATTERNS = [
   /\bstop\b/i,
   /\bstop\s+rex\b/i,
   /\brex\s+stop\b/i,
+  /\bplease\s+stop\b/i,
   /\bpause\b/i,
   /\bpause\s+rex\b/i,
   /\brex\s+pause\b/i,
+  /\bplease\s+pause\b/i,
   /\bwait\b/i,
   /\bwait\s+rex\b/i,
   /\binterrupt\b/i,
@@ -51,8 +54,8 @@ const INTERRUPT_PATTERNS = [
 ];
 
 const EXPLICIT_MULTIWORD_INTERRUPT_PATTERNS = [
-  /^(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|no|please|yo)\s*,?\s*)*(stop|pause|wait|hold\s+on|hang\s+on|cancel|never\s*mind|nevermind|terminate|don'?t\s+build|do\s+not\s+build|i\s+don'?t\s+want\s+to\s+(?:work\s+on|build)|stop\s+working|withdraw|abort|listen\s+to\s+me|hear\s+me\s+out|shut\s+up|be\s+quiet)\b/i,
-  /\b(stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|stop\s+(building|coding|making|working|talking|speaking|it|that)|terminate\s+(the\s+)?(build|building|project|application)|don'?t\s+(build|make|create|work\s+on)\s+(it|that|this|the)|do\s+not\s+(build|make|create|work\s+on)|i\s+don'?t\s+want\s+to\s+work\s+on\s+this|cancel\s+(that|the|this|my)\s*(request|build|project|app|application)?|withdraw\s+(that|the|this|my)\s*(request|build|project)?|i\s+have\s+(something|more|another\s+thing)\s+(else\s+)?to\s+(add|say|mention)|let\s+me\s+(add|finish|speak|interrupt)|wait\s+a\s+(second|minute|moment)|hold\s+on\s+a\s+(second|minute|moment)|but\s+i\s+(think|want|feel|need|would|don'?t|mean|meant)|but\s+(what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(i\s+think|i\s+want|let'?s|wait|stop|rex)|instead\s+(of\s+that|let'?s|i\s+want)|on\s+second\s+thought|change\s+of\s+plans)\b/i,
+  /^(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|no|please|yo)\s*,?\s*)*(stop|pause|please\s+stop|please\s+pause|wait|hold\s+on|hang\s+on|cancel|never\s*mind|nevermind|terminate|don'?t\s+build|do\s+not\s+build|i\s+don'?t\s+want\s+to\s+(?:work\s+on|build)|stop\s+working|withdraw|abort|listen\s+to\s+me|hear\s+me\s+out|shut\s+up|be\s+quiet)\b/i,
+  /\b(stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|please\s+stop|please\s+pause|can\s+you\s+(?:please\s+)?(?:stop|pause)|could\s+you\s+(?:please\s+)?(?:stop|pause)|stop\s+(building|coding|making|working|talking|speaking|it|that)|terminate\s+(the\s+)?(build|building|project|application)|don'?t\s+(build|make|create|work\s+on)\s+(it|that|this|the)|do\s+not\s+(build|make|create|work\s+on)|i\s+don'?t\s+want\s+to\s+work\s+on\s+this|cancel\s+(that|the|this|my)\s*(request|build|project|app|application)?|withdraw\s+(that|the|this|my)\s*(request|build|project)?|i\s+have\s+(something|more|another\s+thing)\s+(else\s+)?to\s+(add|say|mention)|let\s+me\s+(add|finish|speak|interrupt)|wait\s+a\s+(second|minute|moment)|hold\s+on\s+a\s+(second|minute|moment)|but\s+i\s+(think|want|feel|need|would|don'?t|mean|meant)|but\s+(what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(i\s+think|i\s+want|let'?s|wait|stop|rex)|instead\s+(of\s+that|let'?s|i\s+want)|on\s+second\s+thought|change\s+of\s+plans)\b/i,
 ];
 
 export type VoiceMode = "waiting_for_wake" | "active_conversation" | "idle";
@@ -99,6 +102,7 @@ export function useVoice({
   const pendingInterimRef = useRef<string>("");
   const accumulatedTurnRef = useRef<string>("");
   const turnSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingWakeTriggerRef = useRef<boolean>(false);
   const activatedThisUtteranceRef = useRef<boolean>(false);
   const lastActivityRef = useRef<number>(0);
   const restartRef = useRef<(fresh?: boolean) => void>(() => {});
@@ -126,6 +130,7 @@ export function useVoice({
     accumulatedTurnRef.current = "";
     pendingInterimRef.current = "";
     lastEmittedFinalRef.current = "";
+    pendingWakeTriggerRef.current = false;
   }, []);
 
   useEffect(() => {
@@ -259,6 +264,7 @@ export function useVoice({
   };
 
   const matchWakeWord = (text: string): boolean => {
+    if (isBareSilenceCommand(text)) return false;
     return WAKE_PATTERNS.some((p) => p.test(text));
   };
 
@@ -468,7 +474,7 @@ export function useVoice({
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "en-US";
-    recognition.maxAlternatives = 1;
+    recognition.maxAlternatives = 5;
 
     recognition.onstart = () => {
       lastActivityRef.current = Date.now();
@@ -504,16 +510,59 @@ export function useVoice({
       }
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const rawTranscript: string = event.results[i][0].transcript || "";
-        const isFinalResult: boolean = Boolean(event.results[i].isFinal);
+        const resultItem = event.results[i];
+        let rawTranscript: string = resultItem?.[0]?.transcript || "";
+        const isFinalResult: boolean = Boolean(resultItem?.isFinal);
         const alreadyInterruptedInResult = Boolean(resultInterruptedRef.current[i]);
         const rawPrevBleedLen = bleedPrefixLengthRef.current[i] || 0;
         const prevBleedLen = rawPrevBleedLen <= rawTranscript.length ? rawPrevBleedLen : 0;
 
+        // Inspect secondary ASR hypotheses (alternatives 1..4) for soft-spoken wake words or stop/pause commands
+        const altCount = resultItem?.length || 1;
+        if (altCount > 1) {
+          const primarySlice = rawTranscript.slice(prevBleedLen).trim();
+          const primaryNorm = normalizeSpokenTranscript(primarySlice, { isInterim: !isFinalResult });
+          const primaryHasStop =
+            isBareStopCommand(primaryNorm) ||
+            matchInterrupt(primaryNorm) ||
+            extractUserInterruptFromBuffer(rawTranscript).matched;
+          const primaryHasWake = matchWakeWord(primaryNorm);
+
+          if (!primaryHasStop && !primaryHasWake) {
+            for (let a = 1; a < altCount; a++) {
+              const altText: string = (resultItem[a]?.transcript || "").trim();
+              if (!altText) continue;
+              const altNorm = normalizeSpokenTranscript(altText, { isInterim: !isFinalResult });
+              // If Rex is speaking (or in active conversation) and an alternative is an explicit stop/pause command:
+              if (
+                isBareStopCommand(altNorm) ||
+                (isEchoWindow &&
+                  (extractUserInterruptFromBuffer(altNorm).matched ||
+                    /\b(stop\s+rex|rex\s+stop|pause\s+rex|rex\s+pause|please\s+stop|please\s+pause)\b/i.test(
+                      altNorm
+                    )))
+              ) {
+                rawTranscript = altText;
+                break;
+              }
+              // If waiting for wake word and an alternative clearly contains "Rex" / "Hey Rex":
+              if (modeRef.current === "waiting_for_wake" && !isEchoWindow && matchWakeWord(altNorm)) {
+                rawTranscript = altText;
+                break;
+              }
+            }
+          }
+        }
+
         if (isEchoWindow && !alreadyInterruptedInResult) {
-          // Check both the newly added delta after any speaker bleed AND full buffer extraction
+          // Check newly added delta after any speaker bleed, slice from prevBleedLen, AND full rawTranscript
+          // (checking full rawTranscript ensures Chrome's interim revisions never slice off "stop" or "please")
           const deltaSlice = rawTranscript.slice(prevBleedLen).trim();
-          const extractedFromFull = extractUserInterruptFromBuffer(rawTranscript.slice(prevBleedLen));
+          const extractedFromSlice = extractUserInterruptFromBuffer(rawTranscript.slice(prevBleedLen));
+          const extractedFromFullRaw = extractUserInterruptFromBuffer(rawTranscript);
+          const extractedFromFull = extractedFromSlice.matched
+            ? extractedFromSlice
+            : extractedFromFullRaw;
           const extractedFromDelta = extractUserInterruptFromBuffer(deltaSlice);
           const isDeltaSelfEcho = isSelfEchoRef.current ? isSelfEchoRef.current(deltaSlice) : false;
           const deltaWords = deltaSlice
@@ -521,8 +570,8 @@ export function useVoice({
             .trim()
             .split(/\s+/)
             .filter((w) => w.length > 1);
-          const startsWithNaturalBargeLead =
-            /^(no|yes|yeah|nah|nope|wait|hold|stop|pause|listen|hey|hi|hello|rex|ok|okay|actually|but|well|what|why|how|can|could|would|will|i\s+think|i\s+want|i\s+need|i\s+don'?t|i\s+mean|let'?s|let\s+me|tell\s+me|never)\b/i.test(
+          const startsWithExplicitUserBargeLead =
+            /^(no\b|nope\b|nah\b|wait\b|hold\b|stop\b|pause\b|please\s+stop\b|please\s+pause\b|listen\b|hey\s+rex\b|hi\s+rex\b|hello\s+rex\b|rex\b|actually\s+i\b|can\s+you\b|could\s+you\b|would\s+you\b|what\s+if\b|what\s+about\b|tell\s+me\b|let\s+me\b|i\s+want\b|i\s+need\b|i\s+don'?t\b|never\s*mind\b)/i.test(
               deltaSlice
             );
 
@@ -531,19 +580,19 @@ export function useVoice({
             detectedBargeInThisEvent = true;
             const userPortion = extractedFromDelta.matched ? extractedFromDelta.extractedText : deltaSlice;
             const matchIdx = rawTranscript.toLowerCase().lastIndexOf(userPortion.toLowerCase());
-            if (matchIdx >= prevBleedLen) {
+            if (matchIdx >= 0) {
               bleedPrefixLengthRef.current[i] = matchIdx;
             } else {
               bleedPrefixLengthRef.current[i] = prevBleedLen;
             }
-            const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i] || prevBleedLen);
+            const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i] ?? prevBleedLen);
             if (isFinalResult) finalText += cleanChunk;
             else interimText += cleanChunk;
           } else if (extractedFromFull.matched) {
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             const matchIdx = rawTranscript.toLowerCase().lastIndexOf(extractedFromFull.extractedText.toLowerCase());
-            bleedPrefixLengthRef.current[i] = matchIdx >= prevBleedLen ? matchIdx : prevBleedLen;
+            bleedPrefixLengthRef.current[i] = matchIdx >= 0 ? matchIdx : prevBleedLen;
             const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i]);
             if (isFinalResult) finalText += cleanChunk;
             else interimText += cleanChunk;
@@ -553,10 +602,13 @@ export function useVoice({
             bleedPrefixLengthRef.current[i] = prevBleedLen;
             if (isFinalResult) finalText += deltaSlice;
             else interimText += deltaSlice;
-          } else if (!isDeltaSelfEcho && (deltaWords.length >= 2 || startsWithNaturalBargeLead)) {
+          } else if (
+            !isDeltaSelfEcho &&
+            (deltaWords.length >= 3 || (deltaWords.length >= 2 && startsWithExplicitUserBargeLead))
+          ) {
             // Phrase-Independent Barge-In:
-            // The user started speaking any natural sentence in the middle of Rex's speech
-            // and it is NOT an echo of Rex's own voice!
+            // Requires either 3+ non-echo words or 2+ words starting with a clear user barge-in lead
+            // so 1-2 word speaker bleed during Rex's sentence pauses never triggers a false barge-in!
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             bleedPrefixLengthRef.current[i] = prevBleedLen;
@@ -590,6 +642,35 @@ export function useVoice({
       const spokenInterim = interimText.toLowerCase();
       const spokenFinal = finalText.toLowerCase();
 
+      // Check if the utterance (or extracted interrupt) is a bare stop/pause command ("stop Rex", "please stop", "please pause", "pause")
+      const candidateUtterance = (finalText || interimText).trim();
+      const extractedCandidate = extractUserInterruptFromBuffer(candidateUtterance);
+      const effectiveCandidate = extractedCandidate.matched
+        ? extractedCandidate.extractedText
+        : candidateUtterance;
+      const isImmediateBareStop =
+        Boolean(effectiveCandidate) && isBareStopCommand(effectiveCandidate);
+
+      // Immediate fast-path for bare stop/pause commands:
+      // Stop Rex's audio and transition straight to paused/wake-word mode on the very first attempt!
+      if (isImmediateBareStop && (isEchoWindow || currentMode === "active_conversation")) {
+        if (turnSilenceTimerRef.current) {
+          clearTimeout(turnSilenceTimerRef.current);
+          turnSilenceTimerRef.current = null;
+        }
+        lastInterruptTimeRef.current = Date.now();
+        lastAiSpeechEndTimeRef.current = 0;
+        isAiSpeakingRef.current = false;
+        wasAiSpeakingRef.current = false;
+        consumeCurrentRecognitionBuffer();
+        setMode("waiting_for_wake");
+        modeRef.current = "waiting_for_wake";
+        activatedThisUtteranceRef.current = false;
+        onInterruptRef.current?.();
+        onTranscriptRef.current(effectiveCandidate, true);
+        return;
+      }
+
       // If Rex was speaking and no barge-in was detected in the delta/buffer, ignore the speaker bleed
       if (isEchoWindow && !detectedBargeInThisEvent) {
         const isInterruptFallback = matchInterrupt(spokenFinal) || matchInterrupt(spokenInterim);
@@ -611,13 +692,6 @@ export function useVoice({
         activatedThisUtteranceRef.current = true;
         onInterruptRef.current?.();
         onActivatedRef.current();
-        // Play a warm human active-listening backchannel hum ("Mmm-hmm") when the user barges in
-        // with a conversational thought (skip hum only if they issued a bare silence command like "Stop Rex" / "Shut up")
-        const combinedBargeText = (finalText || interimText).trim();
-        if (!isBareStopCommand(combinedBargeText) && Date.now() - lastBackchannelHumTimeRef.current > 2500) {
-          lastBackchannelHumTimeRef.current = Date.now();
-          onBackchannelRef.current?.("barge_in");
-        }
         resetActiveInactivityTimerRef.current();
       }
 
@@ -634,6 +708,7 @@ export function useVoice({
 
           const command = stripWake(triggerSource);
           accumulatedTurnRef.current = command;
+          pendingWakeTriggerRef.current = !command;
           const liveDisplay = command || triggerSource;
           if (liveDisplay) {
             onTranscriptRef.current(normalizeSpokenTranscript(liveDisplay, { isInterim: true }), false);
@@ -642,7 +717,7 @@ export function useVoice({
           if (turnSilenceTimerRef.current) {
             clearTimeout(turnSilenceTimerRef.current);
           }
-          const wakePauseMs = spokenFinal ? 550 : 950;
+          const wakePauseMs = spokenFinal ? 500 : 850;
           turnSilenceTimerRef.current = setTimeout(() => {
             if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
             const fullText = accumulatedTurnRef.current.trim();
@@ -700,6 +775,7 @@ export function useVoice({
         if (finalText) {
           const trimmedFinal = (isBareStopCommand(finalText) ? finalText : stripWake(finalText)).trim();
           if (trimmedFinal) {
+            pendingWakeTriggerRef.current = false;
             const acc = accumulatedTurnRef.current.trim();
             const normAcc = acc.toLowerCase().replace(/[.!?,]/g, "").trim();
             const normTrimmed = trimmedFinal.toLowerCase().replace(/[.!?,]/g, "").trim();
@@ -721,11 +797,15 @@ export function useVoice({
         ).trim();
         const combinedLive = normalizeSpokenTranscript(combinedLiveRaw, { isInterim: true });
         const hasStandaloneWakeWord =
-          !combinedLive && (matchWakeWord(spokenFinal) || matchWakeWord(spokenInterim));
+          !combinedLive &&
+          (matchWakeWord(spokenFinal) ||
+            matchWakeWord(spokenInterim) ||
+            pendingWakeTriggerRef.current);
 
         if (combinedLive) {
           onTranscriptRef.current(combinedLive, false);
         } else if (hasStandaloneWakeWord) {
+          pendingWakeTriggerRef.current = true;
           const rawWakeDisplay = (finalText || interimText).trim();
           if (rawWakeDisplay) {
             onTranscriptRef.current(normalizeSpokenTranscript(rawWakeDisplay, { isInterim: true }), false);
@@ -733,9 +813,12 @@ export function useVoice({
         }
 
         // 4. Adaptive Low-Latency Conversational Turn Detection
-        if (turnSilenceTimerRef.current) {
-          clearTimeout(turnSilenceTimerRef.current);
-          turnSilenceTimerRef.current = null;
+        // Only clear turnSilenceTimerRef when we have either combinedLive or hasStandaloneWakeWord to reschedule it
+        if (combinedLive.length > 0 || hasStandaloneWakeWord) {
+          if (turnSilenceTimerRef.current) {
+            clearTimeout(turnSilenceTimerRef.current);
+            turnSilenceTimerRef.current = null;
+          }
         }
 
         const lowerLive = combinedLive.toLowerCase().replace(/[.!?,]/g, "").trim();
@@ -759,25 +842,14 @@ export function useVoice({
         const isCompleteBareStop = isBareStopCommand(lowerLive);
         const hasFinalizedClause = Boolean(finalText) && !cleanInterim;
 
-        // Active-listening backchannel hum ("Mmm-hmm") during multi-clause user speech pauses
-        if (
-          !isCompleteBareStop &&
-          wordCount >= 7 &&
-          (hasFinalizedClause || endsWithFillerOrConnector) &&
-          Date.now() - lastBackchannelHumTimeRef.current > 7000
-        ) {
-          lastBackchannelHumTimeRef.current = Date.now();
-          onBackchannelRef.current?.("listening_hum");
-        }
-
         let pauseDurationMs = 1250;
         if (isCompleteBareStop && hasFinalizedClause) {
-          // Give 750ms after "Stop", "Wait", "Pause Rex", "Never mind" so if the user continues after a comma
-          // ("Wait, I have something else to add on" or "Never mind, stop building it"), the full sentence is captured!
-          pauseDurationMs = 750;
+          pauseDurationMs = 350;
         } else if (isShortGreetingOrReply && hasFinalizedClause) {
           pauseDurationMs = 450;
-        } else if (isShortGreetingOrReply || isCompleteBareStop) {
+        } else if (isCompleteBareStop) {
+          pauseDurationMs = 450;
+        } else if (isShortGreetingOrReply) {
           pauseDurationMs = 850;
         } else if (hasFinalizedClause && !endsWithFillerOrConnector && wordCount >= 4) {
           pauseDurationMs = 1200;
@@ -817,7 +889,7 @@ export function useVoice({
         } else if (hasStandaloneWakeWord) {
           // User spoke "Rex" / "Hey Rex" (either finalizing the wake word that just transitioned
           // from waiting_for_wake -> active_conversation, or calling "Rex" while in active_conversation).
-          const wakeDelayMs = spokenFinal ? 500 : 900;
+          const wakeDelayMs = spokenFinal ? 450 : 800;
           turnSilenceTimerRef.current = setTimeout(() => {
             const recentlyInterrupted = Date.now() - lastInterruptTimeRef.current < 8000;
             if (

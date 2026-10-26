@@ -539,43 +539,84 @@ export async function testChariotConnection(
  * Priority: process.env.ELEVENLABS_API_KEY / process.env.XI_API_KEY -> persistent disk config (.data/ai-config.json)
  */
 export function getElevenLabsConfig(): ElevenLabsConfig {
+  const rawModel = process.env.ELEVENLABS_MODEL?.trim();
+  const defaultModel =
+    !rawModel || rawModel.includes("v4") || rawModel === "eleven_turbo_v2"
+      ? "eleven_turbo_v2_5"
+      : rawModel;
+
+  try {
+    const cfgPath = resolveConfigPath();
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed?.elevenLabsApiKey && typeof parsed.elevenLabsApiKey === "string" && parsed.elevenLabsApiKey.trim()) {
+        const diskModel =
+          !parsed.elevenLabsModel || String(parsed.elevenLabsModel).includes("v4")
+            ? defaultModel
+            : parsed.elevenLabsModel;
+        return {
+          elevenLabsApiKey: parsed.elevenLabsApiKey.trim(),
+          elevenLabsModel: diskModel,
+          source: "disk",
+        };
+      }
+    }
+  } catch {}
+
   const envKey = (
-    process.env.ELEVEN_LABS_API_KEY ||
     process.env.ELEVENLABS_API_KEY ||
+    process.env.ELEVEN_LABS_API_KEY ||
     process.env.XI_API_KEY
   )?.trim();
-  const rawModel = process.env.ELEVENLABS_MODEL?.trim();
-  const envModel =
-    !rawModel || rawModel === "eleven_turbo_v2_5" || rawModel === "eleven_turbo_v2"
-      ? "eleven_v4_turbo"
-      : rawModel;
 
   if (envKey) {
     return {
       elevenLabsApiKey: envKey,
-      elevenLabsModel: envModel,
+      elevenLabsModel: defaultModel,
       source: "env",
     };
   }
 
   return {
     elevenLabsApiKey: null,
-    elevenLabsModel: envModel,
+    elevenLabsModel: defaultModel,
     source: "none",
   };
 }
 
 /**
- * Updates ElevenLabs configuration in server memory without writing raw API keys to disk.
+ * Updates ElevenLabs configuration in server memory and persists to disk so a newly entered key takes immediate priority.
  */
 export function saveElevenLabsConfig(
   apiKey: string,
-  model: string = "eleven_v4_turbo"
+  model: string = "eleven_turbo_v2_5"
 ): void {
-  process.env.ELEVENLABS_API_KEY = apiKey.trim();
-  const cleanModel = model.trim();
-  process.env.ELEVENLABS_MODEL =
-    !cleanModel || cleanModel === "eleven_turbo_v2_5" ? "eleven_v4_turbo" : cleanModel;
+  const cleanKey = apiKey.trim();
+  const rawModel = model.trim();
+  const cleanModel = !rawModel || rawModel.includes("v4") ? "eleven_turbo_v2_5" : rawModel;
+  process.env.ELEVENLABS_API_KEY = cleanKey;
+  process.env.ELEVEN_LABS_API_KEY = cleanKey;
+  process.env.XI_API_KEY = cleanKey;
+  process.env.ELEVENLABS_MODEL = cleanModel;
+
+  try {
+    const cfgPath = resolveConfigPath();
+    const dir = path.dirname(cfgPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    let existing: Record<string, any> = {};
+    if (fs.existsSync(cfgPath)) {
+      try {
+        existing = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+      } catch {}
+    }
+    existing.elevenLabsApiKey = cleanKey;
+    existing.elevenLabsModel = cleanModel;
+    existing.updatedAt = new Date().toISOString();
+    fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2), "utf-8");
+  } catch {}
 }
 
 /**
@@ -609,7 +650,8 @@ export async function testElevenLabsConnection(
 ): Promise<ElevenLabsBenchmarkResult> {
   const cfg = getElevenLabsConfig();
   const apiKey = explicitKey?.trim() || cfg.elevenLabsApiKey;
-  const modelName = explicitModel?.trim() || cfg.elevenLabsModel || "eleven_v4_turbo";
+  const rawModel = explicitModel?.trim() || cfg.elevenLabsModel || "eleven_turbo_v2_5";
+  const modelName = rawModel.includes("v4") ? "eleven_turbo_v2_5" : rawModel;
 
   if (!apiKey) {
     return {
@@ -643,10 +685,10 @@ export async function testElevenLabsConnection(
       const errMsg = body?.detail?.message || body?.message || `HTTP ${res.status} from ElevenLabs API`;
 
       // Scoped ElevenLabs API keys often enable Text-to-Speech without `user_read` permission.
-      // Verify directly via a tiny TTS probe on `eleven_v4_turbo`.
+      // Verify directly via a tiny TTS probe on `eleven_turbo_v2_5`.
       if (res.status === 401 && (statusDetail === "missing_permissions" || /missing_permissions|user_read/i.test(errMsg))) {
         const ttsProbe = await fetch(
-          "https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB?output_format=mp3_44100_128",
+          "https://api.elevenlabs.io/v1/text-to-speech/pNInz6obpgDQGcFmaJgB?optimize_streaming_latency=3&output_format=mp3_44100_64",
           {
             method: "POST",
             headers: {
@@ -656,8 +698,8 @@ export async function testElevenLabsConnection(
             },
             body: JSON.stringify({
               text: "Ready.",
-              model_id: modelName || "eleven_v4_turbo",
-              voice_settings: { stability: 0.35, similarity_boost: 0.85 },
+              model_id: "eleven_turbo_v2_5",
+              voice_settings: { stability: 0.56, similarity_boost: 0.84, style: 0.18, use_speaker_boost: true },
             }),
           }
         );
@@ -667,8 +709,8 @@ export async function testElevenLabsConnection(
           return {
             ok: true,
             latencyMs: totalLatency,
-            model: modelName || "eleven_v4_turbo",
-            message: `ElevenLabs v4 Turbo connected and verified via live TTS probe (${totalLatency}ms).`,
+            model: "eleven_turbo_v2_5",
+            message: `ElevenLabs Turbo v2.5 connected and verified via live TTS probe (${totalLatency}ms).`,
           };
         }
       }

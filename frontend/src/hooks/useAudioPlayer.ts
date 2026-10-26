@@ -66,6 +66,8 @@ interface QueuedAudioItem {
  *  2. HTMLAudioElement fallback if decodeAudioData fails.
  *  3. Invokes onPlaybackFailed if both fail so the caller can fall back to SpeechSynthesis.
  */
+import { cancelHumanizedSpeech } from "@/lib/voice-synthesizer";
+
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const currentChunksRef = useRef<Uint8Array[]>([]);
@@ -76,16 +78,43 @@ export function useAudioPlayer() {
   const isPlayingRef = useRef(false);
   const isStartingPlaybackRef = useRef(false);
   const mutedRef = useRef(false);
+  const playbackGenRef = useRef(0);
 
   useEffect(() => {
     attachGlobalAudioUnlock();
   }, []);
 
+  const stopActiveHardwareOnly = useCallback(() => {
+    isStartingPlaybackRef.current = false;
+
+    if (activeSourceNodeRef.current) {
+      const src = activeSourceNodeRef.current;
+      activeSourceNodeRef.current = null;
+      src.onended = null;
+      try {
+        src.stop();
+        src.disconnect();
+      } catch {}
+    }
+
+    if (audioElementRef.current) {
+      const el = audioElementRef.current;
+      audioElementRef.current = null;
+      el.onended = null;
+      el.onerror = null;
+      el.oncanplay = null;
+      try {
+        el.pause();
+        el.currentTime = 0;
+      } catch {}
+    }
+  }, []);
+
   const playNextFromQueue = useCallback(() => {
     if (mutedRef.current) {
       queueRef.current = [];
+      stopActiveHardwareOnly();
       isPlayingRef.current = false;
-      isStartingPlaybackRef.current = false;
       setIsPlaying(false);
       return;
     }
@@ -106,11 +135,16 @@ export function useAudioPlayer() {
       return;
     }
 
+    // Ensure browser SpeechSynthesis is never speaking at the same time as Web Audio
+    cancelHumanizedSpeech();
+
+    const myGen = playbackGenRef.current;
     isStartingPlaybackRef.current = true;
     isPlayingRef.current = true;
     setIsPlaying(true);
 
     const advanceOrFinish = () => {
+      if (playbackGenRef.current !== myGen) return;
       isStartingPlaybackRef.current = false;
       activeSourceNodeRef.current = null;
       if (queueRef.current.length === 0) {
@@ -122,10 +156,12 @@ export function useAudioPlayer() {
     };
 
     const playViaHtmlAudio = () => {
-      if (mutedRef.current) {
+      if (mutedRef.current || playbackGenRef.current !== myGen) {
         advanceOrFinish();
         return;
       }
+
+      stopActiveHardwareOnly();
 
       const blob = new Blob([item.bytes.buffer.slice(item.bytes.byteOffset, item.bytes.byteOffset + item.bytes.byteLength) as ArrayBuffer], {
         type: item.mimeType,
@@ -154,7 +190,7 @@ export function useAudioPlayer() {
         if (audioElementRef.current === audio) {
           audioElementRef.current = null;
         }
-        if (failed && !mutedRef.current) {
+        if (failed && !mutedRef.current && playbackGenRef.current === myGen) {
           try {
             item.onPlaybackFailed?.();
           } catch {}
@@ -173,9 +209,9 @@ export function useAudioPlayer() {
       audio.src = url;
       isStartingPlaybackRef.current = false;
       audio.play().catch(() => {
-        if (cleanedUp || mutedRef.current) return;
+        if (cleanedUp || mutedRef.current || playbackGenRef.current !== myGen) return;
         setTimeout(() => {
-          if (cleanedUp || mutedRef.current) return;
+          if (cleanedUp || mutedRef.current || playbackGenRef.current !== myGen) return;
           audio.play().catch(() => cleanup(true));
         }, 40);
       });
@@ -196,17 +232,14 @@ export function useAudioPlayer() {
           ctx.state === "suspended" ? ctx.resume().catch(() => {}) : Promise.resolve();
 
         resumePromise.then(() => {
-          if (mutedRef.current) {
+          if (mutedRef.current || playbackGenRef.current !== myGen) {
             advanceOrFinish();
             return;
           }
-          // If the browser kept AudioContext suspended (e.g. hands-free voice wake word before any click),
-          // never start a BufferSourceNode on a suspended clock (it would produce no sound and never fire onended).
           if ((ctx.state as string) !== "running") {
             playViaHtmlAudio();
             return;
           }
-          // Copy buffer because decodeAudioData detaches the ArrayBuffer
           const arrayBufCopy = item.bytes.buffer.slice(
             item.bytes.byteOffset,
             item.bytes.byteOffset + item.bytes.byteLength
@@ -215,7 +248,7 @@ export function useAudioPlayer() {
           ctx
             .decodeAudioData(arrayBufCopy)
             .then((decodedBuffer) => {
-              if (mutedRef.current) {
+              if (mutedRef.current || playbackGenRef.current !== myGen) {
                 advanceOrFinish();
                 return;
               }
@@ -223,6 +256,10 @@ export function useAudioPlayer() {
                 playViaHtmlAudio();
                 return;
               }
+
+              // Stop any previous source node so two buffers can never overlap
+              stopActiveHardwareOnly();
+
               const source = ctx.createBufferSource();
               source.buffer = decodedBuffer;
               source.connect(ctx.destination);
@@ -260,7 +297,9 @@ export function useAudioPlayer() {
               }
             })
             .catch(() => {
-              playViaHtmlAudio();
+              if (playbackGenRef.current === myGen && !mutedRef.current) {
+                playViaHtmlAudio();
+              }
             });
         });
         return;
@@ -268,13 +307,30 @@ export function useAudioPlayer() {
     } catch {}
 
     playViaHtmlAudio();
-  }, []);
+  }, [stopActiveHardwareOnly]);
+
+  /** Stop playback immediately and clear the queue (used on barge-in or before a new utterance). */
+  const stop = useCallback(() => {
+    playbackGenRef.current += 1;
+    queueRef.current = [];
+    currentChunksRef.current = [];
+    currentFailCallbackRef.current = undefined;
+    stopActiveHardwareOnly();
+    cancelHumanizedSpeech();
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+  }, [stopActiveHardwareOnly]);
 
   /** Call when the backend signals voice.output.started (new utterance begins). */
   const beginUtterance = useCallback((onPlaybackFailed?: () => void) => {
+    // Hard-stop any previous utterance so two voices can NEVER collide!
+    playbackGenRef.current += 1;
+    queueRef.current = [];
+    stopActiveHardwareOnly();
+    cancelHumanizedSpeech();
     currentChunksRef.current = [];
     currentFailCallbackRef.current = onPlaybackFailed;
-  }, []);
+  }, [stopActiveHardwareOnly]);
 
   /** Call for each binary audio frame received from the backend. */
   const pushChunk = useCallback((data: ArrayBuffer) => {
@@ -317,45 +373,16 @@ export function useAudioPlayer() {
       combined[2] === 0x46 &&
       combined[3] === 0x46;
 
-    queueRef.current.push({
-      bytes: combined,
-      mimeType: isWav ? "audio/wav" : "audio/mpeg",
-      onPlaybackFailed,
-    });
+    // Replace queue with the latest utterance so stale utterances never stack up
+    queueRef.current = [
+      {
+        bytes: combined,
+        mimeType: isWav ? "audio/wav" : "audio/mpeg",
+        onPlaybackFailed,
+      },
+    ];
     playNextFromQueue();
   }, [playNextFromQueue]);
-
-  /** Stop playback immediately and clear the queue (used on barge-in). */
-  const stop = useCallback(() => {
-    queueRef.current = [];
-    currentChunksRef.current = [];
-    currentFailCallbackRef.current = undefined;
-    isStartingPlaybackRef.current = false;
-
-    if (activeSourceNodeRef.current) {
-      const src = activeSourceNodeRef.current;
-      activeSourceNodeRef.current = null;
-      src.onended = null;
-      try {
-        src.stop();
-        src.disconnect();
-      } catch {}
-    }
-
-    if (audioElementRef.current) {
-      const el = audioElementRef.current;
-      audioElementRef.current = null;
-      el.onended = null;
-      el.onerror = null;
-      el.oncanplay = null;
-      try {
-        el.pause();
-        el.currentTime = 0;
-      } catch {}
-    }
-    isPlayingRef.current = false;
-    setIsPlaying(false);
-  }, []);
 
   /** HARD stop for interrupts: stop now AND block all playback until unmute(). */
   const mute = useCallback(() => {

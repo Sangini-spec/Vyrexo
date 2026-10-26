@@ -322,6 +322,44 @@ export default function SettingsPage() {
     setTimeout(() => setProfileSaved(false), 3000);
   };
 
+  const previewCacheRef = useRef<Map<string, Blob>>(new Map());
+
+  // Pre-warm the active voice greeting on mount so "Test Greeting" plays near-instantaneously
+  useEffect(() => {
+    if (!user) return;
+    const sample = personalizeGreetingWithUsername(
+      "Hey! Great to see you. How's everything going with you today?",
+      "Hey, great to see you! How's everything going with you today?",
+      profile.username
+    );
+    const cacheKey = `${selectedVoice}:${speed}:${sample.spoken}`;
+    if (previewCacheRef.current.has(cacheKey)) return;
+
+    const timer = setTimeout(() => {
+      fetch("/api/voice/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: sample.spoken,
+          voice: selectedVoice,
+          emotion: "warm",
+          speed,
+        }),
+      })
+        .then(async (res) => {
+          if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
+            const blob = await res.blob();
+            if (blob.size > 200) {
+              previewCacheRef.current.set(cacheKey, blob);
+            }
+          }
+        })
+        .catch(() => {});
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [user, selectedVoice, speed, profile.username]);
+
   const handleTestGreeting = async () => {
     const sample = personalizeGreetingWithUsername(
       "Hey! Great to see you. How's everything going with you today?",
@@ -353,20 +391,32 @@ export default function SettingsPage() {
     cancelHumanizedSpeech();
     setPreviewingVoice(voiceId);
 
-    try {
-      const res = await fetch("/api/voice/speak", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: previewScript,
-          voice: voiceId,
-          emotion: "warm",
-          speed,
-        }),
-      });
+    const cacheKey = `${voiceId}:${speed}:${previewScript}`;
 
-      if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
-        const blob = await res.blob();
+    try {
+      let blob = previewCacheRef.current.get(cacheKey) || null;
+      if (!blob) {
+        const res = await fetch("/api/voice/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: previewScript,
+            voice: voiceId,
+            emotion: "warm",
+            speed,
+          }),
+        });
+
+        if (res.ok && res.headers.get("Content-Type")?.includes("audio")) {
+          const fetchedBlob = await res.blob();
+          if (fetchedBlob.size > 200) {
+            blob = fetchedBlob;
+            previewCacheRef.current.set(cacheKey, fetchedBlob);
+          }
+        }
+      }
+
+      if (blob) {
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         currentAudioRef.current = audio;

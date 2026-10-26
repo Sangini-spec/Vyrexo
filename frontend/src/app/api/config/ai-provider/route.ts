@@ -152,7 +152,7 @@ export async function POST(request: NextRequest) {
         ? getChariotConfig().chariotApiKey || ""
         : getOpenAIConfig().openAiApiKey || "");
     const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : undefined;
-    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_v4_turbo" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
+    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_turbo_v2_5" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
     const testOnly = Boolean(body.testOnly) || !explicitKey;
 
     if (!apiKey) {

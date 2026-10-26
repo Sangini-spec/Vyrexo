@@ -181,6 +181,25 @@ if (fs.existsSync(rootWorkspacesDir)) {
   }
 }
 
+// Ensure active ElevenLabs v2 config is persisted in /.data/ai-config.json so deployed Cloud Run has sub-second TTS
+const envElevenKey = (process.env.ELEVEN_LABS_API_KEY || process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY || "").trim();
+if (envElevenKey) {
+  fs.mkdirSync(rootDataDir, { recursive: true });
+  const aiConfigPath = path.join(rootDataDir, "ai-config.json");
+  let aiConfig = {};
+  if (fs.existsSync(aiConfigPath)) {
+    try {
+      aiConfig = JSON.parse(fs.readFileSync(aiConfigPath, "utf8"));
+    } catch {}
+  }
+  if (!aiConfig.elevenLabsApiKey) {
+    aiConfig.elevenLabsApiKey = envElevenKey;
+  }
+  aiConfig.elevenLabsModel = "eleven_turbo_v2_5";
+  aiConfig.updatedAt = new Date().toISOString();
+  fs.writeFileSync(aiConfigPath, JSON.stringify(aiConfig, null, 2) + "\n", "utf8");
+}
+
 if (fs.existsSync(rootDataDir)) {
   copyDereferenced(rootDataDir, path.join(stagingStandalone, ".data"));
 }

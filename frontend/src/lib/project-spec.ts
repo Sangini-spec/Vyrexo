@@ -530,14 +530,15 @@ export function isBareSilenceCommand(rawText: string): boolean {
   const cleaned = rawText
     .trim()
     .toLowerCase()
-    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
-    .replace(/\b(lyrics|lex|wrecks|rax|alex)$/i, "rex")
+    .replace(/\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|rick|brex|dex|tex|alex)\b/gi, "rex")
+    .replace(/\b(stop|pause|hey|hi|hello)\s+(next|text|red|max|ex)\b/gi, "$1 rex")
     .replace(/[.!?,;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned) return false;
 
-  return /^(?:(?:hey|hi|hello|yo|ok|okay|please|now)\s+)*(?:(?:rex)\s+)?(stop|stop\s+it|stop\s+now|stop\s+talking|stop\s+speaking|pause|pause\s+it|pause\s+now|wait|hold\s+on|hang\s+on|shut\s+up|be\s+quiet|quiet|hush|shush|silence|enough|that'?s\s+enough|thats\s+enough|mute)(?:\s+(?:rex|please|now|it|talking|speaking))*$/i.test(
+  // Match single or repeated stop/pause/silence commands (e.g. "stop rex", "please stop", "please pause", "stop rex please stop", "can you please stop")
+  return /^(?:(?:hey|hi|hello|yo|ok|okay|please|now|can\s+you|could\s+you|would\s+you|rex)\s+)*(?:(?:stop|stop\s+it|stop\s+now|stop\s+talking|stop\s+speaking|pause|pause\s+it|pause\s+now|wait|hold\s+on|hang\s+on|shut\s+up|be\s+quiet|quiet|hush|shush|silence|enough|that'?s\s+enough|thats\s+enough|mute)(?:\s+(?:rex|please|now|it|talking|speaking|for\s+a\s+moment|for\s+a\s+second))*[\s]*)+$/i.test(
     cleaned
   );
 }
@@ -781,10 +782,10 @@ export function isBuildTerminationCommand(rawText: string, isCurrentlyBuilding =
 }
 
 const INTERRUPT_EXTRACTION_REGEX =
-  /\b((?:(?:hey|hi|hello|ok|okay|yo)\s+rex\s*,?\s*)?(?:stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|wait\s+rex|rex\s+wait|hold\s+on\s+rex|rex\s+hold\s+on|shut\s+up(?:\s+rex)?|be\s+quiet(?:\s+rex)?|stop\s+building|stop\s+running|stop\s+working|stop\s+talking|stop\s+speaking|stop\s+it|stop\s+now|can\s+you\s+(?:please\s+)?stop|please\s+stop|terminate\s+the\s+build|cancel\s+the\s+build|cancel\s+that|withdraw\s+that|never\s*mind|nevermind|don'?t\s+build|do\s+not\s+build|i\s+(?:think\s+i\s+)?don'?t\s+want\s+to\s+(?:work\s+on|build|make|create|continue)|wait\s+(?:a\s+(?:second|minute|moment)|i\s+have\s+(?:something|more)|let\s+me)|hold\s+on\s+(?:a\s+(?:second|minute|moment)|i\s+have|let\s+me)|hang\s+on|i\s+have\s+something\s+else\s+to\s+(?:add|say)|let\s+me\s+(?:add|finish|speak|interrupt)|listen\s+to\s+me|hear\s+me\s+out|i\s+get\s+your\s+point|but\s+i\s+(?:think|want|feel|need|would|don'?t|do\s+not|mean|meant|have|get)|but\s+(?:what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(?:i\s+(?:think|want|need|don'?t|meant|changed)|let'?s|can\s+you|wait|stop|rex)|instead\s+(?:of\s+that|let'?s|i\s+want|can\s+you)|on\s+second\s+thought|change\s+of\s+plans|no\s+(?:rex|wait|stop|don'?t|i\s+(?:want|don'?t|meant))))\b/i;
+  /\b((?:(?:hey|hi|hello|ok|okay|yo|please)\s+(?:rex\s*,?\s*)?)?(?:stop\s+rex|pause\s+rex|rex\s+stop|rex\s+pause|rex\s+please\s+stop|rex\s+please\s+pause|please\s+stop(?:\s+rex)?|please\s+pause(?:\s+rex)?|stop\s+please|pause\s+please|wait\s+rex|rex\s+wait|hold\s+on\s+rex|rex\s+hold\s+on|shut\s+up(?:\s+rex)?|be\s+quiet(?:\s+rex)?|stop\s+building|stop\s+running|stop\s+working|stop\s+talking|stop\s+speaking|stop\s+it|stop\s+now|pause\s+it|pause\s+now|can\s+you\s+(?:please\s+)?(?:stop|pause)|could\s+you\s+(?:please\s+)?(?:stop|pause)|terminate\s+the\s+build|cancel\s+the\s+build|cancel\s+that|withdraw\s+that|never\s*mind|nevermind|don'?t\s+build|do\s+not\s+build|i\s+(?:think\s+i\s+)?don'?t\s+want\s+to\s+(?:work\s+on|build|make|create|continue)|wait\s+(?:a\s+(?:second|minute|moment)|i\s+have\s+(?:something|more)|let\s+me)|hold\s+on\s+(?:a\s+(?:second|minute|moment)|i\s+have|let\s+me)|hang\s+on|i\s+have\s+something\s+else\s+to\s+(?:add|say)|let\s+me\s+(?:add|finish|speak|interrupt)|listen\s+to\s+me|hear\s+me\s+out|i\s+get\s+your\s+point|but\s+i\s+(?:think|want|feel|need|would|don'?t|do\s+not|mean|meant|have|get)|but\s+(?:what\s+about|what\s+if|can\s+you|could\s+you|let'?s|actually|wait|instead|rex)|actually\s+(?:i\s+(?:think|want|need|don'?t|meant|changed)|let'?s|can\s+you|wait|stop|rex)|instead\s+(?:of\s+that|let'?s|i\s+want|can\s+you)|on\s+second\s+thought|change\s+of\s+plans|no\s+(?:rex|wait|stop|pause|don'?t|i\s+(?:want|don'?t|meant))))\b/i;
 
 const TAIL_BARE_STOP_REGEX =
-  /\b((?:(?:hey|hi|hello|ok|okay|please)\s+)?(?:rex\s+)?(?:stop|pause|wait|hold\s+on|hang\s+on|quiet|be\s+quiet|shut\s+up|hush|shush|silence|enough|cancel|abort|withdraw|never\s*mind|nevermind)(?:\s+(?:rex|please|now|it|running\s+it))?)\s*$/i;
+  /\b((?:(?:hey|hi|hello|ok|okay|please|can\s+you|could\s+you)\s+)*(?:rex\s+)?(?:please\s+)?(?:stop|pause|wait|hold\s+on|hang\s+on|quiet|be\s+quiet|shut\s+up|hush|shush|silence|enough|cancel|abort|withdraw|never\s*mind|nevermind)(?:\s+(?:rex|please|now|it|talking|speaking|running\s+it))*)\s*$/i;
 
 export function extractUserInterruptFromBuffer(rawTranscript: string): {
   matched: boolean;
@@ -797,7 +798,8 @@ export function extractUserInterruptFromBuffer(rawTranscript: string): {
 
   const normalized = rawTranscript
     .trim()
-    .replace(/\b(lyrics|lex|wrecks|rax|alex)\b/gi, "Rex");
+    .replace(/\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|rick|brex|dex|tex|alex)\b/gi, "Rex")
+    .replace(/\b(stop|pause|hey|hi|hello)\s+(next|text|red|max|ex)\b/gi, "$1 Rex");
 
   // 1. Check if the entire string is already a bare silence command, conversational withdrawal, or semantic build termination
   if (isBareSilenceCommand(normalized)) {

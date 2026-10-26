@@ -64,19 +64,27 @@ export function normalizeSpokenTranscript(
       .replace(/\b(whatsapp|what'?s\s+app|whats\s+app|watch\s+up|watts\s+up|what\s+sup|watsup)\b/gi, "what's up");
   }
 
-  // 2. Wake-word & "Rex" name smudges
+  // 2. Wake-word & "Rex" name smudges (including soft-spoken phonetic variants)
   text = text
-    .replace(/^(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs)\b/i, "Rex")
+    .replace(/^(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex)\b/i, "Rex")
     .replace(
-      /\b(hey|hi|hello|yo|ok|okay|dear)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|next|text)\b/gi,
+      /\b(hey|hi|hello|yo|ok|okay|dear)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/gi,
       "$1 Rex"
     )
     .replace(
-      /\b(what'?s\s+up|whats\s+up|sup|wassup|how\s+are\s+you|how'?s\s+it\s+going)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|next)\b/gi,
+      /\b(stop|pause|please\s+stop|please\s+pause|wait)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/gi,
+      "$1 Rex"
+    )
+    .replace(
+      /\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex)\s+(stop|pause|please\s+stop|please\s+pause|wait)\b/gi,
+      "Rex $2"
+    )
+    .replace(
+      /\b(what'?s\s+up|whats\s+up|sup|wassup|how\s+are\s+you|how'?s\s+it\s+going)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next)\b/gi,
       "$1, Rex"
     )
     .replace(
-      /\b(lyrics|lex|wrecks|rax|racks)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you|could\s+you|please|sing|say)\b/gi,
+      /\b(lyrics|lex|wrecks|rax|racks|rick|lex)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you|could\s+you|please|sing|say)\b/gi,
       "Rex, $2"
     );
 

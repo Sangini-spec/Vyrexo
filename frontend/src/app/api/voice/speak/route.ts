@@ -32,26 +32,30 @@ function setCachedAudio(key: string, buffer: Buffer, contentType: string = "audi
   voiceAudioCache.set(key, { buffer, contentType, timestamp: Date.now() });
 }
  
-// Cooldown timestamp for ElevenLabs monthly quota or credit exhaustion
-// Automatically resets if the configured API key changes
+// Per-key cooldown map for ElevenLabs monthly quota or credit exhaustion
+// Ensures a newly integrated API key has 0 cooldown even if a previous key was exhausted
 const globalForVoice = globalThis as unknown as {
-  __vyrexoElevenLabsQuotaExhaustedUntil?: number;
-  __vyrexoElevenLabsCooldownKey?: string;
+  __vyrexoElevenLabsKeyCooldowns?: Map<string, number>;
 };
 
-function getElevenLabsCooldownUntil(currentKey?: string | null): number {
-  if (currentKey && globalForVoice.__vyrexoElevenLabsCooldownKey && globalForVoice.__vyrexoElevenLabsCooldownKey !== currentKey) {
-    globalForVoice.__vyrexoElevenLabsQuotaExhaustedUntil = 0;
-    globalForVoice.__vyrexoElevenLabsCooldownKey = currentKey;
-    return 0;
+function getCooldownMap(): Map<string, number> {
+  if (!globalForVoice.__vyrexoElevenLabsKeyCooldowns) {
+    globalForVoice.__vyrexoElevenLabsKeyCooldowns = new Map<string, number>();
   }
-  return globalForVoice.__vyrexoElevenLabsQuotaExhaustedUntil || 0;
+  return globalForVoice.__vyrexoElevenLabsKeyCooldowns;
+}
+
+function getElevenLabsCooldownUntil(currentKey?: string | null): number {
+  if (!currentKey) return 0;
+  return getCooldownMap().get(currentKey.trim()) || 0;
 }
 
 function setElevenLabsCooldownUntil(ts: number, currentKey?: string | null): void {
-  globalForVoice.__vyrexoElevenLabsQuotaExhaustedUntil = ts;
-  if (currentKey) {
-    globalForVoice.__vyrexoElevenLabsCooldownKey = currentKey;
+  if (!currentKey) return;
+  if (ts <= 0) {
+    getCooldownMap().delete(currentKey.trim());
+  } else {
+    getCooldownMap().set(currentKey.trim(), ts);
   }
 }
 
@@ -105,69 +109,61 @@ interface ElevenLabsSynthResult {
   error?: string;
 }
 
-// Synthesizes speech using ElevenLabs v4 Turbo API (Primary engine with low-latency real-time conversation & deep emotional awareness)
+// Synthesizes speech using ElevenLabs v2 Turbo API exclusively (zero v4 usage; ultra-low latency ~200-450ms & 50% lower credit usage)
 async function synthesizeWithElevenLabs(
   text: string,
   apiKey: string,
-  modelId: string = "eleven_v4_turbo",
+  modelId: string = "eleven_turbo_v2_5",
   voiceId?: string,
   emotion?: string
 ): Promise<ElevenLabsSynthResult> {
   const elevenVoiceId = mapElevenLabsVoice(voiceId);
-  const primaryModel =
-    !modelId || modelId === "eleven_turbo_v2_5" || modelId === "eleven_turbo_v2"
-      ? "eleven_v4_turbo"
+  // Strictly enforce v2 models only (never v4)
+  const normalizedModel =
+    !modelId || modelId.includes("v4") || modelId === "eleven_turbo_v2"
+      ? "eleven_turbo_v2_5"
       : modelId;
 
-  // Emotional tuning tailored for eleven_v4_turbo:
-  // Lower stability unlocks v4's expressive prosody, natural breath micro-inflections, and emotive warmth
-  let stability = 0.35;
-  let similarityBoost = 0.85;
-  let style = 0.42;
+  // Clean studio-grade stability (0.52-0.64) and controlled style (0.14-0.22):
+  // Prevents ElevenLabs from generating breathy "hush / sigh / static buffer" artifacts during sentence pauses!
+  let stability = 0.56;
+  let similarityBoost = 0.84;
+  let style = 0.18;
 
   if (emotion === "empathetic") {
-    stability = 0.28; // Deep emotional nuance, gentle compassionate tone, patient warmth
-    style = 0.65;
-    similarityBoost = 0.88;
+    stability = 0.54;
+    style = 0.20;
+    similarityBoost = 0.85;
   } else if (emotion === "upbeat" || emotion === "enthusiastic" || emotion === "celebratory") {
-    stability = 0.32; // Dynamic, lively, smiling vocal energy
-    style = 0.55;
+    stability = 0.52;
+    style = 0.22;
     similarityBoost = 0.84;
   } else if (emotion === "calm" || emotion === "thoughtful") {
-    stability = 0.48; // Smooth, steady, focused cadence
-    style = 0.25;
-    similarityBoost = 0.86;
+    stability = 0.64;
+    style = 0.14;
+    similarityBoost = 0.85;
   }
 
-  // Try primary model (eleven_v4_turbo), with automatic in-place fallback to eleven_turbo_v2_5
-  // if the account/voice ever rejects v4 model_id validation, guaranteeing zero hindrance.
+  // Strictly v2 models only: eleven_turbo_v2_5 primary, eleven_multilingual_v2 secondary
   const candidateModels =
-    primaryModel === "eleven_v4_turbo"
-      ? ["eleven_v4_turbo", "eleven_turbo_v2_5"]
-      : [primaryModel, "eleven_v4_turbo"];
+    normalizedModel === "eleven_turbo_v2_5"
+      ? ["eleven_turbo_v2_5", "eleven_multilingual_v2"]
+      : [normalizedModel, "eleven_turbo_v2_5"];
+
+  const voiceSettings = {
+    stability,
+    similarity_boost: similarityBoost,
+    style,
+    use_speaker_boost: true,
+  };
 
   for (const activeModel of candidateModels) {
-    const isV4Model = activeModel.includes("v4");
-
-    // eleven_v4_turbo uses { stability, similarity_boost } natively; legacy v2 models also accept { style, use_speaker_boost }
-    const voiceSettings = isV4Model
-      ? {
-          stability,
-          similarity_boost: similarityBoost,
-        }
-      : {
-          stability,
-          similarity_boost: similarityBoost,
-          style,
-          use_speaker_boost: true,
-        };
-
     try {
       const abortCtrl = new AbortController();
-      const timeout = setTimeout(() => abortCtrl.abort(), 38000);
+      const timeout = setTimeout(() => abortCtrl.abort(), 6500);
 
       const res = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}?output_format=mp3_44100_128`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}?optimize_streaming_latency=3&output_format=mp3_44100_64`,
         {
           method: "POST",
           headers: {
@@ -204,7 +200,6 @@ async function synthesizeWithElevenLabs(
           /quota_exceeded|credit|insufficient|character_limit|invalid_api_key/i.test(errDetail);
 
         if (isQuotaOrCredits) {
-          // Mark quota cooldown for 2 minutes (auto-resetting if API key changes) so pipeline routes to Gemini TTS
           setElevenLabsCooldownUntil(Date.now() + 120000, apiKey);
           console.warn(
             `[TTS Pipeline] ElevenLabs monthly credits or quota exceeded (HTTP ${res.status}). Switching immediately to Google Gemini API TTS.`
@@ -212,7 +207,6 @@ async function synthesizeWithElevenLabs(
           return { buffer: null, quotaExceeded: true, error: errDetail };
         }
 
-        // If v4 returned a model validation error (e.g. 400/404/422), continue loop to try fallback model seamlessly
         console.warn(
           `[VoiceSpeak] ElevenLabs ${activeModel} response (${res.status}):`,
           errJson
@@ -493,15 +487,14 @@ async function synthesizeWithGeminiTTS(
   const segments = splitTextForGeminiSegments(expressiveSpeechText, 380);
   if (segments.length === 0) return { buffer: null };
 
-  // Fast model sequence for reliable, low-latency TTS
-  const candidateModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+  // Verified low-latency Gemini TTS model with strict 4.5s timeout so fallback never hangs
+  const candidateModels = ["gemini-2.5-flash-preview-tts"];
 
   for (const model of candidateModels) {
     try {
-      // Synthesize all segments in parallel to minimize latency on long responses
       const segmentResults = await Promise.all(
         segments.map(async (seg) => {
-          const response = await ai.models.generateContent({
+          const callPromise = ai.models.generateContent({
             model,
             contents: [
               {
@@ -524,6 +517,13 @@ async function synthesizeWithGeminiTTS(
               },
             },
           });
+
+          const timeoutPromise = new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), 4500)
+          );
+
+          const response: any = await Promise.race([callPromise, timeoutPromise]);
+          if (!response) return null;
 
           const candidate = response.candidates?.[0];
           const parts = candidate?.content?.parts || [];
@@ -560,10 +560,10 @@ async function synthesizeWithGeminiTTS(
 export async function GET() {
   const elevenConfig = getElevenLabsConfig();
   const activeKey =
-    process.env.ELEVEN_LABS_API_KEY?.trim() ||
+    elevenConfig.elevenLabsApiKey ||
     process.env.ELEVENLABS_API_KEY?.trim() ||
-    process.env.XI_API_KEY?.trim() ||
-    elevenConfig.elevenLabsApiKey;
+    process.env.ELEVEN_LABS_API_KEY?.trim() ||
+    process.env.XI_API_KEY?.trim();
   const hasEleven = Boolean(activeKey);
   const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
   const cooldownUntil = getElevenLabsCooldownUntil(activeKey);
@@ -572,7 +572,7 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     primaryProvider: "elevenlabs",
-    primaryModel: elevenConfig.elevenLabsModel || "eleven_v4_turbo",
+    primaryModel: elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
     primaryStatus: hasEleven ? (isCooldown ? "monthly_credits_exhausted" : "active") : "unconfigured",
     emotionalVoiceEngine: "attached",
     fallbackProvider: "gemini",
@@ -619,25 +619,33 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ── TIER 1: ElevenLabs v4 Turbo TTS (Primary, Server-Side Emotional Voice Engine) ──
+    // ── TIER 1: ElevenLabs Turbo TTS (Primary, Server-Side Emotional Voice Engine) ──
     const elevenConfig = getElevenLabsConfig();
-    const activeElevenKey =
-      process.env.ELEVEN_LABS_API_KEY?.trim() ||
-      process.env.ELEVENLABS_API_KEY?.trim() ||
-      process.env.XI_API_KEY?.trim() ||
-      elevenConfig.elevenLabsApiKey;
+    const candidateElevenKeys = Array.from(
+      new Set(
+        [
+          elevenConfig.elevenLabsApiKey,
+          process.env.ELEVENLABS_API_KEY?.trim(),
+          process.env.ELEVEN_LABS_API_KEY?.trim(),
+          process.env.ELEVENLABS_API_KEY_2?.trim(),
+          process.env.ELEVEN_LABS_API_KEY_2?.trim(),
+          process.env.XI_API_KEY?.trim(),
+        ].filter((k): k is string => Boolean(k && k.trim()))
+      )
+    );
 
     let fallbackReason: string | undefined;
 
-    if (activeElevenKey) {
-      if (Date.now() < getElevenLabsCooldownUntil(activeElevenKey)) {
-        // Cooldown active: ElevenLabs monthly quota or credits are known to be exhausted
-        fallbackReason = "elevenlabs_monthly_quota_exceeded";
-      } else {
+    if (candidateElevenKeys.length > 0) {
+      for (const candidateKey of candidateElevenKeys) {
+        if (Date.now() < getElevenLabsCooldownUntil(candidateKey)) {
+          fallbackReason = "elevenlabs_monthly_quota_exceeded";
+          continue;
+        }
         const elevenResult = await synthesizeWithElevenLabs(
           cleanText,
-          activeElevenKey,
-          elevenConfig.elevenLabsModel || "eleven_v4_turbo",
+          candidateKey,
+          elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
           voiceId,
           emotion
         );
@@ -650,7 +658,7 @@ export async function POST(req: NextRequest) {
               "Content-Type": "audio/mpeg",
               "Content-Length": elevenResult.buffer.byteLength.toString(),
               "X-TTS-Provider": "elevenlabs",
-              "X-TTS-Model": elevenResult.modelUsed || "eleven_v4_turbo",
+              "X-TTS-Model": elevenResult.modelUsed || "eleven_turbo_v2_5",
               "Cache-Control": "no-cache",
             },
           });
@@ -677,28 +685,13 @@ export async function POST(req: NextRequest) {
           "Content-Length": geminiResult.buffer.byteLength.toString(),
           "X-TTS-Provider": "gemini",
           "X-TTS-Fallback-Reason": fallbackReason || "elevenlabs_quota_exceeded",
-          "X-TTS-Gemini-Model": geminiResult.modelUsed || "gemini-3.8-flash-lite-tts",
+          "X-TTS-Gemini-Model": geminiResult.modelUsed || "gemini-2.5-flash-preview-tts",
           "Cache-Control": "no-cache",
         },
       });
     }
 
-    // ── TIER 3: Edge Neural TTS (Safety Net) ──
-    const edgeAudio = await synthesizeWithEdgeTTS(cleanText, voiceId, emotion, speed);
-    if (edgeAudio && edgeAudio.byteLength > 200) {
-      setCachedAudio(cacheKey, edgeAudio, "audio/mpeg");
-      return new Response(edgeAudio as unknown as BodyInit, {
-        status: 200,
-        headers: {
-          "Content-Type": "audio/mpeg",
-          "Content-Length": edgeAudio.byteLength.toString(),
-          "X-TTS-Provider": "edge-neural",
-          "X-TTS-Fallback-Reason": fallbackReason || "elevenlabs_and_gemini_unavailable",
-          "Cache-Control": "no-cache",
-        },
-      });
-    }
-
+    // Immediate browser fallback (never block on 18s external Edge WebSocket timeout)
     return NextResponse.json({ ok: false, fallback: "browser", reason: fallbackReason || "tts_unavailable" });
   } catch (err: any) {
     return NextResponse.json(
