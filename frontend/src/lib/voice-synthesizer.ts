@@ -429,29 +429,29 @@ export function calculateAcousticParams(
 ): { pitch: number; rate: number } {
   const profile = VOICE_PROFILES[settings.voice] || VOICE_PROFILES.adam;
 
-  let speedMultiplier = 1.0;
-  if (settings.speed === "slow") speedMultiplier = 0.94;
-  if (settings.speed === "fast") speedMultiplier = 1.15;
+  let speedMultiplier = 0.94;
+  if (settings.speed === "slow") speedMultiplier = 0.86;
+  if (settings.speed === "fast") speedMultiplier = 1.06;
 
   let emotionPitchOffset = 0.0;
   let emotionRateOffset = 0.0;
 
   switch (settings.emotion) {
     case "upbeat":
-      emotionPitchOffset = +0.04;
-      emotionRateOffset = +0.04;
+      emotionPitchOffset = +0.03;
+      emotionRateOffset = +0.01;
       break;
     case "warm":
-      emotionPitchOffset = +0.02;
-      emotionRateOffset = +0.01;
+      emotionPitchOffset = +0.01;
+      emotionRateOffset = 0.0;
       break;
     case "calm":
       emotionPitchOffset = -0.02;
-      emotionRateOffset = -0.02;
+      emotionRateOffset = -0.03;
       break;
     case "empathetic":
       emotionPitchOffset = +0.01;
-      emotionRateOffset = 0.0;
+      emotionRateOffset = -0.02;
       break;
   }
 
@@ -461,8 +461,8 @@ export function calculateAcousticParams(
     basePitch = 0.88;
   }
 
-  const finalPitch = Math.max(0.80, Math.min(1.25, basePitch + emotionPitchOffset));
-  const finalRate = Math.max(1.0, Math.min(1.28, profile.baseRate * speedMultiplier + emotionRateOffset));
+  const finalPitch = Math.max(0.80, Math.min(1.20, basePitch + emotionPitchOffset));
+  const finalRate = Math.max(0.88, Math.min(1.12, profile.baseRate * speedMultiplier + emotionRateOffset));
 
   return { pitch: finalPitch, rate: finalRate };
 }

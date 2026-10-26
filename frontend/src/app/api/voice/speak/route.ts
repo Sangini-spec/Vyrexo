@@ -124,23 +124,23 @@ async function synthesizeWithElevenLabs(
       ? "eleven_turbo_v2_5"
       : modelId;
 
-  // Clean studio-grade stability (0.52-0.64) and controlled style (0.14-0.22):
-  // Prevents ElevenLabs from generating breathy "hush / sigh / static buffer" artifacts during sentence pauses!
-  let stability = 0.56;
+  // Composed, natural studio-grade stability (0.62-0.70) and subtle style (0.10-0.16):
+  // Prevents ElevenLabs from rushing through sentence endings or producing breathy static artifacts!
+  let stability = 0.65;
   let similarityBoost = 0.84;
-  let style = 0.18;
+  let style = 0.12;
 
   if (emotion === "empathetic") {
-    stability = 0.54;
-    style = 0.20;
-    similarityBoost = 0.85;
-  } else if (emotion === "upbeat" || emotion === "enthusiastic" || emotion === "celebratory") {
-    stability = 0.52;
-    style = 0.22;
-    similarityBoost = 0.84;
-  } else if (emotion === "calm" || emotion === "thoughtful") {
     stability = 0.64;
     style = 0.14;
+    similarityBoost = 0.85;
+  } else if (emotion === "upbeat" || emotion === "enthusiastic" || emotion === "celebratory") {
+    stability = 0.62;
+    style = 0.16;
+    similarityBoost = 0.84;
+  } else if (emotion === "calm" || emotion === "thoughtful") {
+    stability = 0.70;
+    style = 0.10;
     similarityBoost = 0.85;
   }
 
@@ -160,10 +160,10 @@ async function synthesizeWithElevenLabs(
   for (const activeModel of candidateModels) {
     try {
       const abortCtrl = new AbortController();
-      const timeout = setTimeout(() => abortCtrl.abort(), 6500);
+      const timeout = setTimeout(() => abortCtrl.abort(), 7500);
 
       const res = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}?optimize_streaming_latency=3&output_format=mp3_44100_64`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${elevenVoiceId}?optimize_streaming_latency=1&output_format=mp3_44100_64`,
         {
           method: "POST",
           headers: {

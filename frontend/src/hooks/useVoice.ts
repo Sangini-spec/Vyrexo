@@ -173,13 +173,14 @@ export function useVoice({
   const commitFallbackAudioRef = useRef<() => void>(() => {});
   const resetActiveInactivityTimerRef = useRef<() => void>(() => {});
 
-  const ECHO_COOLDOWN_MS = 380;
+  const ECHO_COOLDOWN_MS = 1400;
 
   useEffect(() => {
-    // Only ignore a stale isAiSpeaking=true within 300ms of an interrupt while muteAudio flushes.
+    // Only ignore a stale isAiSpeaking=true within 500ms of an interrupt while muteAudio flushes.
     // Once Rex genuinely starts speaking a new response (or after a turn completes), isAiSpeakingRef
     // MUST become true so the user can barge in again and again on every subsequent turn!
-    const justInterrupted = Date.now() - lastInterruptTimeRef.current < 300;
+    const timeSinceInterrupt = Date.now() - lastInterruptTimeRef.current;
+    const justInterrupted = timeSinceInterrupt < 500;
     if (justInterrupted && isAiSpeaking) {
       isAiSpeakingRef.current = false;
       wasAiSpeakingRef.current = false;
@@ -195,10 +196,13 @@ export function useVoice({
       }
     } else if (wasAiSpeakingRef.current && !isAiSpeaking) {
       lastAiSpeechEndTimeRef.current = Date.now();
-      consumeCurrentRecognitionBuffer();
-      if (turnSilenceTimerRef.current) {
-        clearTimeout(turnSilenceTimerRef.current);
-        turnSilenceTimerRef.current = null;
+      // Only clear recognition buffer if Rex finished speaking naturally (NOT when user just barged in!)
+      if (timeSinceInterrupt > 4000) {
+        consumeCurrentRecognitionBuffer();
+        if (turnSilenceTimerRef.current) {
+          clearTimeout(turnSilenceTimerRef.current);
+          turnSilenceTimerRef.current = null;
+        }
       }
       resetActiveInactivityTimerRef.current();
     }
@@ -604,11 +608,11 @@ export function useVoice({
             else interimText += deltaSlice;
           } else if (
             !isDeltaSelfEcho &&
-            (deltaWords.length >= 3 || (deltaWords.length >= 2 && startsWithExplicitUserBargeLead))
+            (deltaWords.length >= 5 || (deltaWords.length >= 2 && startsWithExplicitUserBargeLead))
           ) {
             // Phrase-Independent Barge-In:
-            // Requires either 3+ non-echo words or 2+ words starting with a clear user barge-in lead
-            // so 1-2 word speaker bleed during Rex's sentence pauses never triggers a false barge-in!
+            // Requires either 2+ words starting with an explicit user barge-in lead ("no...", "wait...", "can you...", "hey rex...")
+            // or 5+ non-echo words so 1-4 word speaker echoes ("Looking", "Absolutely", "Typing into today") NEVER trigger a false barge-in!
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             bleedPrefixLengthRef.current[i] = prevBleedLen;
@@ -717,7 +721,7 @@ export function useVoice({
           if (turnSilenceTimerRef.current) {
             clearTimeout(turnSilenceTimerRef.current);
           }
-          const wakePauseMs = spokenFinal ? 500 : 850;
+          const wakePauseMs = spokenFinal ? 550 : 900;
           turnSilenceTimerRef.current = setTimeout(() => {
             if (modeRef.current !== "active_conversation" || isAiSpeakingRef.current) return;
             const fullText = accumulatedTurnRef.current.trim();
@@ -770,8 +774,8 @@ export function useVoice({
           }
         }
 
-        // 3. Accumulate spoken text across comma pauses (so "Never mind, stop building it. I don't want to work on this application"
-        // or "No I think we should..." is captured in full without being cut off at the first pause!)
+        // 3. Accumulate spoken text across comma pauses (so multi-sentence riddles, stories, or thoughts
+        // are captured in full without being cut off at the first pause!)
         if (finalText) {
           const trimmedFinal = (isBareStopCommand(finalText) ? finalText : stripWake(finalText)).trim();
           if (trimmedFinal) {
@@ -812,7 +816,7 @@ export function useVoice({
           }
         }
 
-        // 4. Adaptive Low-Latency Conversational Turn Detection
+        // 4. Adaptive Conversational Turn Detection (gives natural breathing room for multi-sentence thoughts)
         // Only clear turnSilenceTimerRef when we have either combinedLive or hasStandaloneWakeWord to reschedule it
         if (combinedLive.length > 0 || hasStandaloneWakeWord) {
           if (turnSilenceTimerRef.current) {
@@ -825,7 +829,7 @@ export function useVoice({
         const wordCount = lowerLive.split(/\s+/).filter(Boolean).length;
 
         const endsWithFillerOrConnector =
-          /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of|think|want|need|feel|believe|mean|know|say|said|ask|wonder|hope|guess|suppose|suggest|recommend|prefer|if|whether|when|where|why|how|what|which|who|about|from|into|by|as)\s*$/i.test(
+          /\b(um|uh|ah|er|erm|hmm|like|and|or|so|with|for|to|but|because|that|selling|buying|only|also|then|as well as|in|on|at|of|think|want|need|feel|believe|mean|know|say|said|ask|wonder|hope|guess|suppose|suggest|recommend|prefer|if|whether|when|where|why|how|what|which|who|about|from|into|by|as|let\s+us\s+see|let's\s+see|there\s+is|there\s+are|one\s+has|another\s+has|third\s+one)\s*$/i.test(
             lowerLive
           ) ||
           /^(um|uh|ah|er|hmm|like|and|or|so|no|yes|yeah|well|actually|wait|hold on|hey|ok|okay)\b$/i.test(
@@ -842,22 +846,23 @@ export function useVoice({
         const isCompleteBareStop = isBareStopCommand(lowerLive);
         const hasFinalizedClause = Boolean(finalText) && !cleanInterim;
 
-        let pauseDurationMs = 1250;
+        let pauseDurationMs = 1850;
         if (isCompleteBareStop && hasFinalizedClause) {
           pauseDurationMs = 350;
-        } else if (isShortGreetingOrReply && hasFinalizedClause) {
-          pauseDurationMs = 450;
         } else if (isCompleteBareStop) {
           pauseDurationMs = 450;
+        } else if (isShortGreetingOrReply && hasFinalizedClause) {
+          pauseDurationMs = 700;
         } else if (isShortGreetingOrReply) {
-          pauseDurationMs = 850;
+          pauseDurationMs = 950;
         } else if (hasFinalizedClause && !endsWithFillerOrConnector && wordCount >= 4) {
-          pauseDurationMs = 1200;
+          // Give 1.85s of natural breathing room between sentences so multi-sentence questions/riddles are never cut off early!
+          pauseDurationMs = 1850;
         } else if (hasFinalizedClause && !endsWithFillerOrConnector) {
-          // Short 1-3 word clause like "No I think" — give extra breathing room so the user can finish their sentence
-          pauseDurationMs = 1750;
+          // Short 1-3 word clause — give extra breathing room so the user can finish their sentence
+          pauseDurationMs = 2200;
         } else {
-          pauseDurationMs = 2100;
+          pauseDurationMs = 2500;
         }
 
         if (combinedLive.length > 0) {

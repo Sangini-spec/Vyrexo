@@ -354,24 +354,65 @@ function checkIsSelfEcho(
   const now = Date.now();
   const maxAgeMs = isRexSpeakingNow ? 60000 : 25000;
 
+  // Words that a user legitimately says as a 1-word reply or wake command (never treat as echo unless Rex is mid-sentence)
+  const legitimateSingleWordUserReplies = new Set([
+    "rex",
+    "hey",
+    "hi",
+    "hello",
+    "stop",
+    "pause",
+    "wait",
+    "cancel",
+    "yes",
+    "yeah",
+    "yep",
+    "no",
+    "nope",
+    "okay",
+    "ok",
+    "sure",
+  ]);
+
   for (const { text: aiText, time } of recentAiUtterances) {
-    if (now - time > maxAgeMs) continue;
+    const ageMs = now - time;
+    if (ageMs > maxAgeMs) continue;
     const cleanAi = aiText.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
     if (!cleanAi) continue;
+    const aiWordsSet = new Set(cleanAi.split(/\s+/).filter((w) => w.length > 1));
+
+    // 0. 1-word or 2-word speaker echo check (e.g. "Looking", "Absolutely", "Today" picked up from Rex's own speech):
+    // When Rex is speaking or finished within the last 12 seconds, any 1-2 word fragment whose words appear in Rex's speech is speaker bleed!
+    if ((isRexSpeakingNow || ageMs < 12000) && inputWords.length <= 2 && !startsWithExplicitUserOpener) {
+      if (inputWords.length === 1) {
+        const w = inputWords[0];
+        if (!legitimateSingleWordUserReplies.has(w) && aiWordsSet.has(w)) {
+          return true;
+        }
+        // Even words like "absolutely" or "looking" when Rex literally just said them
+        if (aiWordsSet.has(w) && (isRexSpeakingNow || ageMs < 8000) && w.length >= 5) {
+          return true;
+        }
+      } else if (inputWords.length === 2) {
+        if (cleanAi.includes(cleanInput) || (aiWordsSet.has(inputWords[0]) && aiWordsSet.has(inputWords[1]))) {
+          return true;
+        }
+      }
+    }
 
     // 1. Direct contiguous substring check:
-    // While Rex is actively speaking, any 2+ word non-opener phrase (>= 7 chars) that verbatim matches Rex's text is speaker bleed.
-    if (isRexSpeakingNow && !startsWithExplicitUserOpener && inputWords.length >= 2 && cleanInput.length >= 7 && cleanAi.includes(cleanInput)) {
+    if (isRexSpeakingNow && !startsWithExplicitUserOpener && inputWords.length >= 2 && cleanInput.length >= 6 && cleanAi.includes(cleanInput)) {
       return true;
     }
     if (
-      (inputWords.length >= 4 || (inputWords.length >= 3 && !startsWithExplicitUserOpener && cleanInput.length >= 12)) &&
+      (inputWords.length >= 3 || (inputWords.length >= 2 && !startsWithExplicitUserOpener && cleanInput.length >= 8)) &&
       cleanAi.includes(cleanInput)
     ) {
       return true;
     }
 
-    // 2. Contiguous 2-word bigram overlap check (requires words in the SAME adjacent order as Rex's speech)
+    // 2. Contiguous 2-word bigram overlap check (catches phonetic ASR mishearings like "Typing into today" from Rex's "diving into today"):
+    // If a short 3-4 word phrase shares at least 1 contiguous bigram ("into today") with Rex's speech while Rex is speaking or just finished, it is speaker echo!
     if (inputWords.length >= 3 && (!startsWithExplicitUserOpener || inputWords.length >= 4)) {
       let matchingBigrams = 0;
       const totalBigrams = inputWords.length - 1;
@@ -381,8 +422,22 @@ function checkIsSelfEcho(
           matchingBigrams++;
         }
       }
-      if (matchingBigrams / totalBigrams >= 0.75) {
+      if (
+        matchingBigrams / totalBigrams >= 0.65 ||
+        ((isRexSpeakingNow || ageMs < 10000) && inputWords.length <= 4 && matchingBigrams >= 1)
+      ) {
         return true;
+      }
+
+      // 3. Word-level overlap check for 3-5 word fragments during/right after Rex's speech:
+      if ((isRexSpeakingNow || ageMs < 10000) && inputWords.length <= 5 && !startsWithExplicitUserOpener) {
+        let matchingWords = 0;
+        for (const w of inputWords) {
+          if (aiWordsSet.has(w)) matchingWords++;
+        }
+        if (matchingWords / inputWords.length >= 0.66) {
+          return true;
+        }
       }
     }
   }
@@ -1687,12 +1742,13 @@ export default function App() {
   }, []);
 
   const handleCheckSelfEcho = useCallback((candidateText: string) => {
-    const speakingNow =
+    const speakingOrRecent =
       isPlayingRef.current ||
       speakingRef.current ||
       wasPlayingRef.current ||
-      isSynthesizingVoiceRef.current;
-    return checkIsSelfEcho(candidateText, recentAiSpeechRef.current, speakingNow);
+      isSynthesizingVoiceRef.current ||
+      Date.now() - lastRexSpeechEndTimeRef.current < 3000;
+    return checkIsSelfEcho(candidateText, recentAiSpeechRef.current, speakingOrRecent);
   }, []);
 
   // ── Voice: wake word "Rex" + continuous conversation + phrase-independent barge-in ────────
@@ -1703,27 +1759,38 @@ export default function App() {
       const raw = normalizedLive.trim();
       if (!raw) return;
 
-      // Extract clean user utterance if preceded by any speaker bleed
-      const extracted = extractUserInterruptFromBuffer(raw);
-      const effectiveRaw = extracted.matched ? extracted.extractedText : raw;
-      const lower = effectiveRaw.toLowerCase().replace(/[.!?,]/g, "").trim();
-      const isStop = extracted.matched || isStopPhrase(lower);
-      const isBareStop = isPureBareStop(lower);
-      const wasBuildingRecently =
-        isBuildingRef.current || Date.now() - lastBuildInterruptedTimeRef.current < 6000;
-      const isBuildTermination = isBuildTerminationCommand(effectiveRaw, wasBuildingRecently);
-
       const rexSpeakingNow =
         audioIsPlaying ||
         isPlayingRef.current ||
         speakingRef.current ||
         wasPlayingRef.current ||
         isSynthesizingVoiceRef.current;
+      const inRecentEchoWindow = rexSpeakingNow || Date.now() - lastRexSpeechEndTimeRef.current < 2500;
+
+      // Only extract a user interrupt from a speaker-bleed buffer when Rex is actively speaking or in echo window,
+      // OR when the entire phrase is a bare stop/pause command — NEVER slice a user's normal multi-sentence conversation!
+      const extracted = extractUserInterruptFromBuffer(raw);
+      const shouldUseExtracted =
+        extracted.matched &&
+        (extracted.isBareSilence ||
+          inRecentEchoWindow ||
+          checkIsSelfEcho(
+            raw.slice(0, Math.max(0, raw.toLowerCase().lastIndexOf(extracted.extractedText.toLowerCase()))),
+            recentAiSpeechRef.current,
+            true
+          ));
+      const effectiveRaw = shouldUseExtracted ? extracted.extractedText : raw;
+      const lower = effectiveRaw.toLowerCase().replace(/[.!?,]/g, "").trim();
+      const isStop = shouldUseExtracted || isStopPhrase(lower);
+      const isBareStop = isPureBareStop(lower);
+      const wasBuildingRecently =
+        isBuildingRef.current || Date.now() - lastBuildInterruptedTimeRef.current < 6000;
+      const isBuildTermination = isBuildTerminationCommand(effectiveRaw, wasBuildingRecently);
 
       const isEcho =
-        !isStop &&
+        !isBareStop &&
         !isBuildTermination &&
-        checkIsSelfEcho(effectiveRaw, recentAiSpeechRef.current, rexSpeakingNow);
+        checkIsSelfEcho(effectiveRaw, recentAiSpeechRef.current, inRecentEchoWindow);
       const spokenWordCount = lower.split(/\s+/).filter((w) => w.length > 1).length;
 
       const rexTalkingOrWorking = rexSpeakingNow || isBuildingRef.current;
@@ -1733,13 +1800,14 @@ export default function App() {
           lower
         );
 
-      // Require 3+ non-echo words (or 2+ words starting with an explicit user barge lead, or any stop/termination phrase)
-      // so 1-2 word speaker bleed during Rex's sentence pauses never falsely triggers barge-in!
+      // Require 5+ non-echo words (or 2+ words starting with an explicit user barge lead, or any stop/termination phrase)
+      // so 1-4 word speaker echoes ("Looking", "Absolutely", "Typing into today") NEVER falsely trigger barge-in!
       const isNaturalUserBargeIn =
         !isEcho &&
         (isStop ||
+          isBareStop ||
           isBuildTermination ||
-          spokenWordCount >= 3 ||
+          spokenWordCount >= 5 ||
           (spokenWordCount >= 2 && startsWithExplicitUserBargeLead));
 
       // ── BARGE-IN (Interim) ────────────────────────────────────────────────
@@ -1810,11 +1878,11 @@ export default function App() {
         return;
       }
 
-      // 3. Suppress single-word noise fragments in the 380ms post-speech hardware drain window
+      // 3. Suppress single-word noise fragments in the 1800ms post-speech hardware drain window
       const now = Date.now();
       const timeSinceRexSpoke = now - lastRexSpeechEndTimeRef.current;
       const hasExplicitWake = /\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(effectiveRaw) || /\brex\b/i.test(effectiveRaw);
-      if (timeSinceRexSpoke < 380 && !hasExplicitWake && !isStop && !isBuildTermination && spokenWordCount < 2) {
+      if (timeSinceRexSpoke < 1800 && !hasExplicitWake && !isStop && !isBuildTermination && spokenWordCount < 2) {
         console.debug("[voice] Suppressing 1-word fragment in echo cooldown:", effectiveRaw);
         setTranscript("");
         return;

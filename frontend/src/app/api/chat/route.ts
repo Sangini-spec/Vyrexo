@@ -143,9 +143,9 @@ function requiresDetailedOrLongResponse(
   if (hasAttachments || isSearchTurn) return true;
   const p = (userPrompt || "").toLowerCase().trim();
 
-  // Explicit factual, news, research, list/pointer, building, technical, or creative requests always get their full optimal length
+  // Explicit factual, news, research, riddles/scenarios, list/pointer, building, technical, or creative requests always get their full optimal length
   if (
-    /\b(in\s+detail|detailed|deep\s+dive|elaborate|comprehensive|step[\s-]*by[\s-]*step|guide\s+me|can\s+you\s+guide|walk\s+me\s+through|end[\s-]*to[\s-]*end|roadmap|architecture|blueprint|code|coding|implement|scaffold|refactor|debug|error|stack\s+trace|review|summarize|read\s+the\s+files|connect\s+a\s+folder|poem|poetry|story|stories|tale|song|lyrics|sing\b|monologue|explain|how\s+can\s+we\s+build|news|cyber|cybersecurity|cyberattack|attack|attacks|breach|hack|vulnerability|latest|recent|recently|happened|happening|world|around\s+the\s+world|in\s+the\s+city|mention\s+these|pointers|points|list|top\s+\d+|\d+\s+news|facts|fact|research|compare|difference\s+between|what\s+are\s+the|tell\s+me\s+about|tell\s+me\s+the|give\s+me\s+the|overview|breakdown|analysis|features|tech\s+stack|project)\b/i.test(
+    /\b(in\s+detail|detailed|deep\s+dive|elaborate|comprehensive|step[\s-]*by[\s-]*step|guide\s+me|can\s+you\s+guide|walk\s+me\s+through|end[\s-]*to[\s-]*end|roadmap|architecture|blueprint|code|coding|implement|scaffold|refactor|debug|error|stack\s+trace|review|summarize|read\s+the\s+files|connect\s+a\s+folder|poem|poetry|story|stories|tale|song|lyrics|sing\b|monologue|explain|how\s+can\s+we\s+build|news|cyber|cybersecurity|cyberattack|attack|attacks|breach|hack|vulnerability|latest|recent|recently|happened|happening|world|around\s+the\s+world|in\s+the\s+city|mention\s+these|pointers|points|list|top\s+\d+|\d+\s+news|facts|fact|research|compare|difference\s+between|what\s+are\s+the|tell\s+me\s+about|tell\s+me\s+the|give\s+me\s+the|overview|breakdown|analysis|features|tech\s+stack|project|situation|scenario|riddle|puzzle|three\s+doors|doors|tiger|ocean|which\s+one|would\s+you\s+enter|what\s+would\s+you|suppose|imagine|hypothetical)\b/i.test(
       p
     )
   ) {
@@ -1824,14 +1824,12 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
           ? [
               "gemini-2.5-flash-lite",
               "gemini-2.5-flash",
-              "gemini-3.1-flash-lite",
-              "gemini-3.5-flash",
+              "gemini-3-flash-preview",
             ]
           : [
               "gemini-2.5-flash",
               "gemini-2.5-flash-lite",
-              "gemini-3.1-flash-lite",
-              "gemini-3.5-flash",
+              "gemini-3-flash-preview",
             ];
         let response: any = null;
 
@@ -1839,7 +1837,7 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
           try {
             const config: any = {
               systemInstruction,
-              maxOutputTokens: isDetailedTurn ? 2048 : 320,
+              maxOutputTokens: isDetailedTurn ? 2048 : 768,
               ...(model.startsWith("gemini-2.5")
                 ? { thinkingConfig: { thinkingBudget: 0 } }
                 : model.startsWith("gemini-3")
@@ -1854,8 +1852,9 @@ CRITICAL MULTIMODAL & CROSS-TAB CAPABILITIES:
               config,
             });
 
-            // Allow 9.5s when executing live Google Search grounding, or 4.5s for standard turns
-            const timeoutMs = requiresSearch ? 9500 : 4500;
+            // Allow 12.5s when executing live Google Search grounding, or 10.5s for standard/reasoning turns
+            // (Promise.race still resolves immediately in ~1-2s when Gemini responds, while preventing premature cutoff!)
+            const timeoutMs = requiresSearch ? 12500 : 10500;
             const timeoutPromise = new Promise((_, reject) =>
               setTimeout(() => reject(new Error("Timeout")), timeoutMs)
             );
