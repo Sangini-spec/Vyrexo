@@ -642,9 +642,8 @@ Return ONLY the complete corrected code for "${targetFile.path}" inside a single
   const res = await callAnthropicMessages({
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
-    maxTokens: clampOutputTokens(12000),
-    temperature: 0.15,
-    timeoutMs: 60000,
+    maxTokens: clampOutputTokens(20000),
+    timeoutMs: 90000,
   });
 
   if (!res.ok || !res.text) {
@@ -658,7 +657,26 @@ Return ONLY the complete corrected code for "${targetFile.path}" inside a single
   }
 
   const codeBlockMatch = res.text.match(/```(?:tsx|typescript|ts|jsx|js|json)?\s*([\s\S]*?)```/i);
-  const patchedCode = (codeBlockMatch ? codeBlockMatch[1] : res.text).trim();
+  const patchedCode = (codeBlockMatch ? codeBlockMatch[1] : res.text)
+    .replace(/^\s*```[a-zA-Z]*\s*\n?/, "")
+    .replace(/\n?\s*```\s*$/, "")
+    .trim();
+
+  // Reject truncated repairs that stopped mid-JSX before closing the component
+  const isTruncatedTsx =
+    targetFile.path.endsWith(".tsx") &&
+    res.stopReason === "max_tokens" &&
+    !patchedCode.includes("export default");
+
+  if (isTruncatedTsx) {
+    return {
+      ok: false,
+      patchedCode: "",
+      patchDescription: "",
+      latencyMs: res.latencyMs,
+      error: "Repair response reached max_tokens before completing the component",
+    };
+  }
 
   return {
     ok: patchedCode.length > 20,
@@ -667,3 +685,4 @@ Return ONLY the complete corrected code for "${targetFile.path}" inside a single
     latencyMs: res.latencyMs,
   };
 }
+

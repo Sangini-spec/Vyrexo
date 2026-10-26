@@ -138,7 +138,9 @@ export function writeWorkspaceFiles(
     const pathCheck = validateWorkspaceFilePath(wsDir, f.path, { sessionId });
     if (!pathCheck.allowed) continue;
 
-    let content = f.content;
+    let content = f.content
+      .replace(/^\s*```[a-zA-Z]*\s*\n?/, "")
+      .replace(/\n?\s*```\s*$/, "");
     // Sanitize rogue imports for external icon wrappers or DOM testing libraries
     if (f.path.endsWith(".tsx") || f.path.endsWith(".ts")) {
       content = content
@@ -732,6 +734,17 @@ test("project configuration limits", () => {
       }
       writeWorkspaceFiles(sessionId, cleanTitle, files);
       compilation = await compileWorkspace(wsDir);
+
+      // Guaranteed compilation safety net: if still failing (e.g. truncated syntax), restore verified domain template
+      if (!compilation.success) {
+        const fallbackFiles = generateRichDomainFallback(prompt, cleanTitle, slug, history);
+        const fallbackApp = fallbackFiles.find((f) => f.path === "src/components/App.tsx");
+        if (fallbackApp) {
+          appTsxFile.content = fallbackApp.content;
+          writeWorkspaceFiles(sessionId, cleanTitle, files);
+          compilation = await compileWorkspace(wsDir);
+        }
+      }
     }
 
     // Zero-token deterministic unit test repair if generated test file had missing imports

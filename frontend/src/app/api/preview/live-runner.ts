@@ -107,6 +107,8 @@ export function generateLiveAppHtml(appCode: string, title: string, compiledJs?:
   } else {
     // Fallback: Babel In-Browser transpiler with syntax cleaning
     const cleaned = appCode
+      .replace(/^\s*```[a-zA-Z]*\s*\n?/gm, "")
+      .replace(/\n?\s*```\s*$/gm, "")
       .replace(/^"use client";?\s*/m, "")
       .replace(/import\s+React[^\n]*\n?/g, "")
       .replace(/import\s+\{[^\}]*\}\s+from\s+["\x27]react["\x27];?\n?/g, "")
@@ -227,7 +229,17 @@ export function getWorkspaceAppCode(sessionId: string): { code: string; title: s
     }
 
     if (fs.existsSync(appPath)) {
-      const code = fs.readFileSync(appPath, "utf-8");
+      let code = fs.readFileSync(appPath, "utf-8");
+      // Automatically strip any accidental markdown code fences on disk before compiling
+      if (/^\s*```/.test(code) || /```\s*$/.test(code)) {
+        code = code
+          .replace(/^\s*```[a-zA-Z]*\s*\n?/, "")
+          .replace(/\n?\s*```\s*$/, "");
+        try {
+          fs.writeFileSync(appPath, code, "utf-8");
+        } catch {}
+      }
+
       const proj = getSessionProject(sessionId);
       const metaPath = path.join(wsDir, "project-meta.json");
       let title = proj?.title || "Autonomous Application";
@@ -238,14 +250,14 @@ export function getWorkspaceAppCode(sessionId: string): { code: string; title: s
         } catch {}
       }
 
-      // If bundle doesn't exist yet or is empty, trigger quick sync compilation
+      // If bundle doesn't exist yet or is empty, trigger quick sync compilation with stdio: "pipe"
       if (!compiledJs) {
         try {
           const outDir = path.join(wsDir, "dist");
           if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
           execSync(
             `bun build "${appPath}" --outfile "${bundlePath}" --external react --external react-dom`,
-            { cwd: wsDir, timeout: 5000 }
+            { cwd: wsDir, timeout: 5000, stdio: "pipe" }
           );
           if (fs.existsSync(bundlePath)) {
             compiledJs = fs.readFileSync(bundlePath, "utf-8");
