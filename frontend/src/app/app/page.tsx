@@ -381,20 +381,20 @@ function checkIsSelfEcho(
     if (!cleanAi) continue;
     const aiWordsSet = new Set(cleanAi.split(/\s+/).filter((w) => w.length > 1));
 
-    // 0. 1-word or 2-word speaker echo check (e.g. "Looking", "Absolutely", "Today" picked up from Rex's own speech):
-    // When Rex is speaking or finished within the last 12 seconds, any 1-2 word fragment whose words appear in Rex's speech is speaker bleed!
-    if ((isRexSpeakingNow || ageMs < 12000) && inputWords.length <= 2 && !startsWithExplicitUserOpener) {
+    // 0. 1-word or 2-word speaker echo check (e.g. "Looking", "Absolutely", "into today" picked up from Rex's own speech):
+    // Only match 2-word fragments when they appear as a contiguous phrase in Rex's speech (never unordered bag-of-words,
+    // which previously misclassified the first 2 words of a user's barge-in sentence as echo!).
+    if ((isRexSpeakingNow || ageMs < 10000) && inputWords.length <= 2 && !startsWithExplicitUserOpener) {
       if (inputWords.length === 1) {
         const w = inputWords[0];
-        if (!legitimateSingleWordUserReplies.has(w) && aiWordsSet.has(w)) {
+        if (!legitimateSingleWordUserReplies.has(w) && aiWordsSet.has(w) && w.length >= 4) {
           return true;
         }
-        // Even words like "absolutely" or "looking" when Rex literally just said them
-        if (aiWordsSet.has(w) && (isRexSpeakingNow || ageMs < 8000) && w.length >= 5) {
+        if (aiWordsSet.has(w) && (isRexSpeakingNow || ageMs < 6000) && w.length >= 6) {
           return true;
         }
       } else if (inputWords.length === 2) {
-        if (cleanAi.includes(cleanInput) || (aiWordsSet.has(inputWords[0]) && aiWordsSet.has(inputWords[1]))) {
+        if (cleanAi.includes(cleanInput)) {
           return true;
         }
       }
@@ -412,8 +412,7 @@ function checkIsSelfEcho(
     }
 
     // 2. Contiguous 2-word bigram overlap check (catches phonetic ASR mishearings like "Typing into today" from Rex's "diving into today"):
-    // If a short 3-4 word phrase shares at least 1 contiguous bigram ("into today") with Rex's speech while Rex is speaking or just finished, it is speaker echo!
-    if (inputWords.length >= 3 && (!startsWithExplicitUserOpener || inputWords.length >= 4)) {
+    if (inputWords.length >= 3 && !startsWithExplicitUserOpener) {
       let matchingBigrams = 0;
       const totalBigrams = inputWords.length - 1;
       for (let i = 0; i < totalBigrams; i++) {
@@ -424,18 +423,18 @@ function checkIsSelfEcho(
       }
       if (
         matchingBigrams / totalBigrams >= 0.65 ||
-        ((isRexSpeakingNow || ageMs < 10000) && inputWords.length <= 4 && matchingBigrams >= 1)
+        ((isRexSpeakingNow || ageMs < 8000) && inputWords.length <= 4 && matchingBigrams >= 1)
       ) {
         return true;
       }
 
-      // 3. Word-level overlap check for 3-5 word fragments during/right after Rex's speech:
-      if ((isRexSpeakingNow || ageMs < 10000) && inputWords.length <= 5 && !startsWithExplicitUserOpener) {
+      // 3. High-confidence word-level overlap check for 3-5 word fragments during Rex's speech:
+      if ((isRexSpeakingNow || ageMs < 8000) && inputWords.length <= 5) {
         let matchingWords = 0;
         for (const w of inputWords) {
           if (aiWordsSet.has(w)) matchingWords++;
         }
-        if (matchingWords / inputWords.length >= 0.66) {
+        if (matchingWords / inputWords.length >= 0.8) {
           return true;
         }
       }
@@ -1796,18 +1795,17 @@ export default function App() {
       const rexTalkingOrWorking = rexSpeakingNow || isBuildingRef.current;
 
       const startsWithExplicitUserBargeLead =
-        /^(no\b|nope\b|nah\b|wait\b|hold\b|stop\b|pause\b|listen\b|hey\s+rex\b|hi\s+rex\b|hello\s+rex\b|rex\b|actually\s+i\b|can\s+you\b|could\s+you\b|would\s+you\b|what\s+if\b|what\s+about\b|tell\s+me\b|let\s+me\b|i\s+want\b|i\s+need\b|i\s+don'?t\b|never\s*mind\b)/i.test(
+        /^(no\b|nope\b|nah\b|wait\b|hold\b|stop\b|pause\b|please\b|listen\b|hey\b|hi\b|hello\b|ok\b|okay\b|rex\b|actually\b|but\b|so\b|well\b|can\s+you\b|could\s+you\b|would\s+you\b|what\b|why\b|how\b|tell\s+me\b|let\s+me\b|i\s+want\b|i\s+need\b|i\s+think\b|i\s+have\b|i\s+don'?t\b|never\s*mind\b)/i.test(
           lower
         );
 
-      // Require 5+ non-echo words (or 2+ words starting with an explicit user barge lead, or any stop/termination phrase)
-      // so 1-4 word speaker echoes ("Looking", "Absolutely", "Typing into today") NEVER falsely trigger barge-in!
+      // Smooth instant barge-in: 3+ non-echo words, or 2+ words starting with a conversational opener, or any stop/pause phrase
       const isNaturalUserBargeIn =
         !isEcho &&
         (isStop ||
           isBareStop ||
           isBuildTermination ||
-          spokenWordCount >= 5 ||
+          spokenWordCount >= 3 ||
           (spokenWordCount >= 2 && startsWithExplicitUserBargeLead));
 
       // ── BARGE-IN (Interim) ────────────────────────────────────────────────
@@ -2117,8 +2115,57 @@ export default function App() {
       }
       setChatLog(initialTurns);
 
+      // Helper to detect if a session's user turns built an application (e.g. shoe e-commerce)
+      // and self-heal any TaskFlow poisoning or container-restart preview loss
+      const extractSessionBuildInfo = (turnsList: Array<{ role: string; text: string }>) => {
+        const userPrompts = turnsList
+          .filter((t) => t?.role === "user")
+          .map((t) => (t?.text || "").trim())
+          .filter(Boolean);
+        const combinedUserText = userPrompts.join(" ");
+        const askedForTodo =
+          /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+            combinedUserText
+          );
+        const buildTurn = userPrompts.find((txt) =>
+          /\b(build|create|make|develop|code|work\s+on|ecommerce|e-commerce|shoe|shoes|sneaker|sneakers|footwear|kicks|clothing|clothes|fashion|store|shop|website|app|application|platform|flight|train|railgo|food|restaurant|calculator|crypto|dashboard|timer|pomodoro|flowstate|amity)\b/i.test(
+            txt
+          )
+        );
+        const assistantBuiltTurn = turnsList.some(
+          (t) =>
+            t?.role === "assistant" &&
+            /\b(built|created|scaffolded|live\s+preview|preview\s+tab|src\/components\/App\.tsx|compiled)\b/i.test(
+              t?.text || ""
+            )
+        );
+        return {
+          combinedUserText,
+          askedForTodo,
+          buildPrompt: buildTurn || (assistantBuiltTurn ? combinedUserText : ""),
+          hasBuildInHistory: Boolean(buildTurn || assistantBuiltTurn),
+        };
+      };
+
+      const initialBuildInfo = extractSessionBuildInfo(initialTurns);
+      const isPoisonedTaskFlow = (nameOrTitle?: string | null) =>
+        Boolean(
+          nameOrTitle &&
+            /\b(taskflow|to-do|todo)\b/i.test(nameOrTitle) &&
+            initialBuildInfo.hasBuildInHistory &&
+            !initialBuildInfo.askedForTodo
+        );
+
       const initialCached = getSessionFilesFromCache(id);
-      if (initialCached?.files && initialCached.files.length > 0) {
+      const cachedIsPoisoned =
+        isPoisonedTaskFlow(initialCached?.projectName) ||
+        Boolean(
+          initialCached?.files?.some((f) => /\bTaskFlow\b/i.test(f?.content || "")) &&
+            initialBuildInfo.hasBuildInHistory &&
+            !initialBuildInfo.askedForTodo
+        );
+
+      if (initialCached?.files && initialCached.files.length > 0 && !cachedIsPoisoned) {
         const cachedEvents: CodeEvent[] = initialCached.files
           .filter((f) => f?.path && typeof f.content === "string" && !String(f.path).endsWith(".code-workspace"))
           .map((f) => ({
@@ -2135,15 +2182,14 @@ export default function App() {
         setCodeEvents([]);
       }
       setTranscript("");
-      const sessionUrl = sessionPreviewsRef.current[id] || "";
-      setPreviewUrl(sessionUrl);
 
       let sessProj = sessionProjectsRef.current[id] || null;
       if (
         sessProj &&
         (sessProj.path === "." ||
           sessProj.name === "vyrexo-workspace" ||
-          /^session-\d+$/i.test(sessProj.name || ""))
+          /^session-\d+$/i.test(sessProj.name || "") ||
+          isPoisonedTaskFlow(sessProj.name))
       ) {
         sessProj = null;
       }
@@ -2154,7 +2200,8 @@ export default function App() {
             map[id] &&
             map[id].path !== "." &&
             map[id].name !== "vyrexo-workspace" &&
-            !/^session-\d+$/i.test(map[id].name || "")
+            !/^session-\d+$/i.test(map[id].name || "") &&
+            !isPoisonedTaskFlow(map[id].name)
           ) {
             if (
               typeof map[id].path === "string" &&
@@ -2171,6 +2218,34 @@ export default function App() {
           }
         } catch {}
       }
+
+      // If the session had a build in its history (e.g. shoe e-commerce) or cached files, ensure previewUrl is immediately active!
+      let sessionUrl = sessionPreviewsRef.current[id] || "";
+      if ((!sessionUrl || cachedIsPoisoned) && initialBuildInfo.hasBuildInHistory && initialBuildInfo.buildPrompt) {
+        sessionUrl = `/api/preview?session=${encodeURIComponent(id)}&topic=${encodeURIComponent(
+          initialBuildInfo.buildPrompt.slice(0, 300)
+        )}`;
+        sessionPreviewsRef.current[id] = sessionUrl;
+      } else if (!sessionUrl && initialCached?.files && initialCached.files.length > 0) {
+        sessionUrl = `/api/preview?session=${encodeURIComponent(id)}`;
+        sessionPreviewsRef.current[id] = sessionUrl;
+      }
+      setPreviewUrl(sessionUrl);
+
+      // Self-heal session sidebar title immediately if it was poisoned with "TaskFlow Todo App"
+      if (initialBuildInfo.hasBuildInHistory && !initialBuildInfo.askedForTodo) {
+        const healedTitle = resolveSemanticSessionName(null, id, sessProj?.name || null, initialTurns);
+        if (healedTitle && !isPlaceholderOrBadSessionName(healedTitle)) {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === id && (isPlaceholderOrBadSessionName(s.name) || isPoisonedTaskFlow(s.name))
+                ? { ...s, name: healedTitle }
+                : s
+            )
+          );
+        }
+      }
+
       setActiveProject(sessProj);
       activeProjectRef.current = sessProj;
       sentProjectPathRef.current = sessProj ? sessProj.path : "";
@@ -2188,7 +2263,10 @@ export default function App() {
       fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidParam}`, { headers })
         .then((r) => r.json())
         .then((d) => {
-          if (d?.ok && d.connected && d.project) {
+          const serverProjName = d?.project?.name || "";
+          const serverPoisoned = isPoisonedTaskFlow(serverProjName);
+
+          if (d?.ok && d.connected && d.project && !serverPoisoned) {
             const p = {
               path: d.project.path,
               name: d.project.name,
@@ -2205,7 +2283,7 @@ export default function App() {
             const serverFiles = Array.isArray(d.project.files) ? d.project.files : [];
             const cachedSession = getSessionFilesFromCache(id);
             const effectiveFiles =
-              serverFiles.length > 0 ? serverFiles : cachedSession?.files || [];
+              serverFiles.length > 0 ? serverFiles : !cachedIsPoisoned ? cachedSession?.files || [] : [];
             if (effectiveFiles.length > 0 && activeSessionRef.current === id) {
               saveSessionFilesToCache(id, effectiveFiles, {
                 projectName: p.name,
@@ -2243,14 +2321,16 @@ export default function App() {
               setPreviewUrl(restoredPreviewUrl);
             }
             if (p.name && !isPlaceholderOrBadSessionName(p.name)) {
-              const cleanTitle = p.name.split(/\s*[—–-]\s*/)[0].trim().slice(0, 38) || p.name;
-              setSessions((prev) =>
-                prev.map((s) =>
-                  s.id === id && isPlaceholderOrBadSessionName(s.name)
-                    ? { ...s, name: cleanTitle }
-                    : s
-                )
-              );
+              const cleanTitle = resolveSemanticSessionName(null, id, p.name, initialTurns);
+              if (cleanTitle && !isPlaceholderOrBadSessionName(cleanTitle)) {
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === id && (isPlaceholderOrBadSessionName(s.name) || isPoisonedTaskFlow(s.name))
+                      ? { ...s, name: cleanTitle }
+                      : s
+                  )
+                );
+              }
             }
             if (userStorageKeys.sessionProjects) {
               try {
@@ -2259,6 +2339,66 @@ export default function App() {
                 localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
               } catch {}
             }
+          } else if (initialBuildInfo.hasBuildInHistory && initialBuildInfo.buildPrompt) {
+            // Server restarted or had a poisoned TaskFlow workspace -> trigger preview self-heal & reload project metadata!
+            const healPreviewUrl = `/api/preview?session=${encodeURIComponent(id)}&topic=${encodeURIComponent(
+              initialBuildInfo.buildPrompt.slice(0, 300)
+            )}&t=${Date.now()}`;
+            sessionPreviewsRef.current[id] = healPreviewUrl;
+            setPreviewUrl(healPreviewUrl);
+
+            fetch(healPreviewUrl)
+              .then(() => fetch(`/api/projects?sessionId=${encodeURIComponent(id)}${uidParam}`, { headers }))
+              .then((r) => r.json())
+              .then((healed) => {
+                if (healed?.ok && healed.connected && healed.project && activeSessionRef.current === id) {
+                  const hp = {
+                    path: healed.project.path,
+                    name: healed.project.name,
+                    summary: healed.project.summary,
+                    techStack: healed.project.techStack,
+                    filesCount: healed.project.filesCount,
+                    source: healed.project.source,
+                  };
+                  setActiveProject(hp);
+                  activeProjectRef.current = hp;
+                  sessionProjectsRef.current[id] = hp;
+                  if (Array.isArray(healed.project.files) && healed.project.files.length > 0) {
+                    saveSessionFilesToCache(id, healed.project.files, {
+                      projectName: hp.name,
+                      localFolderName: hp.name,
+                      targetPath: hp.path,
+                    });
+                    setCodeEvents(
+                      healed.project.files
+                        .filter((f: any) => f?.path && typeof f.content === "string")
+                        .map((f: any) => ({
+                          kind: "action" as const,
+                          agent: "coder",
+                          tool: "file_writer",
+                          category: "file_write",
+                          path: String(f.path).replace(/^\/+/, ""),
+                          content: String(f.content),
+                          message: `Restored ${f.path}`,
+                        }))
+                    );
+                  }
+                  const healedSidebarName = resolveSemanticSessionName(null, id, hp.name, initialTurns);
+                  if (healedSidebarName && !isPlaceholderOrBadSessionName(healedSidebarName)) {
+                    setSessions((prev) =>
+                      prev.map((s) => (s.id === id ? { ...s, name: healedSidebarName } : s))
+                    );
+                  }
+                  if (userStorageKeys.sessionProjects) {
+                    try {
+                      const map = JSON.parse(localStorage.getItem(userStorageKeys.sessionProjects) || "{}");
+                      map[id] = hp;
+                      localStorage.setItem(userStorageKeys.sessionProjects, JSON.stringify(map));
+                    } catch {}
+                  }
+                }
+              })
+              .catch(() => {});
           }
         })
         .catch(() => {});
@@ -2287,6 +2427,26 @@ export default function App() {
               try {
                 localStorage.setItem(chatKey, JSON.stringify(mapped));
               } catch {}
+            }
+            const fetchedBuildInfo = extractSessionBuildInfo(mapped);
+            if (fetchedBuildInfo.hasBuildInHistory && fetchedBuildInfo.buildPrompt) {
+              const healedName = resolveSemanticSessionName(null, id, null, mapped);
+              if (healedName && !isPlaceholderOrBadSessionName(healedName)) {
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === id && (isPlaceholderOrBadSessionName(s.name) || /\b(taskflow|to-do|todo)\b/i.test(s.name) && !fetchedBuildInfo.askedForTodo)
+                      ? { ...s, name: healedName }
+                      : s
+                  )
+                );
+              }
+              if (!sessionPreviewsRef.current[id]) {
+                const urlFromHistory = `/api/preview?session=${encodeURIComponent(id)}&topic=${encodeURIComponent(
+                  fetchedBuildInfo.buildPrompt.slice(0, 300)
+                )}`;
+                sessionPreviewsRef.current[id] = urlFromHistory;
+                setPreviewUrl(urlFromHistory);
+              }
             }
           }
         })

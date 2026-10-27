@@ -13,9 +13,14 @@ import {
   updateSessionProjectType,
   getSessionProject,
   ensureSessionWorkspaceMaterialized,
+  getSessionChatHistory,
+  materializeCompleteWorkspaceOnDisk,
+  setSessionConnectedProject,
 } from "@/lib/project-session-store";
 import { generateLiveAppHtml, getWorkspaceAppCode } from "./live-runner";
 import { getWorkspaceDir, compileWorkspace } from "@/lib/workspace-executor";
+import { generateRichDomainFallback } from "@/lib/domain-templates";
+import { extractProjectName } from "@/lib/project-spec";
 
 // In-memory preview store keyed by session ID to guarantee strict session isolation
 const globalPreviewStore = globalThis as unknown as {
@@ -934,8 +939,71 @@ export async function GET(req: NextRequest) {
   } else if (sessionId) {
     ensureSessionWorkspaceMaterialized(sessionId);
 
+    const topicParam = (url.searchParams.get("topic") || "").trim();
+    const chatTurns = getSessionChatHistory(sessionId);
+    const userChatText = chatTurns
+      .filter((t) => t.role === "user")
+      .map((t) => t.text || "")
+      .join(" ")
+      .trim();
+    const effectiveBuildContext = (topicParam + " " + userChatText).trim();
+    const userAskedForTodo =
+      /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+        effectiveBuildContext
+      );
+    const userAskedForBuildDomain =
+      /\b(build|create|make|develop|code|work\s+on|ecommerce|e-commerce|shoe|shoes|sneaker|sneakers|footwear|kicks|clothing|clothes|fashion|store|shop|website|app|application|platform|flight|train|railgo|food|restaurant|calculator|crypto|dashboard|timer|pomodoro|flowstate|amity|friend)\b/i.test(
+        effectiveBuildContext
+      );
+
     // 1. Check if the session has real generated application code on disk or workspace
     let wsApp = getWorkspaceAppCode(sessionId);
+
+    // Self-heal check: If wsApp was poisoned with "TaskFlow" by the old "to do" regex bug while the session's
+    // actual conversation was about another project (e.g. shoe e-commerce), OR if wsApp is missing after a
+    // container restart while the session has a build conversation, reconstruct and compile the workspace!
+    const isPoisonedWithTaskFlow =
+      Boolean(wsApp) &&
+      /\b(taskflow|smart\s+to-do)\b/i.test(`${wsApp?.title || ""} ${wsApp?.code?.slice(0, 600) || ""}`) &&
+      effectiveBuildContext.length > 4 &&
+      !userAskedForTodo &&
+      userAskedForBuildDomain;
+
+    if ((!wsApp || isPoisonedWithTaskFlow) && effectiveBuildContext.length > 4 && userAskedForBuildDomain) {
+      try {
+        const resolvedBrand = extractProjectName(effectiveBuildContext);
+        const restoredTitle =
+          /\b(shoe|shoes|sneaker|sneakers|footwear|kicks)\b/i.test(effectiveBuildContext)
+            ? `${resolvedBrand} — Footwear & Sneaker E-Commerce Store`
+            : /\b(ecommerce|e-commerce|store|shop|clothing|clothes|fashion)\b/i.test(effectiveBuildContext)
+            ? `${resolvedBrand} — Modern E-Commerce Store`
+            : resolvedBrand;
+        const slug = restoredTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "vyrexo-app";
+        const templateFiles = generateRichDomainFallback(effectiveBuildContext, restoredTitle, slug);
+        if (templateFiles && templateFiles.length > 0) {
+          const wsDir = getWorkspaceDir(sessionId);
+          const materializedFiles = materializeCompleteWorkspaceOnDisk(sessionId, restoredTitle, templateFiles);
+          await compileWorkspace(wsDir);
+          setSessionConnectedProject(sessionId, {
+            id: `ws-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+            sessionId,
+            name: restoredTitle,
+            path: `~/VyrexoWorkspaces/${slug}`,
+            source: "workspace",
+            summary: `Interactive application built for ${restoredTitle} (${materializedFiles.length} files)`,
+            techStack: ["React 19", "TypeScript", "Tailwind CSS", "Vite", "Bun Test"],
+            filesCount: materializedFiles.length,
+            files: materializedFiles,
+            connectedAt: Date.now(),
+            lastUpdatedAt: Date.now(),
+          });
+          wsApp = getWorkspaceAppCode(sessionId);
+        }
+      } catch (e) {
+        console.warn("[preview] workspace self-heal warning:", e);
+      }
+    }
+
     if (wsApp && wsApp.code && !wsApp.compiledJs) {
       try {
         await compileWorkspace(getWorkspaceDir(sessionId));

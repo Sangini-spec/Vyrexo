@@ -628,12 +628,15 @@ function classifyIntent(
       };
     }
 
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+
     const isStatusOrStuckInquiry =
+      wordCount <= 8 &&
       /\b(are you stuck|stuck with my question|did you freeze|are you frozen|are you there|you there|can you hear me|did you hear me|still thinking|why are you slow|taking so long|are you thinking)\b/i.test(trimmed);
 
     if (isStatusOrStuckInquiry) {
       const p = personalizeGreetingWithUsername(
-        "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to do?",
+        "Not at all! I'm right here and fully attentive. I am ready to answer your questions or build with you. What would you like to explore or build?",
         "Not at all! I'm right here and ready. What would you like to explore or build?",
         username
       );
@@ -646,6 +649,7 @@ function classifyIntent(
     }
 
     const isIdentityInquiry =
+      wordCount <= 8 &&
       /\b(who are you|what is your name|what's your name|tell me about yourself|who created you|who made you)\b/i.test(trimmed);
 
     if (isIdentityInquiry) {
@@ -658,6 +662,7 @@ function classifyIntent(
     }
 
     const isCapabilitiesInquiry =
+      wordCount <= 8 &&
       /\b(what can you do|what are your capabilities|what do you do|help me|how can you help)\b/i.test(trimmed);
 
     if (isCapabilitiesInquiry) {
@@ -944,7 +949,9 @@ I have launched **${targetTitle}** in your **Preview** tab!
     };
   }
 
-  if (/\b(who are you|what is your name|tell me about yourself)\b/i.test(trimmed)) {
+  const totalWords = normalized.split(/\s+/).filter(Boolean).length;
+
+  if (totalWords <= 8 && /\b(who are you|what is your name|tell me about yourself)\b/i.test(trimmed)) {
     return {
       isConversational: true,
       emotion: "warm",
@@ -955,7 +962,7 @@ I have launched **${targetTitle}** in your **Preview** tab!
     };
   }
 
-  if (/\b(what can you do|what are your capabilities|help me)\b/i.test(trimmed)) {
+  if (totalWords <= 8 && /\b(what can you do|what are your capabilities|help me)\b/i.test(trimmed)) {
     return {
       isConversational: true,
       emotion: "upbeat",
@@ -966,7 +973,7 @@ I have launched **${targetTitle}** in your **Preview** tab!
     };
   }
 
-  if (/\b(thanks|thank you|thx|cheers|awesome|great job|perfect|love it|cool|nice)\b/i.test(trimmed)) {
+  if (totalWords <= 7 && /\b(thanks|thank you|thx|cheers|awesome|great job|perfect|love it|cool|nice)\b/i.test(trimmed)) {
     return {
       isConversational: true,
       emotion: "upbeat",
@@ -1039,7 +1046,11 @@ function detectProjectContext(
     }
   }
 
-  const combinedAll = (text + " " + history.map((h) => h.content).join(" ")).toLowerCase();
+  const userHistoryOnly = history
+    .filter((h) => !h.role || h.role === "user")
+    .map((h) => h.content)
+    .join(" ");
+  const combinedAll = (text + " " + userHistoryOnly).toLowerCase();
 
   // Priority check: Flowstate OS / Productivity Operating System
   if (combinedAll.includes("flowstate") || combinedAll.includes("flow state")) {
@@ -1058,9 +1069,17 @@ function detectProjectContext(
     };
   }
 
-  // Priority check: Todo / Task List Application
+  const hasSpecificNonTodoDomain =
+    /\b(ecommerce|e-commerce|shoe|shoes|sneaker|sneakers|footwear|kicks|clothing|clothes|fashion|apparel|cosmetic|skincare|beauty|flight|airline|train|railway|railgo|food|restaurant|crypto|drone|calculator|omnicalc)\b/i.test(
+      combinedAll
+    );
+
+  // Priority check: Todo / Task List Application (only when explicitly requested and not an e-commerce/shoe/etc. project)
   if (
-    /\b(todo|to-do|to\s+do(\s+list)?|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(combinedAll)
+    !hasSpecificNonTodoDomain &&
+    /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+      combinedAll
+    )
   ) {
     return {
       type: "custom",

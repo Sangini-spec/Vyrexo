@@ -436,56 +436,64 @@ export async function synthesizeProjectWithClaude(
     if (focusedFiles) {
       existingWorkspaceSection = `\nEXISTING WORKSPACE CODEBASE (Active Project in Sandbox):\n${focusedFiles}\n`;
       iterativeModeDirective = `
-ITERATIVE MODIFICATION & UI/FEATURE EVOLUTION DIRECTIVE:
+ITERATIVE MODIFICATION & ARCHITECTURE EVOLUTION DIRECTIVE:
 - An active application already exists in this workspace (shown above).
 - Carefully inspect what the user is requesting in their latest message:
-  1. IF THE USER IS REQUESTING UI / THEME / DESIGN / COMPONENT CHANGES (e.g., "I don't like the UI", "use some other theme and elements", "make the changes", "redesign", "change colors/layout", "improve the UI"):
-     - Completely transform and elevate the visual theme, color palette, typography, layout architecture, and UI components in "src/components/App.tsx"!
-     - Do NOT keep a plain or basic layout. Upgrade the UI into a visually striking, modern, multi-theme interface (include an interactive Theme Switcher in the header supporting e.g. "Warm Editorial Daylight", "Aurora Violet Glass", and "Midnight Obsidian" themes, with rich cards, progress visualizations, interactive modals/drawers, category pills, priority badges, and micro-interactions).
-     - Ensure every single interactive feature (creating, editing, completing, deleting, filtering, searching, sorting, and stats) works end-to-end with real state.
-  2. IF THE USER IS REQUESTING NEW FEATURES, FUNCTIONAL CHANGES, OR BUG FIXES:
-     - Preserve all working domain features from "src/components/App.tsx" and seamlessly integrate the newly requested features, controls, views, or fixes.
-     - If the existing "src/components/App.tsx" was overly basic or lacked interactive CRUD controls, upgrade it into a complete, rich, production-grade implementation while applying the user's changes.`;
+  1. IF THE USER IS REQUESTING A UI / LAYOUT / THEME / DESIGN OVERHAUL (e.g., "I don't like the UI", "use a different layout or theme", "make the changes", "redesign", "make it look like an enterprise app"):
+     - Re-architect the layout structure, navigation paradigm, color palette, typography, and component hierarchy in "src/components/App.tsx" to genuinely match the user's vision!
+     - Never fall back to a repetitive template. Choose the layout structure that best fits what the user asked for (e.g., left-sidebar enterprise workbench, split-pane studio, dense data grid, full-canvas tool, or editorial storefront).
+     - Ensure every single interactive feature works end-to-end with real React state.
+  2. IF THE USER IS REQUESTING NEW FEATURES, ENTERPRISE MODULES, FUNCTIONAL CHANGES, OR BUG FIXES:
+     - Preserve existing working domain state from "src/components/App.tsx" and seamlessly integrate the newly requested modules, workflows, controls, views, or fixes.`;
     }
   }
 
-  const systemPrompt = `You are Vyrexo's Principal Coding Agent powered by Anthropic Claude Sonnet 5.5 (${CLAUDE_CODING_MODEL}).
-Your role is to architect and implement complete, production-grade, deeply interactive React (TypeScript) software applications and executable unit tests.
+  const systemPrompt = `You are Vyrexo's Principal Software Architect & Coding Agent powered by Anthropic Claude Sonnet 5.5 (${CLAUDE_CODING_MODEL}).
+Your role is to dynamically architect and implement complete, bespoke, production-grade React (TypeScript) applications — ranging from focused consumer tools and interactive simulations to complex, multi-module enterprise systems — together with executable unit tests.
 
-PROJECT SPECIFICATION:
+USER REQUEST & PROJECT CONTEXT:
 - Application Title: "${effectiveTitle}"
-- Project Type: "${spec.projectType}"
-- Purpose: ${spec.purpose}
-- Target Users: ${spec.targetUsers}
-- Core Features: ${spec.coreFeatures.join("; ")}
+- Detected Domain / Category: "${spec.projectType}"
+- Core Objective: ${spec.purpose}
+- User-Specified Features & Requirements: ${[...spec.coreFeatures, ...spec.functionalRequirements].join("; ")}
 ${historyContext}${existingWorkspaceSection}${iterativeModeDirective}
 
-CRITICAL ENGINEERING, UI DESIGN & PERFORMANCE REQUIREMENTS:
+DYNAMIC ARCHITECTURE & ANTI-COOKIE-CUTTER MANDATE (CRITICAL):
+- Every application you build MUST have a unique, bespoke layout architecture, navigation paradigm, component hierarchy, and visual system engineered specifically for the user's prompt.
+- DO NOT use a repetitive boilerplate layout across projects! Specifically:
+  * DO NOT default to a top navbar with 4 generic pill tabs ("Workspace", "Kanban Board", "Analytics & Insights", "Settings").
+  * DO NOT add 4 circular color-dot theme switchers in the top-right corner unless the user specifically asks for a multi-theme switcher.
+  * DO NOT slap a generic photo Hero Banner + 4 KPI cards at the top of every app! Only consumer landing pages or retail storefronts should start with a promotional hero banner. Operational apps, enterprise platforms, developer tools, calculators, games, and workbenches must open directly into their functional workspace!
+- Match the spatial architecture to the exact domain requested by the user:
+  1. **Enterprise Platforms (ERP, CRM, Supply Chain, FinTech, SIEM/Cybersecurity SOC, Healthcare EMR, HRMS, LegalTech, Cloud/DevOps Console)**:
+     - Architect a true enterprise workspace: collapsible left navigation rail or multi-module sidebar, global command/search header with role/tenant switcher (RBAC), dense interactive data tables with multi-column sorting/filtering/pagination/bulk actions, master-detail split panes or slide-over inspection drawers, multi-stage workflow/approval pipelines, custom SVG charts/telemetry, and live audit logs.
+  2. **Developer Tools, IDEs, Data Pipelines, & Technical Workbenches**:
+     - Architect a multi-pane workbench: file/node explorer tree, interactive code/schema/node canvas, live execution output/log console, and parameter inspector panels.
+  3. **Games, Physics/Science Simulators, Audio/Music Studios, & Creative Canvas Apps**:
+     - Architect a viewport-First interactive canvas/stage, real-time transport/simulation controls, custom Web Audio or SVG/Canvas rendering engines, and HUD telemetry.
+  4. **E-Commerce, Marketplaces, Food Delivery, & Hospitality**:
+     - Architect a rich commerce experience: category & attribute filter rails, high-resolution product/listing cards using curated Unsplash photography (\`referrerPolicy="no-referrer"\`, \`loading="lazy"\`, \`onError\` fallback), interactive product configurator/detail modal, slide-over cart/bag drawer, promo/tax calculation, and multi-step checkout flow.
+  5. **Focused Utilities, Calculators, & Personal Productivity**:
+     - Architect a crisp, high-craft direct-manipulation interface where the core interactive engine is immediately usable above the fold with zero fluff.
+
+CRITICAL ENGINEERING & REACT IMPLEMENTATION RULES:
 1. "src/components/App.tsx":
-   - Must be a complete, self-contained single-page React application component named "App" and exported via "export default App;" (and "export function App()").
-   - Include "use client"; at the top, and import ONLY from 'react' (e.g., import React, { useState, useEffect, useMemo, useCallback } from 'react';).
-   - Define all TypeScript types/interfaces directly inside "src/components/App.tsx" (do NOT import from '../types' or external modules) so "src/components/App.tsx" compiles standalone with zero unresolved imports.
-   - Style with Tailwind CSS utility classes and write clean, well-structured, multi-section code (420 to 680 lines of TypeScript/JSX — do NOT golf or cram lines together, and never use bare icon boxes where product/visual imagery belongs).
-   - VISUAL & PRODUCT QUALITY MANDATE:
-     * NEVER use bare FontAwesome icons as a substitute for product photos in e-commerce, jewellery, fashion, food, real estate, or travel apps! Always use real, high-resolution curated Unsplash photography URLs (e.g., \`https://images.unsplash.com/photo-...?auto=format&fit=crop&w=800&q=80\`) with \`referrerPolicy="no-referrer"\`, \`loading="lazy"\`, object-cover styling, subtle hover zoom (\`group-hover:scale-105 transition-transform duration-500\`), and an \`onError\` fallback image so every card looks like a real luxury/production product!
-     * NEVER use raw unstyled browser \`<input type="checkbox">\` or plain unstyled \`<select>\` dropdowns. Always build custom-styled pill selectors, segmented tab bars, custom toggle switches, and refined filter chips.
-     * Include a striking **Hero Banner / Showcase Header** with editorial typography, value propositions, live KPI metrics, and primary/secondary CTA buttons.
-     * Include **Multi-View Navigation Tabs** in the top navbar (e.g., for e-commerce/jewellery: "Collections Catalog", "Bespoke Customizer / Atelier", "Saved Wishlist", and "Orders & Concierge"; for productivity/SaaS: "Workspace", "Kanban Board", "Analytics & Insights", "Settings").
-     * Include an interactive **Theme Switcher** with 4 cohesive, carefully crafted palettes (e.g., Luxury Noir & Champagne Gold, Warm Ivory Editorial, Emerald Velvet, Rose Quartz Daylight).
-     * Include rich **Detail & Customization Modals** (e.g., for jewellery: selectable Metal Karat 14K/18K/Platinum, Ring/Chain Size selector, custom Engraving text preview, GIA certification badge, and customer reviews) and a **Multi-Step Slide-Over Drawer / Checkout Flow** (Cart items, Promo codes, Gift packaging toggle, Shipping form, and instant Order Confirmation with tracking ID).
-   - PERFORMANCE & REACT STATE HYGIENE:
-     * Guard \`localStorage\` persistence with an \`isHydrated\` state flag so the save \`useEffect\` never overwrites stored data with empty defaults on initial mount.
-     * Memoize filtered/sorted lists with \`useMemo\` and handlers with \`useCallback\` for smooth 60fps interaction.
-     * Zero placeholders, zero "TODO" comments, and zero non-functional buttons.
+   - Must be a complete, self-contained React application component named "App" and exported via both "export function App()" and "export default App;".
+   - Include "use client"; at the top, and import ONLY from 'react' (e.g., import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';).
+   - Define all TypeScript types/interfaces directly inside "src/components/App.tsx" (do NOT import from '../types' or external packages) so "src/components/App.tsx" compiles standalone with zero unresolved imports.
+   - Style with Tailwind CSS utility classes and write clean, well-structured, multi-module TypeScript/JSX (450 to 750 lines of rich, domain-authentic code).
+   - Guard any \`localStorage\` persistence with an \`isHydrated\` state flag so initial mount never overwrites stored state.
+   - Memoize derived datasets, analytics, and filtered collections with \`useMemo\` and handlers with \`useCallback\`.
+   - Zero placeholders, zero "TODO" comments, and zero dead buttons — every button, modal, filter, form, chart toggle, and workflow action must mutate or compute real state.
 2. "src/types/index.ts":
-   - Exported TypeScript interfaces for reference and documentation.
+   - Exported TypeScript interfaces documenting the domain data model.
 3. "package.json":
    - Valid JSON with name "${slug}", version "1.0.0", scripts: {"dev": "vite --port 5173", "build": "bun build src/components/App.tsx --outdir dist", "test": "bun test tests/app.test.ts"}.
 4. "tests/app.test.ts":
    - Real executable unit tests using ONLY: import { test, expect } from "bun:test";
-   - Include 5 to 6 meaningful unit test assertions verifying core calculations, filtering, customization pricing, state transitions, and domain invariants for "${effectiveTitle}". Do not import DOM/React rendering libraries in tests/app.test.ts.
+   - Include 5 to 6 meaningful unit test assertions verifying core domain calculations, filtering, workflow state transitions, and business rules for "${effectiveTitle}". Do not import DOM/React rendering libraries in tests/app.test.ts.
 5. "README.md":
-   - Concise architectural overview, implemented features, and verification commands.
+   - Concise architectural overview, domain modules, and verification commands.
 
 OUTPUT FORMAT:
 Respond ONLY with a single valid JSON object (no markdown prose outside the JSON) matching this exact schema:
@@ -501,8 +509,8 @@ Respond ONLY with a single valid JSON object (no markdown prose outside the JSON
 
   const wrappedPrompt = wrapUntrustedContent("user_request", prompt);
   const userMessage = hasExistingApp
-    ? `Execute this iterative change / UI redesign / feature implementation on the existing project ("${effectiveTitle}") for the user request:\n${wrappedPrompt}\nApply all requested changes and UI/theme enhancements thoroughly, ensure every interactive control works end-to-end, and return ONLY the valid JSON object.`
-    : `Implement the complete, enhanced, production-grade application files for the user request:\n${wrappedPrompt}\n(Project Title: "${effectiveTitle}"). Fulfill every requirement with high-craft UI components and full interactivity, and return ONLY the valid JSON object.`;
+    ? `Execute this iterative change / architectural evolution / feature implementation on the existing project ("${effectiveTitle}") for the user request:\n${wrappedPrompt}\nApply all requested changes thoroughly with a domain-authentic UI and complete end-to-end state, and return ONLY the valid JSON object.`
+    : `Architect and implement a bespoke, production-grade application for the user request:\n${wrappedPrompt}\n(Project Title: "${effectiveTitle}"). Design a unique layout, navigation structure, and domain state engine tailored specifically to this request — never a generic template — and return ONLY the valid JSON object.`;
 
   // Allocate 20,000 max_tokens and 180s timeout for thorough, high-quality synthesis
   const response = await callAnthropicMessages({

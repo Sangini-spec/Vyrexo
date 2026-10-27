@@ -64,27 +64,40 @@ export function normalizeSpokenTranscript(
       .replace(/\b(whatsapp|what'?s\s+app|whats\s+app|watch\s+up|watts\s+up|what\s+sup|watsup)\b/gi, "what's up");
   }
 
-  // 2. Wake-word & "Rex" name smudges (including soft-spoken phonetic variants)
+  // 2. Wake-word & "Rex" name smudges (including soft-spoken / distant-mic / "Rix" phonetic variants)
   text = text
-    .replace(/^(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex)\b/i, "Rex")
     .replace(
-      /\b(hey|hi|hello|yo|ok|okay|dear)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/gi,
+      /\b(higher\s+ex|hire\s+ex|high\s+rex|high\s+rix|high\s+ex|hi\s+ex|hey\s+ex|i\s+rex|i\s+rix|irex|irix|eye\s+rex|hi\s+eric|hey\s+eric|hi\s+erix|hey\s+erix|hi\s+rix|hey\s+rix|hi\s+ricks|hey\s+ricks|hi\s+rocks|hey\s+rocks|hi\s+racks|hey\s+racks|hi\s+wrecks|hey\s+wrecks|hi\s+lex|hey\s+lex)\b/gi,
+      "Hi Rex"
+    )
+    .replace(
+      /^(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|rick|regs|reg|brex|dex|tex|alex|pyrex|tyrex|directs|irex|irix|erix|rox)\b/i,
+      "Rex"
+    )
+    .replace(
+      /\b(hey|hi|hello|yo|ok|okay|dear)\s+(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|rick|regs|reg|brex|dex|tex|alex|next|text|red|max|ex|eric|erics|erix|rocks|rock|rox|pyrex|tyrex|directs)\b/gi,
       "$1 Rex"
     )
     .replace(
-      /\b(stop|pause|please\s+stop|please\s+pause|wait)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/gi,
-      "$1 Rex"
+      /\b(stop|pause|please\s+stop|please\s+pause|wait|top|paws)\s+(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|rick|regs|reg|brex|dex|tex|alex|next|text|red|max|ex|eric|erix|rocks|rox|rex)\b/gi,
+      (_m, cmd) => {
+        const cleanCmd = /^top$/i.test(cmd) ? "stop" : /^paws$/i.test(cmd) ? "pause" : cmd;
+        return `${cleanCmd} Rex`;
+      }
     )
     .replace(
-      /\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex)\s+(stop|pause|please\s+stop|please\s+pause|wait)\b/gi,
-      "Rex $2"
+      /\b(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|rick|regs|reg|brex|dex|tex|alex|rex)\s+(stop|pause|please\s+stop|please\s+pause|wait|top|paws)\b/gi,
+      (_m, _name, cmd) => {
+        const cleanCmd = /^top$/i.test(cmd) ? "stop" : /^paws$/i.test(cmd) ? "pause" : cmd;
+        return `Rex ${cleanCmd}`;
+      }
     )
     .replace(
-      /\b(what'?s\s+up|whats\s+up|sup|wassup|how\s+are\s+you|how'?s\s+it\s+going)\s+(lyrics|lex|wrecks|rax|racks|rick'?s|riks|rick|regs|brex|dex|tex|alex|next)\b/gi,
+      /\b(what'?s\s+up|whats\s+up|sup|wassup|how\s+are\s+you|how'?s\s+it\s+going)\s+(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|rick|regs|reg|brex|dex|tex|alex|next)\b/gi,
       "$1, Rex"
     )
     .replace(
-      /\b(lyrics|lex|wrecks|rax|racks|rick|lex)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you|could\s+you|please|sing|say)\b/gi,
+      /\b(lyrics|lex|wrecks|wreck|rax|racks|rack|rix|rixx|ricks|rik|ric|rexx|rick|lex)\s+(i\s+know|how\s+are|what|tell\s+me|show|build|can\s+you|could\s+you|please|sing|say)\b/gi,
       "Rex, $2"
     );
 
@@ -130,8 +143,15 @@ export function normalizeSpokenTranscript(
     .replace(/\bwanna\b/gi, "want to")
     .replace(/\bgonna\b/gi, "going to");
 
-  // 5. Technical & Project Domain Smudges
+  // 5. Technical, Code Snippet & Project Domain Smudges
   text = text
+    // "code snippet" phonetic smudges ("code is nepped", "code neppet", "code snip it", "cold snippet", etc.)
+    .replace(
+      /\b(code|cold|coat|cord)\s+(is\s+nepped|is\s+neppet|is\s+nipped|is\s+snipped|neppet|nepet|nepped|nip\s*it|nipped|snip\s*it|snipped|snapped|snip|sniper)s?\b/gi,
+      "code snippet"
+    )
+    .replace(/\b(code|cold)\s+snippets?\b/gi, "code snippet")
+    .replace(/\b(neppet|nepet|nepped|snip\s+it)\b/gi, "snippet")
     .replace(/\bbed\s+for\b/gi, "built for")
     .replace(/\bbill\s+for\b/gi, "built for")
     .replace(/\bbed\s+it\b/gi, "built it")

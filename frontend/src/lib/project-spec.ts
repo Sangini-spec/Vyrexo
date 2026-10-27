@@ -142,16 +142,32 @@ export function resolveSemanticSessionName(
     return "RailGo Train Booking";
   }
 
-  // 1. If a real project title exists and is not a placeholder/bad session name, prefer it
-  if (projectTitle && !isPlaceholderOrBadSessionName(projectTitle)) {
+  // Self-heal check: Did a prior regex bug ("What would you like to do?") poison currentName or projectTitle with "TaskFlow"
+  // even though the user's conversation turns never asked for a todo list app?
+  const userTurnsText = Array.isArray(turns)
+    ? turns
+        .filter((t) => t?.role === "user")
+        .map((t) => (t?.text || t?.content || "").trim())
+        .join(" ")
+    : "";
+  const userActuallyAskedForTodo =
+    !userTurnsText ||
+    /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|task\s+list|task\s+manager|taskflow|checklist)\b/i.test(
+      userTurnsText
+    );
+  const isPoisonedTaskFlowTitle = (val?: string | null) =>
+    Boolean(val && /\b(taskflow|to-do|todo)\b/i.test(val) && userTurnsText.length > 5 && !userActuallyAskedForTodo);
+
+  // 1. If a real project title exists and is not a placeholder/bad session name (or poisoned TaskFlow), prefer it
+  if (projectTitle && !isPlaceholderOrBadSessionName(projectTitle) && !isPoisonedTaskFlowTitle(projectTitle)) {
     const fromProj = generateChatTitle(projectTitle, projectTitle);
     if (fromProj && !isPlaceholderOrBadSessionName(fromProj)) {
       return fromProj;
     }
   }
 
-  // 2. If the current session name is already a valid semantic name, preserve it
-  if (currentName && !isPlaceholderOrBadSessionName(currentName)) {
+  // 2. If the current session name is already a valid semantic name (and not poisoned TaskFlow), preserve it
+  if (currentName && !isPlaceholderOrBadSessionName(currentName) && !isPoisonedTaskFlowTitle(currentName)) {
     return currentName.trim();
   }
 
@@ -172,16 +188,16 @@ export function resolveSemanticSessionName(
       .map((t) => (t?.text || t?.content || "").trim())
       .filter((txt) => txt.length > 2 && !isNonTopicalUtterance(txt) && !isPlaceholderOrBadSessionName(txt));
 
-    // Prefer user turns that explicitly mention building/creating an app
+    // Prefer user turns that explicitly mention building/creating an app or domain
     const buildTurns = userTurns.filter((txt) =>
-      /\b(build|create|make|develop|design|app|application|platform|website|system|dashboard|store|booking|calculator|timer|game)\b/i.test(
+      /\b(build|create|make|develop|design|work\s+on|app|application|platform|website|system|dashboard|store|shop|ecommerce|e-commerce|shoe|shoes|sneaker|booking|calculator|timer|game)\b/i.test(
         txt
       )
     );
 
     for (const candidate of [...buildTurns, ...userTurns]) {
       const derived = generateChatTitle(candidate);
-      if (derived && !isPlaceholderOrBadSessionName(derived)) {
+      if (derived && !isPlaceholderOrBadSessionName(derived) && !isPoisonedTaskFlowTitle(derived)) {
         return derived;
       }
     }
@@ -193,7 +209,7 @@ export function resolveSemanticSessionName(
         const m =
           txt.match(/files\s+for\s+["*]+([A-Za-z0-9][A-Za-z0-9\s—\-]{2,35}?)["*]+/i) ||
           txt.match(/built\s+["*]+([A-Za-z0-9][A-Za-z0-9\s—\-]{2,35}?)["*]+/i);
-        if (m && m[1] && !isPlaceholderOrBadSessionName(m[1])) {
+        if (m && m[1] && !isPlaceholderOrBadSessionName(m[1]) && !isPoisonedTaskFlowTitle(m[1])) {
           const derived = generateChatTitle(m[1], m[1]);
           if (derived && !isPlaceholderOrBadSessionName(derived)) {
             return derived;
@@ -208,7 +224,7 @@ export function resolveSemanticSessionName(
     return "RailGo Train Booking";
   }
 
-  return currentName && !isPlaceholderOrBadSessionName(currentName)
+  return currentName && !isPlaceholderOrBadSessionName(currentName) && !isPoisonedTaskFlowTitle(currentName)
     ? currentName.trim()
     : "New Session";
 }
@@ -221,7 +237,10 @@ export function extractProjectName(
 
   const clean = prompt.trim();
   const lower = clean.toLowerCase();
-  const historyText = (history || []).map((h) => h.content.toLowerCase()).join(" ");
+  const historyText = (history || [])
+    .filter((h) => !h.role || h.role === "user")
+    .map((h) => h.content.toLowerCase())
+    .join(" ");
   const combined = `${lower} ${historyText}`;
 
   // Top Priority: RailGo / Train & Railway Booking
@@ -304,23 +323,19 @@ export function extractProjectName(
 
   // Dynamic, context-aware e-commerce & retail brand naming (never hardcoded to a single static name)
   if (
-    /\b(ecommerce|e-commerce|online\s*store|shopping\s*app|shopping\s*platform|retail\s*app|marketplace|storefront|merchandise|clothing|clothes|fashion|apparel|sneaker|shoe|footwear|cosmetic|makeup|beauty|skincare|facial|jewel|jewellery|jewelry|diamond|boutique|grocery|groceries|gadget|electronics|furniture|decor|book\s*store|pet\s*store)\b/i.test(
+    /\b(ecommerce|e-commerce|online\s*store|shopping\s*app|shopping\s*platform|shopping\s*website|retail\s*app|marketplace|storefront|merchandise|clothing|clothes|fashion|apparel|sneakers?|shoes?|footwear|kicks|buying\s+shoes|cosmetics?|makeup|beauty|skincare|facial|jewel|jewellery|jewelry|diamond|boutique|grocery|groceries|gadget|electronics|furniture|decor|book\s*store|pet\s*store)\b/i.test(
       combined
     ) ||
-    (/\b(store|shop|cart|catalog|checkout)\b/i.test(lower) &&
-      /\b(build|create|make|develop|code|scaffold|app|application|website|platform)\b/i.test(combined))
+    (/\b(store|shop|cart|catalog|checkout|buying|buy)\b/i.test(lower) &&
+      /\b(build|create|make|develop|code|scaffold|work\s+on|app|application|website|platform)\b/i.test(combined))
   ) {
     return generateDynamicEcommerceBrandName(clean, combined);
   }
 
   if (
-    combined.includes("todo") ||
-    combined.includes("to-do") ||
-    /\bto\s+do(\s+list)?\b/i.test(combined) ||
-    combined.includes("checklist") ||
-    combined.includes("task list") ||
-    combined.includes("task manager") ||
-    combined.includes("taskflow")
+    /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+      combined
+    )
   ) {
     return "TaskFlow";
   }
@@ -357,25 +372,25 @@ export function extractProjectName(
     return "NexusDash";
   }
 
-  // Fallback: extract 1-2 prominent domain nouns (excluding generic UI/meta/change words)
+  // Fallback: extract 1-2 prominent domain nouns (excluding generic UI/meta/change/emotional words)
   const words = clean
     .replace(/[^\w\s]/g, "")
     .split(/\s+/)
     .filter(
       (w) =>
         w.length > 2 &&
-        !/^(just|now|start|working|work|build|built|make|create|develop|code|generate|implement|want|need|please|like|dont|don|not|some|other|another|different|theme|themes|element|elements|change|changes|update|updates|modify|redesign|improve|enhance|better|color|colors|style|layout|design|the|for|with|and|app|application|website|platform|software|system|tool|project|frontend|backend|component|components|good|great|job|done|correctly|nice|hey|rex|can|you|could|would|should|this|that|into|from|use|using|shopping|buy|today|ideas|something|happy|short|answer|long|expensive)$/i.test(
+        !/^(just|now|start|working|work|build|built|make|create|develop|code|generate|implement|want|need|please|like|dont|don|not|some|other|another|different|theme|themes|element|elements|change|changes|update|updates|modify|redesign|improve|enhance|better|color|colors|style|layout|design|the|for|with|and|app|application|website|platform|software|system|tool|project|frontend|backend|component|components|good|great|job|done|correctly|nice|hey|rex|rix|can|you|could|would|should|this|that|into|from|use|using|shopping|buy|today|ideas|something|happy|short|answer|long|expensive|tough|tired|exhausted|overwhelmed|stressed|sad|angry|upset|feeling|feelings|feel|really|very|much|hard|rough|day|life|person|people|time|things|stuff|about|when|what|where|why|how|who|which|there|here|been|have|has|had|having|doing|going|being|seem|seems|think|thinking|know|knowing|understand|teammates|right)$/i.test(
           w
         )
     );
 
   if (words.length > 0) {
     const word1 = words[0].charAt(0).toUpperCase() + words[0].slice(1).toLowerCase();
-    const word2 = words[1] ? words[1].charAt(0).toUpperCase() + words[1].slice(1).toLowerCase() : "App";
+    const word2 = words[1] ? words[1].charAt(0).toUpperCase() + words[1].slice(1).toLowerCase() : "Studio";
     return `${word1}${word2}`.slice(0, 22);
   }
 
-  return "NexusApp";
+  return "NexusStudio";
 }
 
 /**
@@ -530,8 +545,10 @@ export function isBareSilenceCommand(rawText: string): boolean {
   const cleaned = rawText
     .trim()
     .toLowerCase()
-    .replace(/\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|rick|brex|dex|tex|alex)\b/gi, "rex")
-    .replace(/\b(stop|pause|hey|hi|hello)\s+(next|text|red|max|ex)\b/gi, "$1 rex")
+    .replace(/\b(lyrics|lex|wrecks|wreck|rax|racks|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|regs|rick|brex|dex|tex|alex|eric|erics|erix|rocks|rox|pyrex|tyrex|directs|irex|irix)\b/gi, "rex")
+    .replace(/\b(stop|pause|top|paws|hey|hi|hello)\s+(next|text|red|max|ex|eric|erix|rocks|rox|rix|ricks)\b/gi, "$1 rex")
+    .replace(/\b(top|stawp|stap)\s+rex\b/gi, "stop rex")
+    .replace(/\b(paws|pos|pass)\s+rex\b/gi, "pause rex")
     .replace(/[.!?,;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -564,7 +581,7 @@ function isSentenceSemanticBuildTermination(sentence: string, isCurrentlyBuildin
   const s = sentence
     .trim()
     .toLowerCase()
-    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
+    .replace(/^(lyrics|lex|wrecks|wreck|rax|rix|rixx|ricks|rik|ric|rexx|alex)\b/i, "rex")
     .replace(/[.!?,;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -672,7 +689,7 @@ export function isConversationalWithdrawalCommand(
   const s = rawText
     .trim()
     .toLowerCase()
-    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "rex")
+    .replace(/^(lyrics|lex|wrecks|wreck|rax|rix|rixx|ricks|rik|ric|rexx|alex)\b/i, "rex")
     .replace(/[.!?,;:]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -798,8 +815,10 @@ export function extractUserInterruptFromBuffer(rawTranscript: string): {
 
   const normalized = rawTranscript
     .trim()
-    .replace(/\b(lyrics|lex|wrecks|rax|racks|rick'?s|riks|regs|rick|brex|dex|tex|alex)\b/gi, "Rex")
-    .replace(/\b(stop|pause|hey|hi|hello)\s+(next|text|red|max|ex)\b/gi, "$1 Rex");
+    .replace(/\b(lyrics|lex|wrecks|wreck|rax|racks|rix|rixx|ricks|rik|ric|rexx|rick'?s|riks|regs|rick|brex|dex|tex|alex|eric|erics|erix|rocks|rox|pyrex|tyrex|directs|irex|irix)\b/gi, "Rex")
+    .replace(/\b(stop|pause|top|paws|hey|hi|hello)\s+(next|text|red|max|ex|eric|erix|rocks|rox|rix|ricks)\b/gi, "$1 Rex")
+    .replace(/\b(top|stawp|stap)\s+Rex\b/gi, "stop Rex")
+    .replace(/\b(paws|pos)\s+Rex\b/gi, "pause Rex");
 
   // 1. Check if the entire string is already a bare silence command, conversational withdrawal, or semantic build termination
   if (isBareSilenceCommand(normalized)) {
@@ -867,7 +886,7 @@ export function analyzeWholeSentenceSemantics(
 
   const cleaned = rawText
     .trim()
-    .replace(/^(lyrics|lex|wrecks|rax|alex)\b/i, "Rex")
+    .replace(/^(lyrics|lex|wrecks|wreck|rax|rix|rixx|ricks|rik|ric|rexx|alex)\b/i, "Rex")
     .replace(/\b(bill|built|billed|bil|belt|bulb)\s+(a|an|the|this|that|it|me|my|our|new)\b/gi, "build $2")
     .replace(/\bto\s+do\s+list\b/gi, "todo list")
     .replace(/\bto-do\s+list\b/gi, "todo list")
@@ -962,6 +981,28 @@ export function analyzeWholeSentenceSemantics(
     };
   }
 
+  // Empathetic, emotional, or personal life/work reflections (e.g., "work is tough", "I'm tired of working on a project", "you understand my feeling")
+  // Must NEVER trigger an autonomous software build unless the user explicitly commands Rex to build/create an application.
+  const isPersonalEmotionalOrFatigueStatement =
+    /\b(i\s+am\s+(?:so\s+|really\s+|very\s+|pretty\s+|just\s+|feeling\s+)?(?:tired|exhausted|overwhelmed|stressed|burned\s+out|burnt\s+out|drained|fatigued|sad|down|upset|frustrated|sleepy|bored)|i'?m\s+(?:so\s+|really\s+|very\s+|pretty\s+|just\s+|feeling\s+)?(?:tired|exhausted|overwhelmed|stressed|burned\s+out|burnt\s+out|drained|fatigued|sad|down|upset|frustrated|sleepy|bored)|feeling\s+(?:so\s+|really\s+|very\s+|a\s+bit\s+)?(?:tired|exhausted|overwhelmed|stressed|tough|drained|down|low)|understand\s+my\s+feeling|work\s+is\s+(?:so\s+|really\s+|very\s+)?(?:tough|hard|tiring|exhausting|stressful|overwhelming)|(?:tough|hard|rough|long|tiring|exhausting)\s+(?:day|week|time|shift|work)|tired\s+(?:of|from)\s+working|(?:tough|hard|difficult)\s+to\s+work\s+on|i\s+(?:have|had)\s+to\s+work\s+on\s+my|what\s+about\s+you\s+what\s+are\s+you\s+doing|what\s+about\s+you\s+when\s+doing)\b/i.test(
+      candidateBuildText
+    );
+  const hasExplicitDirectedBuildCommand =
+    /\b(?:(?:rex|rix|hey\s+rex|hi\s+rex|can\s+you|could\s+you|please|i\s+want\s+you\s+to|i\s+need\s+you\s+to|let'?s|go\s+ahead\s+and)\s+)(?:build|create|develop|code|scaffold|architect|generate)\s+(?:me\s+)?(?:a|an|the|my|our|new)\s+([a-z0-9_-]+\s+){0,5}(?:app|application|website|web\s*app|platform|system|dashboard|store|portal|software|tool|project)\b/i.test(
+      candidateBuildText
+    );
+
+  if (isPersonalEmotionalOrFatigueStatement && !hasExplicitDirectedBuildCommand) {
+    return {
+      intent: "GUIDANCE_OR_CONVERSATION",
+      isBuildTermination: false,
+      isGuidanceOrQuestion: true,
+      isPauseOrSilence: false,
+      isAffirmativeBuildCommand: false,
+      reasoning: "Personal emotional reflection, fatigue expression, or empathetic conversation rather than a software build command.",
+    };
+  }
+
   // Personal/real-life shopping advice, buying suggestions, gift ideas, or everyday "make me feel/happy" idioms
   const hasExplicitSoftwareTarget =
     /\b(app|application|web\s*app|website|platform|dashboard|software|frontend|backend|ui|codebase|repo|repository|react|nextjs|next\.js|typescript|component|components|ecommerce\s+(app|application|site|website|platform|store)|shopping\s+(app|application|site|website|platform))\b/i.test(
@@ -985,11 +1026,15 @@ export function analyzeWholeSentenceSemantics(
     }
   }
 
-  // Strip everyday non-coding "make ..." idioms and epistemic "how to build" phrases before testing build regexes
+  // Strip everyday non-coding "make ..." idioms, personal "working on my own job" clauses, and epistemic "how to build" phrases before testing build regexes
   const normalizedForBuildCheck = candidateBuildText
     .replace(
       /\bmake\s+(me\s+)?(feel|happy|smile|laugh|cry|better|sense|sure|a\s+decision|a\s+choice|up\s+my\s+mind|it\s+short|it\s+brief|it\s+quick|friends|money|dinner|lunch|breakfast|coffee|tea)\b/gi,
       "feel"
+    )
+    .replace(
+      /\b(tired\s+of|tired\s+from|sick\s+of|exhausted\s+from|stressed\s+about|busy|tough|hard|difficult|i\s+was|i\s+have\s+been|i'?ve\s+been|i\s+had\s+to|i\s+have\s+to)\s+(working\s+on|work\s+on)\b/gi,
+      "handling"
     )
     .replace(/\b(go|going)\s+(to\s+|for\s+)?shopping\b/gi, "browse items")
     .replace(
@@ -1016,7 +1061,7 @@ export function analyzeWholeSentenceSemantics(
 
   // Exclude pure meta/explanation/suggestion questions that do NOT contain an imperative request to build software
   const hasBuildDirective =
-    /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|start\s+working|work\s+on|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)\s+([a-z0-9_-]+\s+){0,4}(app|application|project|website|web\s*app|platform|dashboard|store|shop|ecommerce|e-commerce|tool|system|calculator|todo|tracker|game|page)|make\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo|website|platform|dashboard|ecommerce\s+app|shopping\s+app)|develop\s+(a|an|the|this|that|it|my|our|new)|scaffold\s+(a|an|the|this|that|it|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
+    /\b(just\s+build|now\s+build|please\s+build|start\s+building|start\s+coding|let('s|s)\s+build|go\s+ahead\s+and\s+build|build\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)|create\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple)\s+([a-z0-9_-]+\s+){0,4}(app|application|project|website|web\s*app|platform|dashboard|store|shop|ecommerce|e-commerce|tool|system|calculator|todo|tracker|game|page)|make\s+(a|an|the|this|that|it|me\s+a|me\s+an|my|our|new|basic|simple|some|these|those)?\s*(changes|updates|edits|improvements|modifications|app|application|project|todo|website|platform|dashboard|ecommerce\s+app|shopping\s+app)|develop\s+(a|an|the|this|that|it|my|our|new)|scaffold\s+(a|an|the|this|that|it|my|our|new)|deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|use\s+(some\s+|an?\s+)?(other|different|new|better)\s+(theme|color|style|layout|design|ui|elements?|components?)|change\s+the\s+(ui|theme|design|color|colors|layout|style|elements|components|buttons|header|background)|redesign|restyle)\b/i.test(
       normalizedForBuildCheck
     );
 
@@ -1040,19 +1085,19 @@ export function analyzeWholeSentenceSemantics(
     };
   }
 
-  // Direct Build, Create, Scaffold, "Start Working On", UI/Theme Redesign, or Agent Deployment commands
+  // Direct Build, Create, Scaffold, "Start Working On" (only with explicit imperative directive), UI/Theme Redesign, or Agent Deployment commands
   const explicitBuildPatterns = [
-    /\b(start\s+working(\s+on)?|begin\s+working(\s+on)?|get\s+to\s+work(\s+on)?|keep\s+working\s+on|continue\s+working\s+on|continue\s+building)\b/i,
-    /\b(let('s|s)?|can\s+you|could\s+you|please|i\s+want\s+(you\s+)?to|we\s+should|you\s+should|time\s+to|ready\s+to|just|now)?\s*(work\s+on)\s+(a|an|the|this|that|my|our|it|new|some|another)?\s*([a-z0-9_-]+\s+)*(project|app|application|website|platform|system|tool|store|dashboard|todo|list|calculator|game|portal|service|idea)\b/i,
+    /\b(let('s|s)|can\s+you|could\s+you|would\s+you|will\s+you|please|i\s+want\s+you\s+to|i\s+need\s+you\s+to|you\s+should|we\s+should|rex|rix)\s+(start\s+working\s+on|begin\s+working\s+on|get\s+to\s+work\s+on|keep\s+working\s+on|continue\s+working\s+on|continue\s+building)\b/i,
+    /\b(let('s|s)|can\s+you|could\s+you|would\s+you|will\s+you|please|i\s+want\s+you\s+to|i\s+need\s+you\s+to|we\s+should|you\s+should|rex|rix)\s+(work\s+on)\s+(a|an|the|this|that|my|our|it|new|some|another)?\s*([a-z0-9_-]+\s+)*(project|app|application|website|platform|system|tool|store|dashboard|todo|list|calculator|game|portal|service|idea)\b/i,
     /\b(start\s+(building|coding|developing|creating|making|implementing|scaffolding|execution|the\s+build|the\s+project|the\s+app|the\s+application|actual\s+building|the\s+actual\s+building))\b/i,
     /\b(deploy\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|launch\s+(the\s+)?(ai\s+|6\s+|six\s+)?agents|get\s+the\s+(app|application|project)\s+ready)\b/i,
     /\b(you\s+need\s+to\s+start\s+building|need\s+to\s+start\s+building|have\s+to\s+start\s+building|time\s+to\s+start\s+building|we\s+should\s+start\s+building)\b/i,
     /\b(let('s|s)\s+build|start\s+to\s+build|now\s+build|just\s+build|please\s+build|go\s+ahead\s+and\s+(build|create|code|scaffold|implement))\b/i,
     /\b(build|scaffold|code|develop|architect)\s+(it|this|that)\b/i,
-    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect|work\s+on)\s+(me\s+)?(a\s+|an\s+|the\s+|this\s+|that\s+|my\s+|our\s+|some\s+|another\s+|new\s+)?([a-z0-9_-]+\s+){0,6}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|online\s+store|ecommerce|e-commerce|shopping\s+app|shopping\s+website|shopping\s+platform|storefront|calculator|tracker|todo|to-do|task\s+list|checklist|board|kanban|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|landing\s+page|clone|bot|calendar|scheduler|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|wallet|portfolio|blog|cms|marketplace|booking\s+app|booking\s+system|quiz\s+app)\b/i,
+    /\b(build|create|make|develop|code|scaffold|implement|generate|construct|architect)\s+(me\s+)?(a\s+|an\s+|the\s+|this\s+|that\s+|my\s+|our\s+|some\s+|another\s+|new\s+|enterprise\s+|enterprise-level\s+|full-stack\s+|custom\s+)?([a-z0-9_-]+\s+){0,8}(app|application|project|software|website|web\s*app|site|platform|dashboard|system|tool|online\s+store|ecommerce|e-commerce|shopping\s+app|shopping\s+website|shopping\s+platform|storefront|calculator|tracker|todo|to-do|task\s+list|checklist|board|kanban|timer|pomodoro|game|portal|service|api|backend|frontend|ui|interface|landing\s+page|clone|bot|calendar|scheduler|messenger|editor|studio|player|visualizer|converter|generator|manager|crm|erp|siem|soc|emr|ehr|lms|hrms|ats|pos|wallet|portfolio|blog|cms|marketplace|booking\s+app|booking\s+system|quiz\s+app|terminal|console|workbench|simulator|engine)\b/i,
     /\b(build|create|develop|code|scaffold)\s+(me\s+)?(a\s+|an\s+|the\s+|my\s+|our\s+|new\s+)?([a-z0-9_-]+\s+){0,4}(store|shop)\b/i,
-    /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|construct|start\s+working|work\s+on)\s+(a|an|the|this|that|it|my|our|new|full|complete|modern|simple|basic|custom|interactive)\b/i,
-    /^\s*(build|create|develop|code|scaffold|implement|construct)\s+(a|an|the|this|that|it|my|our|new)\b/i,
+    /^\s*(?:(?:hey\s+rex|hi\s+rex|hello\s+rex|rex|rix|ok|okay|alright|so|well|now|just|please|can\s+you|could\s+you|would\s+you|will\s+you|i\s+want\s+you\s+to|i\s+need\s+you\s+to|let('s|s))\s+)+(build|create|develop|code|scaffold|implement|construct|start\s+working\s+on|work\s+on)\s+(a|an|the|this|that|it|my|our|new|full|complete|modern|simple|basic|custom|interactive|enterprise|enterprise-level)\b/i,
+    /^\s*(build|create|develop|code|scaffold|implement|construct)\s+(a|an|the|this|that|it|my|our|new|enterprise|enterprise-level)\b/i,
     /\b(make\s+(the\s+|some\s+|these\s+|those\s+)?(changes|updates|edits|improvements|modifications)|apply\s+(the\s+|these\s+|those\s+)?(changes|updates)|implement\s+(the\s+|these\s+)?(changes|updates|features))\b/i,
     /\b(use\s+(some\s+|an?\s+)?(other|different|new|better|another|modern|light|dark|vibrant|colorful)\s+(theme|themes|color|colors|style|styles|layout|design|ui|elements?|components?))\b/i,
     /\b(don'?t\s+like\s+the\s+(ui|design|theme|color|colors|layout|look|style|buttons|components))\b/i,
@@ -1231,11 +1276,17 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
     lower.includes("skincare") ||
     lower.includes("facial") ||
     lower.includes("clothing") ||
+    lower.includes("clothes") ||
     lower.includes("fashion") ||
+    lower.includes("shoe") ||
+    lower.includes("sneaker") ||
+    lower.includes("footwear") ||
+    lower.includes("kicks") ||
     lower.includes("ecommerce") ||
     lower.includes("e-commerce") ||
-    (lower.includes("store") && /\b(build|create|make|app|online)\b/i.test(lower)) ||
-    (lower.includes("shop") && /\b(build|create|make|app|online)\b/i.test(lower))
+    (lower.includes("store") && /\b(build|create|make|work|app|website|online|buying|buy)\b/i.test(lower)) ||
+    (lower.includes("shop") && /\b(build|create|make|work|app|website|online|buying|buy)\b/i.test(lower)) ||
+    (/\b(buying|buy)\s+(shoes|sneakers|clothes|items|products)\b/i.test(lower) && /\b(website|app|application|platform|store)\b/i.test(lower))
   ) {
     return `${generateDynamicEcommerceBrandName(p)} Store`;
   }
@@ -1244,7 +1295,13 @@ export function generateChatTitle(prompt: string, projectName?: string): string 
   if (lower.includes("landing page") || lower.includes("startup landing")) return "Startup Landing Page";
   if (lower.includes("crypto") || lower.includes("bitcoin") || lower.includes("ethereum") || lower.includes("arbitrage")) return "Crypto Analytics";
   if (lower.includes("invest") || lower.includes("stock") || lower.includes("portfolio") || lower.includes("finance") || lower.includes("wealth")) return "ApexWealth Finance";
-  if (lower.includes("todo") || lower.includes("to-do") || /\bto\s+do\b/i.test(lower) || lower.includes("checklist")) return "TaskFlow Todo App";
+  if (
+    /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|taskflow)\b/i.test(
+      lower
+    )
+  ) {
+    return "TaskFlow Todo App";
+  }
   if (lower.includes("task") || lower.includes("kanban") || lower.includes("sprint")) return "Sprint Task Board";
   if (lower.includes("weather") || lower.includes("forecast")) return "Weather Forecast App";
   if (lower.includes("music") || lower.includes("audio") || lower.includes("podcast") || lower.includes("synthesizer")) return "Audio Studio App";
@@ -1306,7 +1363,20 @@ export function extractProjectSpecification(
     projectType = "productivity_os";
   } else if (lower.includes("landing page") || lower.includes("landing")) projectType = "landing_page";
   else if (lower.includes("food") || lower.includes("restaurant") || lower.includes("meal")) projectType = "food_delivery";
-  else if (lower.includes("clothing") || lower.includes("fashion") || lower.includes("ecommerce") || lower.includes("shop") || lower.includes("store")) projectType = "ecommerce";
+  else if (
+    lower.includes("clothing") ||
+    lower.includes("clothes") ||
+    lower.includes("fashion") ||
+    lower.includes("shoe") ||
+    lower.includes("sneaker") ||
+    lower.includes("footwear") ||
+    lower.includes("kicks") ||
+    lower.includes("ecommerce") ||
+    lower.includes("e-commerce") ||
+    lower.includes("shop") ||
+    lower.includes("store")
+  )
+    projectType = "ecommerce";
   else if (lower.includes("saas") || lower.includes("dashboard") || lower.includes("productivity")) projectType = "saas_dashboard";
   else if (lower.includes("investment") || lower.includes("crypto") || lower.includes("wealth") || lower.includes("fintech")) projectType = "fintech";
   else if (lower.includes("coding agent") || lower.includes("developer") || lower.includes("tool")) projectType = "developer_tool";
@@ -1424,33 +1494,30 @@ export function extractProjectSpecification(
     );
     secondaryFeatures.push("Wishlist toggle", "Customer reviews and star ratings", "Shipping calculator");
   } else if (isSaaS) {
-    purpose = `Comprehensive SaaS operational dashboard for ${projectName} with live analytics, data tables, and workflow management.`;
-    targetUsers = "Operations managers, team leads, and enterprise analysts.";
+    purpose = `Bespoke operational platform or enterprise system for ${projectName}, dynamically architected for the exact domain in the user's request.`;
+    targetUsers = "Domain professionals, operators, and enterprise teams.";
+    designDirection = "Domain-authentic layout and information architecture chosen dynamically by Claude (e.g. collapsible sidebar + multi-pane workspace, dense data grid, split-view console, or visual pipeline — never a generic template).";
     coreFeatures.push(
-      "Real-time KPI metric overview cards with percentage trends",
-      "Interactive chart visualizations (revenue velocity, activity volume)",
-      "Searchable data management table with column sorting and status filters",
-      "Action modal for creating new records or triggering workflows",
-      "Activity audit log tracking recent team interactions"
+      `Domain-specific primary workspace tailored to: "${fullText}"`,
+      "Interactive multi-view or multi-module navigation matching the domain workflow",
+      "Real-time search, filtering, sorting, and live state mutations (create, edit, transition, delete)",
+      "Detailed inspection drawer or modal for deep entity workflows"
     );
-    secondaryFeatures.push("Date range picker", "Export data to CSV/JSON", "Role/permissions toggle");
   } else {
-    purpose = `Full-featured interactive application for ${projectName} based on complete user requirements.`;
+    purpose = `Bespoke, production-grade application (${projectName}) dynamically architected from the user's exact specification: "${fullText}"`;
+    designDirection = "Unique, domain-authentic visual identity, layout structure, and navigation paradigm tailored specifically to the user's prompt — no cookie-cutter templates.";
     coreFeatures.push(
-      "Interactive core tool / dashboard view with live state changes",
-      "Search and multi-parameter filtering engine",
-      "Detailed view / modal for deep item inspection and action triggering",
-      "Comprehensive state management with real-time feedback"
+      `Full interactive implementation of the user's requested concept: "${fullText}"`,
+      "Bespoke navigation and layout architecture matching the application's real-world category",
+      "Rich domain state engine with interactive creation, editing, filtering, and live computed feedback"
     );
   }
 
-  // Parse any explicit user features mentioned in the prompt
-  const sentenceList = fullText.split(/[.\n;]+/).map((s) => s.trim()).filter((s) => s.length > 8);
+  // Parse all explicit user sentences/clauses from the prompt so Claude receives the full user intent
+  const sentenceList = fullText.split(/[.\n;]+/).map((s) => s.trim()).filter((s) => s.length > 5);
   for (const s of sentenceList) {
-    if (/\b(must have|should have|include|with|has|feature|features|support|tracking|filter|search|cart|checkout|order)\b/i.test(s)) {
-      if (!coreFeatures.some((f) => f.toLowerCase().includes(s.slice(0, 15).toLowerCase()))) {
-        functionalRequirements.push(s);
-      }
+    if (!coreFeatures.some((f) => f.toLowerCase().includes(s.slice(0, 20).toLowerCase()))) {
+      functionalRequirements.push(s);
     }
   }
 

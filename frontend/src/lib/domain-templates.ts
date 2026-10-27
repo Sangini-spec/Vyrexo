@@ -106,8 +106,13 @@ export function generateRichDomainFallback(
     ];
   }
 
+  const hasSpecificNonTodoDomain =
+    /\b(ecommerce|e-commerce|shoe|shoes|sneaker|sneakers|footwear|kicks|clothing|clothes|fashion|apparel|cosmetic|skincare|beauty|flight|airline|train|railway|railgo|food|restaurant|crypto|drone|calculator|omnicalc)\b/i.test(
+      combined
+    );
   const isTodoListApp =
-    /\b(todo|to-do|to\s+do(\s+list)?|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
+    !hasSpecificNonTodoDomain &&
+    /\b(todo|to-do|to\s+do\s+(?:list|app|application|board|tracker|manager)|checklist|task\s+list|task\s+manager|taskflow)\b/i.test(
       combined
     );
 
@@ -900,7 +905,7 @@ A full-featured, interactive To-Do List and Task Management application built wi
   const isEcommerce =
     !isTrainBooking &&
     !isPublishing &&
-    /\b(ecommerce|e-commerce|clothing\s*store|apparel\s*store|fashion\s*store|shopping\s*cart|online\s*shop|apparel|wardrobe|fashion|jacket|wear)\b/i.test(
+    /\b(ecommerce|e-commerce|clothing\s*store|apparel\s*store|fashion\s*store|shoe\s*store|sneaker\s*store|buying\s+shoes|shoes?|sneakers?|footwear|kicks|stridevault|kickslab|velocestep|urbantread|solecraft|aerokicks|shopping\s*cart|online\s*shop|online\s*store|storefront|marketplace|apparel|wardrobe|fashion|jacket|wear)\b/i.test(
       combined
     );
   const isCrypto =
@@ -2142,30 +2147,118 @@ test("validates subscriber increment logic", () => {
 });
 `;
   } else if (isEcommerce) {
-    appTsx = `"use client";
-
-import React, { useState, useMemo } from "react";
-
-interface Product {
-  id: string;
-  name: string;
-  category: "Outerwear" | "Tops" | "Pants" | "Accessories";
-  price: number;
-  rating: number;
-  imageIcon: string;
-  badge?: string;
-  sizes: string[];
-  colors: string[];
-}
-
-interface CartItem {
-  product: Product;
-  size: string;
-  color: string;
-  qty: number;
-}
-
-const PRODUCTS: Product[] = [
+    const isShoeStore = /\b(shoe|shoes|sneaker|sneakers|footwear|kicks|stridevault|kickslab|velocestep|urbantread|solecraft|aerokicks)\b/i.test(
+      combined
+    );
+    const storeSubtitle = isShoeStore
+      ? "Performance Sneakers, Running Shoes & Streetwear Footwear"
+      : "Curated Modern Apparel & Everyday Wardrobe";
+    const heroBadge = isShoeStore ? "2026 Limited Sneaker Drop" : "New Season Release 2026";
+    const heroHeadline = isShoeStore
+      ? "Engineered Cushioning & Iconic Streetwear Kicks."
+      : "Architectural Tailoring for Everyday Living.";
+    const heroDescription = isShoeStore
+      ? "Shop carbon-plated marathon runners, high-top court classics, weatherproof trail footwear, and limited-edition everyday sneakers with instant US size selection."
+      : "Precision-cut Japanese selvedge denim, heavyweight combed cotton, and weatherproof outerwear engineered for longevity and effortless styling.";
+    const searchPlaceholder = isShoeStore
+      ? "Search running shoes, Jordans, trail, high-tops..."
+      : "Search jackets, hoodies, denim...";
+    const categoriesList = isShoeStore
+      ? '["All", "Running", "Basketball", "Lifestyle", "Trail & Outdoor"]'
+      : '["All", "Outerwear", "Tops", "Pants", "Accessories"]';
+    const categoryUnion = isShoeStore
+      ? '"Running" | "Basketball" | "Lifestyle" | "Trail & Outdoor"'
+      : '"Outerwear" | "Tops" | "Pants" | "Accessories"';
+    const productsCatalogCode = isShoeStore
+      ? `[
+  {
+    id: "shoe-1",
+    name: "AeroPulse Carbon Pro Runner",
+    category: "Running",
+    price: 195,
+    rating: 4.9,
+    imageIcon: "fa-solid fa-shoe-prints",
+    badge: "Bestseller",
+    sizes: ["US 8", "US 9", "US 10", "US 11", "US 12"],
+    colors: ["#ef4444", "#0f172a", "#38bdf8"]
+  },
+  {
+    id: "shoe-2",
+    name: "CourtApex High-Top Retro 1",
+    category: "Basketball",
+    price: 175,
+    rating: 4.9,
+    imageIcon: "fa-solid fa-basketball",
+    badge: "Limited Drop",
+    sizes: ["US 8", "US 9", "US 10", "US 11", "US 12"],
+    colors: ["#dc2626", "#1e293b", "#f59e0b"]
+  },
+  {
+    id: "shoe-3",
+    name: "CloudStride Knit Everyday Low",
+    category: "Lifestyle",
+    price: 135,
+    rating: 4.8,
+    imageIcon: "fa-solid fa-bolt",
+    badge: "Ultra Light",
+    sizes: ["US 7", "US 8", "US 9", "US 10", "US 11"],
+    colors: ["#f8fafc", "#334155", "#10b981"]
+  },
+  {
+    id: "shoe-4",
+    name: "TerraGrip Gore-Tex Trail GTX",
+    category: "Trail & Outdoor",
+    price: 168,
+    rating: 4.9,
+    imageIcon: "fa-solid fa-mountain",
+    badge: "Waterproof",
+    sizes: ["US 8", "US 9", "US 10", "US 11", "US 12"],
+    colors: ["#065f46", "#78350f", "#1e293b"]
+  },
+  {
+    id: "shoe-5",
+    name: "Veloce Nitro Tempo Trainer",
+    category: "Running",
+    price: 155,
+    rating: 4.7,
+    imageIcon: "fa-solid fa-person-running",
+    sizes: ["US 8", "US 9", "US 10", "US 11"],
+    colors: ["#f97316", "#0f172a"]
+  },
+  {
+    id: "shoe-6",
+    name: "UrbanTread Suede Skate Classic",
+    category: "Lifestyle",
+    price: 110,
+    rating: 4.8,
+    imageIcon: "fa-solid fa-fire",
+    badge: "Trending",
+    sizes: ["US 7", "US 8", "US 9", "US 10", "US 11"],
+    colors: ["#1e293b", "#713f12", "#4f46e5"]
+  },
+  {
+    id: "shoe-7",
+    name: "AirZoom Flight Elite Dunk",
+    category: "Basketball",
+    price: 185,
+    rating: 4.9,
+    imageIcon: "fa-solid fa-trophy",
+    sizes: ["US 9", "US 10", "US 11", "US 12"],
+    colors: ["#6366f1", "#0f172a", "#ec4899"]
+  },
+  {
+    id: "shoe-8",
+    name: "SummitRidge All-Terrain Boot",
+    category: "Trail & Outdoor",
+    price: 210,
+    rating: 4.8,
+    imageIcon: "fa-solid fa-compass",
+    badge: "Vibram Sole",
+    sizes: ["US 8", "US 9", "US 10", "US 11", "US 12"],
+    colors: ["#78350f", "#1c1917"]
+  }
+]`
+      : `[
   {
     id: "prod-1",
     name: "Architect Leather Biker Jacket",
@@ -2250,7 +2343,32 @@ const PRODUCTS: Product[] = [
     sizes: ["One Size"],
     colors: ["#d6d3d1", "#1e293b"]
   }
-];
+]`;
+
+    appTsx = `"use client";
+
+import React, { useState, useMemo } from "react";
+
+interface Product {
+  id: string;
+  name: string;
+  category: ${categoryUnion};
+  price: number;
+  rating: number;
+  imageIcon: string;
+  badge?: string;
+  sizes: string[];
+  colors: string[];
+}
+
+interface CartItem {
+  product: Product;
+  size: string;
+  color: string;
+  qty: number;
+}
+
+const PRODUCTS: Product[] = ${productsCatalogCode};
 
 export function App() {
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
@@ -2304,7 +2422,8 @@ export function App() {
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
 
   const applyPromo = () => {
-    if (promoCode.trim().toUpperCase() === "REX15" || promoCode.trim().toUpperCase() === "CLOTHES15") {
+    const code = promoCode.trim().toUpperCase();
+    if (code === "REX15" || code === "CLOTHES15" || code === "SHOES15" || code === "KICKS15") {
       setDiscountPercent(15);
     }
   };
@@ -2327,11 +2446,11 @@ export function App() {
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 text-amber-400 flex items-center justify-center text-lg shadow-lg shadow-amber-500/10">
-              <i className="fa-solid fa-shirt"></i>
+              <i className="${isShoeStore ? "fa-solid fa-shoe-prints" : "fa-solid fa-shirt"}"></i>
             </div>
             <div>
               <h1 className="text-lg font-bold text-white tracking-tight">${title}</h1>
-              <p className="text-[11px] text-slate-400">Curated Modern Apparel & Everyday Wardrobe</p>
+              <p className="text-[11px] text-slate-400">${storeSubtitle}</p>
             </div>
           </div>
 
@@ -2341,7 +2460,7 @@ export function App() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search jackets, hoodies, denim..."
+                placeholder="${searchPlaceholder}"
                 className="w-64 bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-500/50"
               />
               <i className="fa-solid fa-magnifying-glass text-slate-500 absolute left-3 top-2.5 text-xs"></i>
@@ -2367,13 +2486,13 @@ export function App() {
         <div className="relative rounded-3xl overflow-hidden bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 p-8 sm:p-12 shadow-2xl">
           <div className="max-w-xl space-y-4 relative z-10">
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-              <i className="fa-solid fa-sparkles"></i> New Season Release 2026
+              <i className="fa-solid fa-sparkles"></i> ${heroBadge}
             </span>
             <h2 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-tight">
-              Architectural Tailoring for Everyday Living.
+              ${heroHeadline}
             </h2>
             <p className="text-sm text-slate-300 leading-relaxed">
-              Precision-cut Japanese selvedge denim, heavyweight combed cotton, and weatherproof outerwear engineered for longevity and effortless styling.
+              ${heroDescription}
             </p>
           </div>
           <div className="absolute right-0 bottom-0 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none"></div>
@@ -2381,7 +2500,7 @@ export function App() {
 
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
           <div className="flex items-center gap-2 overflow-x-auto pb-1">
-            {["All", "Outerwear", "Tops", "Pants", "Accessories"].map((cat) => (
+            {${categoriesList}.map((cat) => (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}

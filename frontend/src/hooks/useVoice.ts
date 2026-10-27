@@ -9,24 +9,27 @@ import {
 } from "@/lib/project-spec";
 
 const WAKE_PATTERNS = [
-  /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear)\s+(?:rex|rick'?s?|riks|lex|wrecks|rax|racks|regs|brex|dex|tex|alex|next|text|red|max|ex)\b/i,
-  /\bhello\s+rex\b/i,
-  /\bhey\s+rex\b/i,
-  /\bhi\s+rex\b/i,
-  /\bok\s+rex\b/i,
-  /\boh\s+rex\b/i,
-  /\brex\b/i,
-  /^(?:rick|riks|rick's|lex|wrecks|rax|racks|regs|brex|dex|tex|alex)$/i,
+  /\b(hello|hey|hi|ok|okay|oh|yo|sup|dear|high|hay|he)\s+(?:rex|rix|rixx|ricks|rik|ric|rexx|rick'?s?|riks|lex|wrecks?|rax|racks?|regs?|brex|dex|tex|alex|next|text|red|max|ex|eric|erics|erix|rocks?|rox|pyrex|tyrex|directs|irex|irix)\b/i,
+  /\b(higher\s+ex|hire\s+ex|high\s+rex|high\s+rix|high\s+ex|hi\s+ex|hey\s+ex|i\s+rex|i\s+rix|irex|irix|eye\s+rex|hi\s+eric|hey\s+eric|hi\s+erix|hey\s+erix|hi\s+rix|hey\s+rix|hi\s+ricks|hey\s+ricks|hi\s+rocks|hey\s+rocks)\b/i,
+  /\bhello\s+(?:rex|rix)\b/i,
+  /\bhey\s+(?:rex|rix)\b/i,
+  /\bhi\s+(?:rex|rix)\b/i,
+  /\bok\s+(?:rex|rix)\b/i,
+  /\boh\s+(?:rex|rix)\b/i,
+  /\b(?:rex|rix|rexx|rixx|ricks)\b/i,
+  /^[\s,.;:!?-]*(?:rex|rix|rixx|ricks|rik|ric|rexx|rick|riks|rick's|lex|wrecks|wreck|rax|racks|rack|regs|reg|brex|dex|tex|alex|pyrex|tyrex|directs|irex|irix|erix|rocks|rock|rox|next|text|red|max|ex|flex|hex)[\s,.;:!?-]*$/i,
 ];
 
 const INTERRUPT_PATTERNS = [
   /\bstop\b/i,
   /\bstop\s+rex\b/i,
   /\brex\s+stop\b/i,
+  /\btop\s+rex\b/i,
   /\bplease\s+stop\b/i,
   /\bpause\b/i,
   /\bpause\s+rex\b/i,
   /\brex\s+pause\b/i,
+  /\bpaws\s+rex\b/i,
   /\bplease\s+pause\b/i,
   /\bwait\b/i,
   /\bwait\s+rex\b/i,
@@ -166,6 +169,7 @@ export function useVoice({
   // Fallback MediaRecorder references
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const headerChunkRef = useRef<Blob | null>(null);
   const isTranscribingRef = useRef<boolean>(false);
   const fallbackSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fallbackSpeakingDetectedRef = useRef<boolean>(false);
@@ -173,7 +177,7 @@ export function useVoice({
   const commitFallbackAudioRef = useRef<() => void>(() => {});
   const resetActiveInactivityTimerRef = useRef<() => void>(() => {});
 
-  const ECHO_COOLDOWN_MS = 1400;
+  const ECHO_COOLDOWN_MS = 650;
 
   useEffect(() => {
     // Only ignore a stale isAiSpeaking=true within 500ms of an interrupt while muteAudio flushes.
@@ -296,31 +300,69 @@ export function useVoice({
     return isBareSilenceCommand(text);
   };
 
-  // ── Audio Level Analyzer Setup ──────────────────────────────────
-  const setupAudioMeter = useCallback((stream: MediaStream) => {
+  // ── Audio Level Analyzer & Microphone Gain Pre-Amp Setup ────────
+  const boostedStreamRef = useRef<MediaStream | null>(null);
+  const lastRecognitionResultTimeRef = useRef<number>(0);
+
+  const setupAudioMeter = useCallback((stream: MediaStream): MediaStream => {
     try {
       if (audioContextRef.current) {
         try { audioContextRef.current.close(); } catch {}
         audioContextRef.current = null;
       }
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
+      if (!AudioCtx) return stream;
 
       const audioCtx = new AudioCtx();
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume().catch(() => {});
+      }
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.4;
+      analyser.smoothingTimeConstant = 0.35;
 
       const source = audioCtx.createMediaStreamSource(stream);
-      source.connect(analyser);
+
+      // Add DynamicsCompressor + 2.4x Gain pre-amp so soft/distant "Hi Rex" wake words are clearly audible
+      const compressor = audioCtx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-36, audioCtx.currentTime);
+      compressor.knee.setValueAtTime(24, audioCtx.currentTime);
+      compressor.ratio.setValueAtTime(4, audioCtx.currentTime);
+      compressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
+      compressor.release.setValueAtTime(0.2, audioCtx.currentTime);
+
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.setValueAtTime(2.4, audioCtx.currentTime);
+
+      source.connect(compressor);
+      compressor.connect(gainNode);
+      gainNode.connect(analyser);
+
+      let outputStream = stream;
+      if (typeof audioCtx.createMediaStreamDestination === "function" && audioCtx.state === "running") {
+        const dest = audioCtx.createMediaStreamDestination();
+        gainNode.connect(dest);
+        if (dest.stream && dest.stream.getAudioTracks().length > 0) {
+          outputStream = dest.stream;
+          boostedStreamRef.current = outputStream;
+        }
+      }
 
       audioContextRef.current = audioCtx;
       analyserRef.current = analyser;
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      let lastResumeAttempt = 0;
 
       const checkLevel = () => {
         if (!analyserRef.current) return;
+        if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+          const nowMs = Date.now();
+          if (nowMs - lastResumeAttempt > 2000) {
+            lastResumeAttempt = nowMs;
+            audioContextRef.current.resume().catch(() => {});
+          }
+        }
         analyserRef.current.getByteFrequencyData(dataArray);
 
         let sum = 0;
@@ -328,24 +370,34 @@ export function useVoice({
           sum += dataArray[i];
         }
         const avg = sum / dataArray.length;
-        const normalized = Math.min(100, Math.round((avg / 128) * 100));
+        const normalized = Math.min(100, Math.round((avg / 110) * 100));
 
         setAudioLevel(normalized);
 
-        // Fallback voice activity detection
-        if (useServerFallbackRef.current && modeRef.current !== "idle" && !isAiSpeakingRef.current) {
-          if (normalized > 14) {
+        // Voice activity detection for:
+        // 1) Browsers using server fallback, OR
+        // 2) Soft-spoken wake words ("Hi Rex" / "Rex") in waiting_for_wake mode when Chrome's native SpeechRecognition ignores quiet speech!
+        const shouldMonitorVoiceActivity =
+          modeRef.current !== "idle" &&
+          !isAiSpeakingRef.current &&
+          (useServerFallbackRef.current || modeRef.current === "waiting_for_wake");
+
+        if (shouldMonitorVoiceActivity) {
+          if (normalized >= 5) {
             fallbackSpeakingDetectedRef.current = true;
             if (fallbackSilenceTimerRef.current) {
               clearTimeout(fallbackSilenceTimerRef.current);
               fallbackSilenceTimerRef.current = null;
             }
-          } else if (fallbackSpeakingDetectedRef.current && normalized <= 8) {
+          } else if (fallbackSpeakingDetectedRef.current && normalized <= 4) {
             if (!fallbackSilenceTimerRef.current) {
               fallbackSilenceTimerRef.current = setTimeout(() => {
                 fallbackSpeakingDetectedRef.current = false;
-                commitFallbackAudioRef.current();
-              }, 1200);
+                const msSinceNativeResult = Date.now() - lastRecognitionResultTimeRef.current;
+                if (useServerFallbackRef.current || (modeRef.current === "waiting_for_wake" && msSinceNativeResult > 900)) {
+                  commitFallbackAudioRef.current();
+                }
+              }, 650);
             }
           }
         }
@@ -355,8 +407,10 @@ export function useVoice({
 
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = requestAnimationFrame(checkLevel);
+      return outputStream;
     } catch (err) {
       console.warn("[voice] audio meter setup warning:", err);
+      return stream;
     }
   }, []);
 
@@ -368,11 +422,17 @@ export function useVoice({
 
     try {
       isTranscribingRef.current = true;
-      const chunks = [...recordedChunksRef.current];
+      const rawChunks = [...recordedChunksRef.current];
       recordedChunksRef.current = [];
 
+      // Ensure the WebM EBML header chunk (chunk #0) is always at the start of the blob so it decodes cleanly
+      const chunks =
+        headerChunkRef.current && rawChunks[0] !== headerChunkRef.current
+          ? [headerChunkRef.current, ...rawChunks]
+          : rawChunks;
+
       const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-      if (blob.size < 2000) {
+      if (blob.size < 1200) {
         isTranscribingRef.current = false;
         return;
       }
@@ -443,13 +503,17 @@ export function useVoice({
 
       const recorder = new MediaRecorder(stream, { mimeType });
       recordedChunksRef.current = [];
+      headerChunkRef.current = null;
 
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
+          if (!headerChunkRef.current) {
+            headerChunkRef.current = e.data;
+          }
           recordedChunksRef.current.push(e.data);
-          // Keep a rolling buffer of latest 12 seconds
-          if (recordedChunksRef.current.length > 30) {
-            recordedChunksRef.current = recordedChunksRef.current.slice(-25);
+          // Keep a rolling buffer of latest ~8 seconds while preserving headerChunkRef separately
+          if (recordedChunksRef.current.length > 20) {
+            recordedChunksRef.current = recordedChunksRef.current.slice(-16);
           }
         }
       };
@@ -495,8 +559,9 @@ export function useVoice({
     };
 
     recognition.onresult = (event: any) => {
-      lastActivityRef.current = Date.now();
       const now = Date.now();
+      lastActivityRef.current = now;
+      lastRecognitionResultTimeRef.current = now;
       // Only suppress speaking flag for 350ms right after an interrupt while audio player mutes;
       // as soon as Rex speaks a new response, speaking=true so consecutive barge-ins always work!
       const inActiveBargeIn = now - lastInterruptTimeRef.current < 350;
@@ -575,7 +640,7 @@ export function useVoice({
             .split(/\s+/)
             .filter((w) => w.length > 1);
           const startsWithExplicitUserBargeLead =
-            /^(no\b|nope\b|nah\b|wait\b|hold\b|stop\b|pause\b|please\s+stop\b|please\s+pause\b|listen\b|hey\s+rex\b|hi\s+rex\b|hello\s+rex\b|rex\b|actually\s+i\b|can\s+you\b|could\s+you\b|would\s+you\b|what\s+if\b|what\s+about\b|tell\s+me\b|let\s+me\b|i\s+want\b|i\s+need\b|i\s+don'?t\b|never\s*mind\b)/i.test(
+            /^(no\b|nope\b|nah\b|wait\b|hold\b|stop\b|pause\b|please\b|listen\b|hey\b|hi\b|hello\b|ok\b|okay\b|rex\b|rix\b|ricks\b|actually\b|but\b|so\b|well\b|can\s+you\b|could\s+you\b|would\s+you\b|what\b|why\b|how\b|where\b|when\b|who\b|tell\s+me\b|let\s+me\b|i\s+want\b|i\s+need\b|i\s+think\b|i\s+have\b|i\s+don'?t\b|never\s*mind\b)/i.test(
               deltaSlice
             );
 
@@ -600,7 +665,7 @@ export function useVoice({
             const cleanChunk = rawTranscript.slice(bleedPrefixLengthRef.current[i]);
             if (isFinalResult) finalText += cleanChunk;
             else interimText += cleanChunk;
-          } else if (/\b(hey|hello|hi|ok|okay)\s+rex\b/i.test(deltaSlice) || /^rex$/i.test(deltaSlice)) {
+          } else if (matchWakeWord(deltaSlice)) {
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             bleedPrefixLengthRef.current[i] = prevBleedLen;
@@ -608,19 +673,19 @@ export function useVoice({
             else interimText += deltaSlice;
           } else if (
             !isDeltaSelfEcho &&
-            (deltaWords.length >= 5 || (deltaWords.length >= 2 && startsWithExplicitUserBargeLead))
+            (deltaWords.length >= 2 || (deltaWords.length >= 1 && startsWithExplicitUserBargeLead))
           ) {
-            // Phrase-Independent Barge-In:
-            // Requires either 2+ words starting with an explicit user barge-in lead ("no...", "wait...", "can you...", "hey rex...")
-            // or 5+ non-echo words so 1-4 word speaker echoes ("Looking", "Absolutely", "Typing into today") NEVER trigger a false barge-in!
+            // Smooth Phrase-Independent Barge-In:
+            // Triggers as soon as the user speaks 2+ non-echo words or a 1+ word conversational opener/question/wake word.
             resultInterruptedRef.current[i] = true;
             detectedBargeInThisEvent = true;
             bleedPrefixLengthRef.current[i] = prevBleedLen;
             const cleanChunk = rawTranscript.slice(prevBleedLen);
             if (isFinalResult) finalText += cleanChunk;
             else interimText += cleanChunk;
-          } else if (isDeltaSelfEcho) {
-            // Verified speaker bleed matching Rex's own voice output -> advance bleed offset
+          } else if (isFinalResult && isDeltaSelfEcho) {
+            // ONLY advance bleed offset when a FINAL result is verified speaker echo!
+            // Never advance bleedPrefixLengthRef on interim results, which previously ate the user's opening words 2 words at a time!
             bleedPrefixLengthRef.current[i] = rawTranscript.length;
           }
         } else {
@@ -655,9 +720,9 @@ export function useVoice({
       const isImmediateBareStop =
         Boolean(effectiveCandidate) && isBareStopCommand(effectiveCandidate);
 
-      // Immediate fast-path for bare stop/pause commands:
-      // Stop Rex's audio and transition straight to paused/wake-word mode on the very first attempt!
-      if (isImmediateBareStop && (isEchoWindow || currentMode === "active_conversation")) {
+      // Immediate unconditional fast-path for bare stop/pause commands ("Stop Rex", "Pause Rex", "Please stop"):
+      // Works in ANY mode so there is never a dead zone!
+      if (isImmediateBareStop) {
         if (turnSilenceTimerRef.current) {
           clearTimeout(turnSilenceTimerRef.current);
           turnSilenceTimerRef.current = null;
@@ -1005,10 +1070,11 @@ export function useVoice({
       setPermissionStatus("granted");
       setLastError(null);
 
-      // Start audio meter
+      // Start audio meter + 2.4x gain pre-amp
       setupAudioMeter(stream);
 
-      // Prepare fallback recorder
+      // Always attach fallback recorder directly to the live hardware MediaStream
+      // (so even if AudioContext starts suspended before user gesture, MediaRecorder captures real audio frames)
       startFallbackRecorder(stream);
 
       return stream;
@@ -1074,11 +1140,15 @@ export function useVoice({
 
       startRecognition(true);
 
-      // Non-blocking stream acquisition for audio level meter
+      // Stagger getUserMedia by 450ms so native SpeechRecognition initializes first without audio device contention
       if (typeof window !== "undefined" && Boolean(navigator?.mediaDevices?.getUserMedia)) {
-        ensureMediaStream().catch((err) => {
-          console.debug("[voice] non-blocking mediaStream init:", err);
-        });
+        setTimeout(() => {
+          if (modeRef.current !== "idle") {
+            ensureMediaStream().catch((err) => {
+              console.debug("[voice] non-blocking mediaStream init:", err);
+            });
+          }
+        }, 450);
       }
       return true;
     },
@@ -1173,22 +1243,32 @@ export function useVoice({
         lastActivityRef.current = Date.now();
         return;
       }
-      if (Date.now() - (lastActivityRef.current || 0) > 25000) {
+      const timeoutMs = modeRef.current === "waiting_for_wake" ? 12000 : 22000;
+      if (Date.now() - (lastActivityRef.current || 0) > timeoutMs) {
         lastActivityRef.current = Date.now();
         restartRef.current(true);
       }
-    }, 7000);
+    }, 5000);
 
     const onVisible = () => {
       if (document.visibilityState === "visible" && modeRef.current !== "idle") {
         restartRef.current(false);
       }
     };
+    const resumeAudioCtxOnGesture = () => {
+      if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+        audioContextRef.current.resume().catch(() => {});
+      }
+    };
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pointerdown", resumeAudioCtxOnGesture, { passive: true });
+    window.addEventListener("keydown", resumeAudioCtxOnGesture, { passive: true });
 
     return () => {
       clearInterval(id);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pointerdown", resumeAudioCtxOnGesture);
+      window.removeEventListener("keydown", resumeAudioCtxOnGesture);
     };
   }, []);
 
