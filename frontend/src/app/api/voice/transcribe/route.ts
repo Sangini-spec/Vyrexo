@@ -31,7 +31,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ text: "", success: false, error: "Transcription service unavailable" });
     }
 
-    const candidateModels = ["gemini-3.5-transcribe", "gemini-3.8-flash", "gemini-flash-latest"];
+    const candidateModels = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"];
     let text = "";
 
     for (const model of candidateModels) {

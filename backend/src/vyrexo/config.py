@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     # Provider keys at top level for convenience (no LLM_ prefix needed in .env)
     gemini_api_key: str = ""
     anthropic_api_key: str = ""
+    gnani_key: str = ""
+    gnani_api_key: str = ""
+    eleven_labs_api_key: str = ""
+    elevenlabs_api_key: str = ""
     openai_api_key: str = ""
     groq_api_key: str = ""
     openrouter_api_key: str = ""

@@ -78,6 +78,7 @@ export interface EnvironmentSecurityStatus {
     anthropicConfigured: boolean;
     anthropicModel: string;
     anthropicModelValid: boolean;
+    gnaniConfigured: boolean;
     elevenLabsConfigured: boolean;
     supabaseConfigured: boolean;
   };
@@ -186,12 +187,13 @@ export function redactSensitiveData(input: string): string {
   const patterns: RegExp[] = [
     /sk-ant-[a-zA-Z0-9_-]{10,}/g,
     /sk-(?:proj-)?[a-zA-Z0-9_-]{16,}/g,
+    /vach_[a-zA-Z0-9_-]{16,}/g,
     /AIza[a-zA-Z0-9_-]{20,}/g,
     /gh[pousr]_[a-zA-Z0-9_]{16,}/g,
     /github_pat_[a-zA-Z0-9_]{20,}/g,
     /eyJ[a-zA-Z0-9_-]{15,}\.eyJ[a-zA-Z0-9_-]{15,}\.[a-zA-Z0-9_-]{15,}/g,
     /postgres(?:ql)?:\/\/[^:\s]+:[^@\s]+@[^\s"']+/gi,
-    /(?:ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY|ELEVEN_?LABS_API_KEY|GITHUB_TOKEN|CHARIOT_API_KEY)\s*=\s*["']?[^\s"'\n]{8,}["']?/gi,
+    /(?:ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY|GNANI_?KEY|GNANI_API_KEY|VACHANA_API_KEY|ELEVEN_?LABS_API_KEY|GITHUB_TOKEN|CHARIOT_API_KEY)\s*=\s*["']?[^\s"'\n]{8,}["']?/gi,
   ];
 
   for (const regex of patterns) {
@@ -257,7 +259,7 @@ export function validateEnvironmentSecurity(): EnvironmentSecurityStatus {
   for (const key of Object.keys(process.env)) {
     if (
       key.startsWith("NEXT_PUBLIC_") &&
-      /(?:ANTHROPIC|GEMINI|OPENAI|ELEVEN|GITHUB_TOKEN|CHARIOT|SECRET|PRIVATE)/i.test(key) &&
+      /(?:ANTHROPIC|GEMINI|OPENAI|GNANI|VACHANA|ELEVEN|GITHUB_TOKEN|CHARIOT|SECRET|PRIVATE)/i.test(key) &&
       key !== "NEXT_PUBLIC_SUPABASE_ANON_KEY"
     ) {
       warnings.push(`Potential secret exposed in public env var ${key}.`);
@@ -277,6 +279,11 @@ export function validateEnvironmentSecurity(): EnvironmentSecurityStatus {
       anthropicConfigured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
       anthropicModel: anthropicModelValid ? configuredModel : "claude-sonnet-5-5",
       anthropicModelValid,
+      gnaniConfigured: Boolean(
+        process.env.GNANI_KEY?.trim() ||
+          process.env.GNANI_API_KEY?.trim() ||
+          process.env.VACHANA_API_KEY?.trim()
+      ),
       elevenLabsConfigured: Boolean(
         process.env.ELEVEN_LABS_API_KEY?.trim() || process.env.ELEVENLABS_API_KEY?.trim()
       ),

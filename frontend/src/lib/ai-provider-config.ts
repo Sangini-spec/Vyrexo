@@ -21,6 +21,21 @@ export interface ElevenLabsConfig {
   source: "env" | "disk" | "none";
 }
 
+export interface GnaniConfig {
+  gnaniApiKey: string | null;
+  gnaniBaseUrl: string;
+  gnaniModel: string;
+  source: "env" | "disk" | "none";
+}
+
+export interface GnaniBenchmarkResult {
+  ok: boolean;
+  latencyMs: number;
+  model: string;
+  message?: string;
+  error?: string;
+}
+
 export interface ElevenLabsBenchmarkResult {
   ok: boolean;
   latencyMs: number;
@@ -535,8 +550,206 @@ export async function testChariotConnection(
 }
 
 /**
+ * Retrieves the current Gnani AI (Vachana / Timbre) API key and configuration.
+ * Priority: process.env.GNANI_KEY / process.env.GNANI_API_KEY / process.env.VACHANA_API_KEY -> persistent disk config (.data/ai-config.json)
+ */
+export function getGnaniConfig(): GnaniConfig {
+  const defaultBaseUrl =
+    process.env.GNANI_BASE_URL?.trim() ||
+    process.env.VACHANA_BASE_URL?.trim() ||
+    "https://api.vachana.ai";
+  const rawModel = process.env.GNANI_MODEL?.trim() || process.env.VACHANA_MODEL?.trim();
+  const defaultModel = rawModel || "timbre-v3.0";
+
+  const envKey = (
+    process.env.GNANI_KEY ||
+    process.env.GNANI_API_KEY ||
+    process.env.VACHANA_API_KEY ||
+    (process.env.CHARIOT_API_KEY?.trim()?.startsWith("vach_") ? process.env.CHARIOT_API_KEY : "")
+  )?.trim();
+
+  if (envKey) {
+    return {
+      gnaniApiKey: envKey,
+      gnaniBaseUrl: defaultBaseUrl,
+      gnaniModel: defaultModel,
+      source: "env",
+    };
+  }
+
+  try {
+    const cfgPath = resolveConfigPath();
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed?.gnaniApiKey && typeof parsed.gnaniApiKey === "string" && parsed.gnaniApiKey.trim()) {
+        return {
+          gnaniApiKey: parsed.gnaniApiKey.trim(),
+          gnaniBaseUrl: parsed.gnaniBaseUrl || defaultBaseUrl,
+          gnaniModel: parsed.gnaniModel || defaultModel,
+          source: "disk",
+        };
+      }
+    }
+  } catch {}
+
+  return {
+    gnaniApiKey: null,
+    gnaniBaseUrl: defaultBaseUrl,
+    gnaniModel: defaultModel,
+    source: "none",
+  };
+}
+
+/**
+ * Updates Gnani AI configuration in server memory and persists to disk.
+ */
+export function saveGnaniConfig(
+  apiKey: string,
+  model: string = "timbre-v3.0",
+  baseUrl: string = "https://api.vachana.ai"
+): void {
+  const cleanKey = apiKey.trim();
+  const cleanModel = model.trim() || "timbre-v3.0";
+  const cleanBaseUrl = baseUrl.trim() || "https://api.vachana.ai";
+  process.env.GNANI_KEY = cleanKey;
+  process.env.GNANI_API_KEY = cleanKey;
+  process.env.VACHANA_API_KEY = cleanKey;
+  process.env.GNANI_MODEL = cleanModel;
+  process.env.GNANI_BASE_URL = cleanBaseUrl;
+
+  try {
+    const cfgPath = resolveConfigPath();
+    const dir = path.dirname(cfgPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    let existing: Record<string, any> = {};
+    if (fs.existsSync(cfgPath)) {
+      try {
+        existing = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+      } catch {}
+    }
+    existing.gnaniApiKey = cleanKey;
+    existing.gnaniModel = cleanModel;
+    existing.gnaniBaseUrl = cleanBaseUrl;
+    existing.updatedAt = new Date().toISOString();
+    fs.writeFileSync(cfgPath, JSON.stringify(existing, null, 2), "utf-8");
+  } catch {}
+}
+
+/**
+ * Removes and purges Gnani AI configuration from disk and environment.
+ */
+export function removeGnaniConfig(): void {
+  delete process.env.GNANI_KEY;
+  delete process.env.GNANI_API_KEY;
+  delete process.env.VACHANA_API_KEY;
+  delete process.env.GNANI_MODEL;
+  delete process.env.GNANI_BASE_URL;
+
+  try {
+    const cfgPath = resolveConfigPath();
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      delete parsed.gnaniApiKey;
+      delete parsed.gnaniModel;
+      delete parsed.gnaniBaseUrl;
+      parsed.updatedAt = new Date().toISOString();
+      fs.writeFileSync(cfgPath, JSON.stringify(parsed, null, 2), "utf-8");
+    }
+  } catch {}
+}
+
+/**
+ * Benchmark and validate a Gnani AI (Vachana / Timbre) API key via live TTS inference probe.
+ */
+export async function testGnaniConnection(
+  explicitKey?: string,
+  explicitModel?: string,
+  explicitBaseUrl?: string
+): Promise<GnaniBenchmarkResult> {
+  const cfg = getGnaniConfig();
+  const apiKey = explicitKey?.trim() || cfg.gnaniApiKey;
+  const modelName = explicitModel?.trim() || cfg.gnaniModel || "timbre-v3.0";
+  const baseUrl = (explicitBaseUrl?.trim() || cfg.gnaniBaseUrl || "https://api.vachana.ai").replace(/\/+$/, "");
+
+  if (!apiKey) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      model: modelName,
+      error: "No Gnani API key provided or configured.",
+    };
+  }
+
+  const startTime = Date.now();
+  try {
+    const abortCtrl = new AbortController();
+    const timeout = setTimeout(() => abortCtrl.abort(), 10000);
+
+    const voice = modelName.includes("2.5") ? "Pranav" : "Shubham";
+    const res = await fetch(`${baseUrl}/api/v1/tts/inference`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key-ID": apiKey,
+      },
+      body: JSON.stringify({
+        text: "Ready.",
+        voice,
+        model: modelName,
+        language: "en-IN",
+        speed: 1,
+        audio_config: {
+          encoding: "linear_pcm",
+          container: "wav",
+          num_channels: 1,
+          sample_rate: 24000,
+          sample_width: 2,
+        },
+      }),
+      signal: abortCtrl.signal,
+    });
+    clearTimeout(timeout);
+
+    const latencyMs = Date.now() - startTime;
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      const errMsg =
+        errBody?.detail?.message ||
+        errBody?.message ||
+        errBody?.error ||
+        `HTTP ${res.status} from Gnani Vachana API`;
+      return {
+        ok: false,
+        latencyMs,
+        model: modelName,
+        error: errMsg,
+      };
+    }
+
+    return {
+      ok: true,
+      latencyMs,
+      model: modelName,
+      message: `Gnani AI (${modelName}) connected and verified via live TTS probe (${latencyMs}ms).`,
+    };
+  } catch (err: any) {
+    const latencyMs = Date.now() - startTime;
+    return {
+      ok: false,
+      latencyMs,
+      model: modelName,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+/**
  * Retrieves the current ElevenLabs API key and configuration.
- * Priority: process.env.ELEVENLABS_API_KEY / process.env.XI_API_KEY -> persistent disk config (.data/ai-config.json)
+ * Priority: process.env.ELEVEN_LABS_API_KEY / process.env.ELEVENLABS_API_KEY / process.env.XI_API_KEY -> persistent disk config (.data/ai-config.json)
  */
 export function getElevenLabsConfig(): ElevenLabsConfig {
   const rawModel = process.env.ELEVENLABS_MODEL?.trim();
@@ -544,6 +757,20 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
     !rawModel || rawModel.includes("v4") || rawModel === "eleven_turbo_v2"
       ? "eleven_turbo_v2_5"
       : rawModel;
+
+  const envKey = (
+    process.env.ELEVEN_LABS_API_KEY ||
+    process.env.ELEVENLABS_API_KEY ||
+    process.env.XI_API_KEY
+  )?.trim();
+
+  if (envKey) {
+    return {
+      elevenLabsApiKey: envKey,
+      elevenLabsModel: defaultModel,
+      source: "env",
+    };
+  }
 
   try {
     const cfgPath = resolveConfigPath();
@@ -563,20 +790,6 @@ export function getElevenLabsConfig(): ElevenLabsConfig {
       }
     }
   } catch {}
-
-  const envKey = (
-    process.env.ELEVENLABS_API_KEY ||
-    process.env.ELEVEN_LABS_API_KEY ||
-    process.env.XI_API_KEY
-  )?.trim();
-
-  if (envKey) {
-    return {
-      elevenLabsApiKey: envKey,
-      elevenLabsModel: defaultModel,
-      source: "env",
-    };
-  }
 
   return {
     elevenLabsApiKey: null,
@@ -624,6 +837,7 @@ export function saveElevenLabsConfig(
  */
 export function removeElevenLabsConfig(): void {
   delete process.env.ELEVENLABS_API_KEY;
+  delete process.env.ELEVEN_LABS_API_KEY;
   delete process.env.XI_API_KEY;
   delete process.env.ELEVENLABS_MODEL;
 

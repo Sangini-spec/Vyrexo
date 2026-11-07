@@ -7,6 +7,10 @@ import {
   getChariotConfig,
   saveChariotConfig,
   testChariotConnection,
+  getGnaniConfig,
+  saveGnaniConfig,
+  removeGnaniConfig,
+  testGnaniConnection,
   getElevenLabsConfig,
   saveElevenLabsConfig,
   removeElevenLabsConfig,
@@ -24,6 +28,10 @@ export async function GET() {
 
   const chariotConfig = getChariotConfig();
   const isChariotConfigured = Boolean(chariotConfig.chariotApiKey);
+
+  const gnaniConfig = getGnaniConfig();
+  const isGnaniConfigured = Boolean(gnaniConfig.gnaniApiKey);
+  const gnaniStatus = isGnaniConfigured ? "connected" : "unconfigured";
 
   const elevenConfig = getElevenLabsConfig();
   const isElevenConfigured = Boolean(elevenConfig.elevenLabsApiKey);
@@ -45,7 +53,6 @@ export async function GET() {
       } else {
         const errBody = await res.json().catch(() => null);
         if (errBody?.detail?.status === "missing_permissions") {
-          // Scoped TTS-only key is active and valid
           elevenStatus = "connected";
         }
       }
@@ -71,8 +78,11 @@ export async function GET() {
     }
   }
 
+  // Hierarchy: Gnani (Tier 1) -> ElevenLabs (Tier 2) -> Gemini (Tier 3)
   let activeProvider = "gemini";
-  if (isElevenConfigured) {
+  if (isGnaniConfigured) {
+    activeProvider = "gnani";
+  } else if (isElevenConfigured) {
     activeProvider = "elevenlabs";
   } else if (isChariotConfigured) {
     activeProvider = "chariot";
@@ -83,6 +93,7 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     provider: activeProvider,
+    hierarchy: ["gnani", "elevenlabs", "gemini"],
     codingAgent: {
       provider: anthropicConfig.configured ? "anthropic" : "gemini",
       configured: anthropicConfig.configured,
@@ -91,9 +102,31 @@ export async function GET() {
       source: anthropicConfig.source,
     },
     conversationalAgent: {
-      provider: "gemini",
-      configured: Boolean(process.env.GEMINI_API_KEY),
-      model: "gemini-3.8-flash",
+      provider: activeProvider,
+      hierarchy: ["gnani", "elevenlabs", "gemini"],
+      configured: isGnaniConfigured || isElevenConfigured || Boolean(process.env.GEMINI_API_KEY),
+      model: isGnaniConfigured
+        ? gnaniConfig.gnaniModel
+        : isElevenConfigured
+        ? elevenConfig.elevenLabsModel
+        : "gemini-2.5-flash",
+    },
+    gnani: {
+      configured: isGnaniConfigured,
+      status: gnaniStatus,
+      baseUrl: gnaniConfig.gnaniBaseUrl,
+      model: gnaniConfig.gnaniModel,
+      source: gnaniConfig.source,
+      tier: 1,
+      role: "Primary Human-Like Voice Engine (until credits exhausted)",
+      voices: [
+        { id: "adam", name: "Shubham (Adam - Conversational, Expressive Male)", gnaniVoice: "Shubham", status: "active" },
+        { id: "ryan", name: "Avinash (Brian - Rich, Deliberate Male)", gnaniVoice: "Avinash", status: "active" },
+        { id: "george", name: "Devansh (George - Warm, Emotive Male)", gnaniVoice: "Devansh", status: "active" },
+        { id: "ava", name: "Shivani (Rachel - Calm, Empathetic Female)", gnaniVoice: "Shivani", status: "active" },
+        { id: "sonia", name: "Riyaa (Charlotte - Elegant, Warm Female)", gnaniVoice: "Riyaa", status: "active" },
+        { id: "nicole", name: "Vasudha (Nicole - Expressive, Caring Female)", gnaniVoice: "Vasudha", status: "active" },
+      ],
     },
     elevenlabs: {
       configured: isElevenConfigured,
@@ -102,6 +135,8 @@ export async function GET() {
       characterLimit: elevenCharLimit,
       model: elevenConfig.elevenLabsModel,
       source: elevenConfig.source,
+      tier: 2,
+      role: "First Fallback Voice Engine (activates when Gnani credits exhausted)",
       voices: [
         { id: "adam", name: "Adam (American Male - Conversational, Expressive)", elevenId: "pNInz6obpgDQGcFmaJgB", status: "active" },
         { id: "ryan", name: "Brian (British Male - Rich, Narrative)", elevenId: "nPczCjzI2devNBz1zQrb", status: "active" },
@@ -142,24 +177,79 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const provider = (typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "elevenlabs") as "elevenlabs" | "chariot" | "openai";
+    const provider = (typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "gnani") as
+      | "gnani"
+      | "elevenlabs"
+      | "chariot"
+      | "openai";
     const explicitKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
     const apiKey =
       explicitKey ||
-      (provider === "elevenlabs"
+      (provider === "gnani"
+        ? getGnaniConfig().gnaniApiKey || ""
+        : provider === "elevenlabs"
         ? getElevenLabsConfig().elevenLabsApiKey || ""
         : provider === "chariot"
         ? getChariotConfig().chariotApiKey || ""
         : getOpenAIConfig().openAiApiKey || "");
     const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : undefined;
-    const model = typeof body.model === "string" ? body.model.trim() : (provider === "elevenlabs" ? "eleven_turbo_v2_5" : provider === "chariot" ? "chariot-coder" : "gpt-4o");
+    const model =
+      typeof body.model === "string"
+        ? body.model.trim()
+        : provider === "gnani"
+        ? "timbre-v3.0"
+        : provider === "elevenlabs"
+        ? "eleven_turbo_v2_5"
+        : provider === "chariot"
+        ? "chariot-coder"
+        : "gpt-4o";
     const testOnly = Boolean(body.testOnly) || !explicitKey;
 
     if (!apiKey) {
       return NextResponse.json(
-        { ok: false, error: `${provider === "elevenlabs" ? "ElevenLabs" : provider === "chariot" ? "Chariot" : "OpenAI"} API key is not configured on the server.` },
+        {
+          ok: false,
+          error: `${
+            provider === "gnani"
+              ? "Gnani"
+              : provider === "elevenlabs"
+              ? "ElevenLabs"
+              : provider === "chariot"
+              ? "Chariot"
+              : "OpenAI"
+          } API key is not configured on the server.`,
+        },
         { status: 400 }
       );
+    }
+
+    if (provider === "gnani") {
+      const benchmark = await testGnaniConnection(apiKey, model, baseUrl);
+      if (!benchmark.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: benchmark.error || "Failed to authenticate with Gnani Vachana API",
+            latencyMs: benchmark.latencyMs,
+          },
+          { status: 400 }
+        );
+      }
+
+      if (!testOnly) {
+        saveGnaniConfig(apiKey, model, baseUrl);
+      }
+
+      return NextResponse.json({
+        ok: true,
+        provider: "gnani",
+        saved: !testOnly,
+        latencyMs: benchmark.latencyMs,
+        model: benchmark.model,
+        message: testOnly
+          ? `Gnani AI connection test successful (${benchmark.latencyMs}ms roundtrip).`
+          : `Gnani AI integrated as primary human-like conversational voice engine (${benchmark.latencyMs}ms roundtrip).`,
+      });
     }
 
     if (provider === "elevenlabs") {
@@ -189,12 +279,11 @@ export async function POST(request: NextRequest) {
         characterLimit: benchmark.characterLimit,
         message: testOnly
           ? `ElevenLabs connection test successful (${benchmark.latencyMs}ms roundtrip).`
-          : `ElevenLabs voice AI integrated successfully for human-like emotionally aware voice synthesis (${benchmark.latencyMs}ms roundtrip).`,
+          : `ElevenLabs voice AI integrated as fallback voice synthesis engine (${benchmark.latencyMs}ms roundtrip).`,
       });
     }
 
     if (provider === "chariot") {
-      // Benchmark & validate Chariot key
       const benchmark = await testChariotConnection(apiKey, baseUrl, model);
 
       if (!benchmark.ok) {
@@ -225,7 +314,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Benchmark & validate OpenAI key
     const benchmark = await testOpenAIConnection(apiKey, model);
 
     if (!benchmark.ok) {
@@ -265,19 +353,26 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const provider = searchParams.get("provider") || "elevenlabs";
+    const provider = searchParams.get("provider") || "gnani";
+    if (provider === "gnani") {
+      removeGnaniConfig();
+      return NextResponse.json({
+        ok: true,
+        message: "Gnani configuration removed. System automatically falls back to ElevenLabs then Google Gemini.",
+      });
+    }
     if (provider === "elevenlabs") {
       removeElevenLabsConfig();
       return NextResponse.json({
         ok: true,
-        message: "ElevenLabs configuration removed successfully. System uses Microsoft Edge Neural Voice & Gemini.",
+        message: "ElevenLabs configuration removed. System uses Gnani AI primary and Google Gemini fallback.",
       });
     }
     if (provider === "openai") {
       removeOpenAIConfig();
       return NextResponse.json({
         ok: true,
-        message: "OpenAI API key removed successfully. The system now exclusively uses Google Gemini 3.8 Flash for coding models.",
+        message: "OpenAI API key removed successfully.",
       });
     }
     return NextResponse.json({ ok: false, error: "Unsupported provider for removal" }, { status: 400 });

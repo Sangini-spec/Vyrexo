@@ -12,6 +12,12 @@ export async function GET() {
     agents: {
       conversation: "gemini",
       coding: envSecurity.providers.anthropicModel,
+      voiceHierarchy: ["gnani", "elevenlabs", "gemini"],
+      voicePrimary: envSecurity.providers.gnaniConfigured
+        ? "gnani"
+        : envSecurity.providers.elevenLabsConfigured
+        ? "elevenlabs"
+        : "gemini",
     },
     security: {
       valid: envSecurity.valid,

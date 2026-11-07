@@ -3,40 +3,78 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
-import { getElevenLabsConfig } from "@/lib/ai-provider-config";
+import { getElevenLabsConfig, getGnaniConfig } from "@/lib/ai-provider-config";
 import { detectEmotionFromContext, type EmotionTone } from "@/lib/emotion-detector";
 
 // In-memory LRU audio cache for synthesized phrases to eliminate duplicate API calls and guarantee <5ms response
 const globalForCache = globalThis as unknown as {
-  __vyrexoVoiceAudioCache?: Map<string, { buffer: Buffer; contentType: string; timestamp: number }>;
+  __vyrexoVoiceAudioCache?: Map<
+    string,
+    { buffer: Buffer; contentType: string; provider: string; modelUsed: string; timestamp: number }
+  >;
 };
 const voiceAudioCache =
   globalForCache.__vyrexoVoiceAudioCache ||
   (globalForCache.__vyrexoVoiceAudioCache = new Map<
     string,
-    { buffer: Buffer; contentType: string; timestamp: number }
+    { buffer: Buffer; contentType: string; provider: string; modelUsed: string; timestamp: number }
   >());
 const MAX_CACHE_ENTRIES = 300;
 
-function getCachedAudio(key: string): { buffer: Buffer; contentType: string } | null {
+function getCachedAudio(
+  key: string
+): { buffer: Buffer; contentType: string; provider: string; modelUsed: string } | null {
   const item = voiceAudioCache.get(key);
   if (!item) return null;
-  return { buffer: item.buffer, contentType: item.contentType };
+  return {
+    buffer: item.buffer,
+    contentType: item.contentType,
+    provider: item.provider || "gnani",
+    modelUsed: item.modelUsed || "timbre-v3.0",
+  };
 }
 
-function setCachedAudio(key: string, buffer: Buffer, contentType: string = "audio/mpeg"): void {
+function setCachedAudio(
+  key: string,
+  buffer: Buffer,
+  contentType: string = "audio/wav",
+  provider: string = "gnani",
+  modelUsed: string = "timbre-v3.0"
+): void {
   if (voiceAudioCache.size >= MAX_CACHE_ENTRIES) {
     const oldestKey = voiceAudioCache.keys().next().value;
     if (oldestKey) voiceAudioCache.delete(oldestKey);
   }
-  voiceAudioCache.set(key, { buffer, contentType, timestamp: Date.now() });
+  voiceAudioCache.set(key, { buffer, contentType, provider, modelUsed, timestamp: Date.now() });
 }
- 
-// Per-key cooldown map for ElevenLabs monthly quota or credit exhaustion
+
+// Per-key cooldown maps for Gnani AI (Tier 1) and ElevenLabs (Tier 2) credit/quota exhaustion
 // Ensures a newly integrated API key has 0 cooldown even if a previous key was exhausted
 const globalForVoice = globalThis as unknown as {
+  __vyrexoGnaniKeyCooldowns?: Map<string, number>;
   __vyrexoElevenLabsKeyCooldowns?: Map<string, number>;
 };
+
+function getGnaniCooldownMap(): Map<string, number> {
+  if (!globalForVoice.__vyrexoGnaniKeyCooldowns) {
+    globalForVoice.__vyrexoGnaniKeyCooldowns = new Map<string, number>();
+  }
+  return globalForVoice.__vyrexoGnaniKeyCooldowns;
+}
+
+function getGnaniCooldownUntil(currentKey?: string | null): number {
+  if (!currentKey) return 0;
+  return getGnaniCooldownMap().get(currentKey.trim()) || 0;
+}
+
+function setGnaniCooldownUntil(ts: number, currentKey?: string | null): void {
+  if (!currentKey) return;
+  if (ts <= 0) {
+    getGnaniCooldownMap().delete(currentKey.trim());
+  } else {
+    getGnaniCooldownMap().set(currentKey.trim(), ts);
+  }
+}
 
 function getCooldownMap(): Map<string, number> {
   if (!globalForVoice.__vyrexoElevenLabsKeyCooldowns) {
@@ -102,6 +140,215 @@ function mapElevenLabsVoice(voiceId?: string): string {
   return "pNInz6obpgDQGcFmaJgB";
 }
 
+// Map user settings voice names to verified Gnani Vachana (Timbre v3.0 / v2.5) voices
+function mapGnaniVoice(voiceId?: string, modelId: string = "timbre-v3.0"): string {
+  const v = (voiceId || "").toLowerCase().trim();
+  const isV25 = modelId.includes("2.5");
+
+  // Direct Gnani voice names if explicitly specified
+  const directVoices: Record<string, string> = {
+    shubham: "Shubham",
+    avinash: "Avinash",
+    devansh: "Devansh",
+    prakash: "Prakash",
+    yashraj: "Yashraj",
+    shivani: "Shivani",
+    riyaa: "Riyaa",
+    vasudha: "Vasudha",
+    lakshmi: "Lakshmi",
+    kalpana: "Kalpana",
+    pranav: "Pranav",
+    nalini: "Nalini",
+    deepak: "Deepak",
+  };
+  if (directVoices[v]) {
+    if (isV25 && !["pranav", "nalini", "deepak"].includes(v)) {
+      return ["shivani", "riyaa", "vasudha", "lakshmi", "kalpana"].includes(v) ? "Nalini" : "Pranav";
+    }
+    return directVoices[v];
+  }
+
+  // Female voices: Rachel / Ava / Charlotte / Sonia / Nicole
+  if (
+    v.includes("rachel") ||
+    v.includes("ava") ||
+    v.includes("charlotte") ||
+    v.includes("sonia") ||
+    v.includes("nicole") ||
+    v.includes("female")
+  ) {
+    if (isV25) return "Nalini";
+    if (v.includes("charlotte") || v.includes("sonia")) return "Riyaa";
+    if (v.includes("nicole")) return "Vasudha";
+    return "Shivani";
+  }
+
+  // Male voices: Brian / Ryan / George / Adam
+  if (isV25) return "Pranav";
+  if (v.includes("brian") || v.includes("ryan") || v.includes("british")) {
+    return "Avinash";
+  }
+  if (v.includes("george")) {
+    return "Devansh";
+  }
+  // Default Adam: Warm, conversational, expressive male (Shubham on Timbre v3.0)
+  return "Shubham";
+}
+
+interface GnaniSynthResult {
+  buffer: Buffer | null;
+  quotaExceeded: boolean;
+  modelUsed?: string;
+  voiceUsed?: string;
+  error?: string;
+}
+
+// Synthesizes human-like conversational speech using Gnani AI (Vachana Timbre v3.0 / v2.5)
+async function synthesizeWithGnani(
+  text: string,
+  apiKey: string,
+  modelId: string = "timbre-v3.0",
+  baseUrl: string = "https://api.vachana.ai",
+  voiceId?: string,
+  emotion?: string,
+  speed: string = "normal"
+): Promise<GnaniSynthResult> {
+  const cleanBaseUrl = (baseUrl || "https://api.vachana.ai").replace(/\/+$/, "");
+  const primaryModel = modelId?.trim() || "timbre-v3.0";
+  const candidateModels =
+    primaryModel === "timbre-v3.0"
+      ? ["timbre-v3.0", "timbre-v2.5"]
+      : [primaryModel, "timbre-v3.0"];
+
+  // Map speaking cadence and emotional tone to natural speed multiplier
+  let speedMultiplier = 1.0;
+  const speedStr = String(speed || "normal").toLowerCase().trim();
+  const parsedSpeedNum = Number(speedStr);
+  if (!Number.isNaN(parsedSpeedNum) && parsedSpeedNum >= 0.7 && parsedSpeedNum <= 1.4) {
+    speedMultiplier = parsedSpeedNum;
+  } else if (speedStr === "slow") {
+    speedMultiplier = 0.9;
+  } else if (speedStr === "fast") {
+    speedMultiplier = 1.12;
+  }
+
+  if (emotion === "empathetic" || emotion === "calm" || emotion === "thoughtful") {
+    speedMultiplier = Math.max(0.88, Number((speedMultiplier * 0.96).toFixed(2)));
+  } else if (emotion === "upbeat" || emotion === "enthusiastic" || emotion === "celebratory") {
+    speedMultiplier = Math.min(1.18, Number((speedMultiplier * 1.04).toFixed(2)));
+  }
+
+  // Split long responses into sentence-aligned chunks (<= 750 chars) for sub-second synthesis
+  const segments = splitTextForGeminiSegments(text, 750);
+  if (segments.length === 0) {
+    return { buffer: null, quotaExceeded: false };
+  }
+
+  for (const activeModel of candidateModels) {
+    const gnaniVoice = mapGnaniVoice(voiceId, activeModel);
+    try {
+      const pcmBuffers: Buffer[] = [];
+      let quotaHit = false;
+      let lastError = "";
+
+      for (const seg of segments) {
+        const abortCtrl = new AbortController();
+        const timeout = setTimeout(() => abortCtrl.abort(), 7500);
+
+        const res = await fetch(`${cleanBaseUrl}/api/v1/tts/inference`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key-ID": apiKey.trim(),
+          },
+          body: JSON.stringify({
+            text: seg,
+            voice: gnaniVoice,
+            model: activeModel,
+            language: "en-IN",
+            speed: speedMultiplier,
+            audio_config: {
+              encoding: "linear_pcm",
+              container: "wav",
+              num_channels: 1,
+              sample_rate: 24000,
+              sample_width: 2,
+            },
+          }),
+          signal: abortCtrl.signal,
+        });
+        clearTimeout(timeout);
+
+        if (res.ok) {
+          const arrayBuffer = await res.arrayBuffer();
+          const rawBuffer = Buffer.from(arrayBuffer);
+          if (rawBuffer.byteLength > 100) {
+            const hasRiffHeader =
+              rawBuffer.length >= 44 && rawBuffer.toString("ascii", 0, 4) === "RIFF";
+            const pcmSlice = hasRiffHeader ? rawBuffer.subarray(44) : rawBuffer;
+            if (pcmSlice.length > 0) {
+              pcmBuffers.push(pcmSlice);
+              continue;
+            }
+          }
+        } else {
+          const errJson = await res.json().catch(() => null);
+          const errDetail = JSON.stringify(errJson || "");
+          lastError = errDetail;
+
+          const isQuotaOrCredits =
+            res.status === 402 ||
+            res.status === 401 ||
+            res.status === 403 ||
+            res.status === 429 ||
+            /quota|credit|insufficient|balance|limit|exhausted|payment|expired|invalid_api_key|unauthorized|scope_not_allowed/i.test(
+              errDetail
+            );
+
+          if (isQuotaOrCredits) {
+            quotaHit = true;
+            break;
+          }
+
+          console.warn(
+            `[VoiceSpeak] Gnani ${activeModel} (${gnaniVoice}) response (${res.status}):`,
+            errJson
+          );
+          break;
+        }
+      }
+
+      if (quotaHit) {
+        setGnaniCooldownUntil(Date.now() + 180000, apiKey);
+        console.warn(
+          `[TTS Pipeline] Gnani AI credits or quota exhausted. Switching immediately to ElevenLabs fallback.`
+        );
+        return { buffer: null, quotaExceeded: true, error: lastError };
+      }
+
+      if (pcmBuffers.length === segments.length && pcmBuffers.length > 0) {
+        setGnaniCooldownUntil(0, apiKey);
+        const combinedPcm = Buffer.concat(pcmBuffers);
+        // Normalize WAV container header (fixes 0xFFFFFFFF streaming ChunkSize/Subchunk2Size)
+        const normalizedWav = Buffer.from(
+          pcm16ToWav(new Uint8Array(combinedPcm), 24000, 1)
+        );
+        return {
+          buffer: normalizedWav,
+          quotaExceeded: false,
+          modelUsed: activeModel,
+          voiceUsed: gnaniVoice,
+        };
+      }
+    } catch (err: any) {
+      console.warn(`[VoiceSpeak] Gnani ${activeModel} request notice:`, err?.message || err);
+      continue;
+    }
+  }
+
+  return { buffer: null, quotaExceeded: false };
+}
+
 interface ElevenLabsSynthResult {
   buffer: Buffer | null;
   quotaExceeded: boolean;
@@ -109,7 +356,7 @@ interface ElevenLabsSynthResult {
   error?: string;
 }
 
-// Synthesizes speech using ElevenLabs v2 Turbo API exclusively (zero v4 usage; ultra-low latency ~200-450ms & 50% lower credit usage)
+// Synthesizes speech using ElevenLabs v2 Turbo API exclusively (Fallback Tier 2 when Gnani credits exhausted)
 async function synthesizeWithElevenLabs(
   text: string,
   apiKey: string,
@@ -519,7 +766,7 @@ async function synthesizeWithGeminiTTS(
           });
 
           const timeoutPromise = new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), 4500)
+            setTimeout(() => resolve(null), 10000)
           );
 
           const response: any = await Promise.race([callPromise, timeoutPromise]);
@@ -558,41 +805,75 @@ async function synthesizeWithGeminiTTS(
 }
 
 export async function GET() {
+  const gnaniConfig = getGnaniConfig();
+  const activeGnaniKey =
+    gnaniConfig.gnaniApiKey ||
+    process.env.GNANI_KEY?.trim() ||
+    process.env.GNANI_API_KEY?.trim() ||
+    process.env.VACHANA_API_KEY?.trim();
+  const hasGnani = Boolean(activeGnaniKey);
+  const gnaniCooldownUntil = getGnaniCooldownUntil(activeGnaniKey);
+  const isGnaniCooldown = Date.now() < gnaniCooldownUntil;
+
   const elevenConfig = getElevenLabsConfig();
-  const activeKey =
+  const activeElevenKey =
     elevenConfig.elevenLabsApiKey ||
-    process.env.ELEVENLABS_API_KEY?.trim() ||
     process.env.ELEVEN_LABS_API_KEY?.trim() ||
+    process.env.ELEVENLABS_API_KEY?.trim() ||
     process.env.XI_API_KEY?.trim();
-  const hasEleven = Boolean(activeKey);
+  const hasEleven = Boolean(activeElevenKey);
+  const elevenCooldownUntil = getElevenLabsCooldownUntil(activeElevenKey);
+  const isElevenCooldown = Date.now() < elevenCooldownUntil;
+
   const hasGemini = Boolean(process.env.GEMINI_API_KEY?.trim());
-  const cooldownUntil = getElevenLabsCooldownUntil(activeKey);
-  const isCooldown = Date.now() < cooldownUntil;
+
+  let activeTier = "gemini";
+  if (hasGnani && !isGnaniCooldown) {
+    activeTier = "gnani";
+  } else if (hasEleven && !isElevenCooldown) {
+    activeTier = "elevenlabs";
+  }
 
   return NextResponse.json({
     ok: true,
-    primaryProvider: "elevenlabs",
-    primaryModel: elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
-    primaryStatus: hasEleven ? (isCooldown ? "monthly_credits_exhausted" : "active") : "unconfigured",
+    hierarchy: ["gnani", "elevenlabs", "gemini"],
+    activeProvider: activeTier,
+    primaryProvider: "gnani",
+    primaryModel: gnaniConfig.gnaniModel || "timbre-v3.0",
+    primaryStatus: hasGnani ? (isGnaniCooldown ? "credits_exhausted" : "active") : "unconfigured",
+    secondaryProvider: "elevenlabs",
+    secondaryModel: elevenConfig.elevenLabsModel || "eleven_turbo_v2_5",
+    secondaryStatus: hasEleven ? (isElevenCooldown ? "credits_exhausted" : "ready") : "unconfigured",
+    tertiaryProvider: "gemini",
+    tertiaryModel: "gemini-2.5-flash-preview-tts",
+    tertiaryStatus: hasGemini ? "ready" : "unconfigured",
     emotionalVoiceEngine: "attached",
-    fallbackProvider: "gemini",
-    fallbackStatus: hasGemini ? "ready" : "unconfigured",
-    cooldownActive: isCooldown,
-    cooldownRemainingSec: Math.max(0, Math.round((cooldownUntil - Date.now()) / 1000)),
+    gnaniCooldownActive: isGnaniCooldown,
+    gnaniCooldownRemainingSec: Math.max(0, Math.round((gnaniCooldownUntil - Date.now()) / 1000)),
+    elevenLabsCooldownActive: isElevenCooldown,
+    elevenLabsCooldownRemainingSec: Math.max(0, Math.round((elevenCooldownUntil - Date.now()) / 1000)),
   });
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const text = (body.text as string) || "";
-    const voiceId = (body.voice as string) || "adam";
-    const speed = (body.speed as string) || "normal";
-    const userPrompt = (body.userPrompt as string) || "";
-    let emotion = (body.emotion as string) || "auto";
+    const text = typeof body.text === "string" ? body.text : String(body.text || "");
+    const voiceId = String(body.voice || "adam");
+    const speed = String(body.speed ?? "normal");
+    const userPrompt = typeof body.userPrompt === "string" ? body.userPrompt : "";
+    let emotion = String(body.emotion || "auto");
     if (!emotion || emotion === "auto") {
       emotion = detectEmotionFromContext(userPrompt || text, text);
     }
+
+    // Optional test flags for deterministic end-to-end verification of the fallback hierarchy
+    const simulateGnaniExhausted =
+      Boolean(body.simulateGnaniExhausted) ||
+      req.headers.get("x-simulate-gnani-exhausted") === "true";
+    const simulateElevenLabsExhausted =
+      Boolean(body.simulateElevenLabsExhausted) ||
+      req.headers.get("x-simulate-elevenlabs-exhausted") === "true";
 
     if (!text.trim()) {
       return NextResponse.json({ ok: false, error: "Empty text" }, { status: 400 });
@@ -604,29 +885,101 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "Empty cleaned text" }, { status: 400 });
     }
 
-    // Check memory cache first to return in <1ms with 0 quota consumption
+    // Check memory cache first (when not simulating credit exhaustion) to return in <1ms with 0 quota consumption
     const cacheKey = `${voiceId.toLowerCase()}:${emotion.toLowerCase()}:${speed.toLowerCase()}:${cleanText.toLowerCase()}`;
-    const cachedItem = getCachedAudio(cacheKey);
-    if (cachedItem) {
-      return new Response(cachedItem.buffer as unknown as BodyInit, {
-        status: 200,
-        headers: {
-          "Content-Type": cachedItem.contentType,
-          "Content-Length": cachedItem.buffer.byteLength.toString(),
-          "X-TTS-Provider": "neural-cached",
-          "Cache-Control": "public, max-age=3600",
-        },
-      });
+    if (!simulateGnaniExhausted && !simulateElevenLabsExhausted) {
+      const cachedItem = getCachedAudio(cacheKey);
+      if (cachedItem) {
+        return new Response(cachedItem.buffer as unknown as BodyInit, {
+          status: 200,
+          headers: {
+            "Content-Type": cachedItem.contentType,
+            "Content-Length": cachedItem.buffer.byteLength.toString(),
+            "X-TTS-Provider": cachedItem.provider,
+            "X-TTS-Model": cachedItem.modelUsed,
+            "X-TTS-Cached": "true",
+            "Cache-Control": "public, max-age=3600",
+          },
+        });
+      }
     }
 
-    // ── TIER 1: ElevenLabs Turbo TTS (Primary, Server-Side Emotional Voice Engine) ──
+    const fallbackTrail: string[] = [];
+
+    // ── TIER 1 (PRIMARY): Gnani AI (Vachana Timbre v3.0 / v2.5 Human-Like Voice Engine) ──
+    const gnaniConfig = getGnaniConfig();
+    const candidateGnaniKeys = Array.from(
+      new Set(
+        [
+          gnaniConfig.gnaniApiKey,
+          process.env.GNANI_KEY?.trim(),
+          process.env.GNANI_API_KEY?.trim(),
+          process.env.VACHANA_API_KEY?.trim(),
+          process.env.CHARIOT_API_KEY?.trim()?.startsWith("vach_")
+            ? process.env.CHARIOT_API_KEY.trim()
+            : undefined,
+        ].filter((k): k is string => Boolean(k && k.trim()))
+      )
+    );
+
+    if (simulateGnaniExhausted) {
+      fallbackTrail.push("gnani_credits_exhausted");
+    } else if (candidateGnaniKeys.length > 0) {
+      for (const candidateGnaniKey of candidateGnaniKeys) {
+        if (Date.now() < getGnaniCooldownUntil(candidateGnaniKey)) {
+          fallbackTrail.push("gnani_credits_exhausted");
+          continue;
+        }
+        const gnaniResult = await synthesizeWithGnani(
+          cleanText,
+          candidateGnaniKey,
+          gnaniConfig.gnaniModel || "timbre-v3.0",
+          gnaniConfig.gnaniBaseUrl || "https://api.vachana.ai",
+          voiceId,
+          emotion,
+          speed
+        );
+
+        if (gnaniResult.buffer && gnaniResult.buffer.byteLength > 200) {
+          setCachedAudio(
+            cacheKey,
+            gnaniResult.buffer,
+            "audio/wav",
+            "gnani",
+            gnaniResult.modelUsed || "timbre-v3.0"
+          );
+          return new Response(gnaniResult.buffer as unknown as BodyInit, {
+            status: 200,
+            headers: {
+              "Content-Type": "audio/wav",
+              "Content-Length": gnaniResult.buffer.byteLength.toString(),
+              "X-TTS-Provider": "gnani",
+              "X-TTS-Model": gnaniResult.modelUsed || "timbre-v3.0",
+              "X-TTS-Voice": gnaniResult.voiceUsed || "Shubham",
+              "X-TTS-Hierarchy-Tier": "1",
+              "Cache-Control": "no-cache",
+            },
+          });
+        }
+
+        if (gnaniResult.quotaExceeded) {
+          fallbackTrail.push("gnani_credits_exhausted");
+        } else {
+          fallbackTrail.push("gnani_unavailable");
+        }
+      }
+    } else {
+      fallbackTrail.push("gnani_key_unattached");
+    }
+
+    // ── TIER 2 (FIRST FALLBACK): ElevenLabs Turbo v2.5 (Activates when Gnani credits exhausted) ──
     const elevenConfig = getElevenLabsConfig();
     const candidateElevenKeys = Array.from(
       new Set(
         [
           elevenConfig.elevenLabsApiKey,
-          process.env.ELEVENLABS_API_KEY?.trim(),
           process.env.ELEVEN_LABS_API_KEY?.trim(),
+          process.env.ELEVENLABS_API_KEY?.trim(),
           process.env.ELEVENLABS_API_KEY_2?.trim(),
           process.env.ELEVEN_LABS_API_KEY_2?.trim(),
           process.env.XI_API_KEY?.trim(),
@@ -634,12 +987,12 @@ export async function POST(req: NextRequest) {
       )
     );
 
-    let fallbackReason: string | undefined;
-
-    if (candidateElevenKeys.length > 0) {
+    if (simulateElevenLabsExhausted) {
+      fallbackTrail.push("elevenlabs_credits_exhausted");
+    } else if (candidateElevenKeys.length > 0) {
       for (const candidateKey of candidateElevenKeys) {
         if (Date.now() < getElevenLabsCooldownUntil(candidateKey)) {
-          fallbackReason = "elevenlabs_monthly_quota_exceeded";
+          fallbackTrail.push("elevenlabs_credits_exhausted");
           continue;
         }
         const elevenResult = await synthesizeWithElevenLabs(
@@ -651,7 +1004,15 @@ export async function POST(req: NextRequest) {
         );
 
         if (elevenResult.buffer && elevenResult.buffer.byteLength > 200) {
-          setCachedAudio(cacheKey, elevenResult.buffer, "audio/mpeg");
+          if (!simulateGnaniExhausted) {
+            setCachedAudio(
+              cacheKey,
+              elevenResult.buffer,
+              "audio/mpeg",
+              "elevenlabs",
+              elevenResult.modelUsed || "eleven_turbo_v2_5"
+            );
+          }
           return new Response(elevenResult.buffer as unknown as BodyInit, {
             status: 200,
             headers: {
@@ -659,40 +1020,56 @@ export async function POST(req: NextRequest) {
               "Content-Length": elevenResult.buffer.byteLength.toString(),
               "X-TTS-Provider": "elevenlabs",
               "X-TTS-Model": elevenResult.modelUsed || "eleven_turbo_v2_5",
+              "X-TTS-Fallback-Reason": fallbackTrail.join(",") || "gnani_credits_exhausted",
+              "X-TTS-Hierarchy-Tier": "2",
               "Cache-Control": "no-cache",
             },
           });
         }
 
         if (elevenResult.quotaExceeded) {
-          fallbackReason = "elevenlabs_monthly_quota_exceeded";
+          fallbackTrail.push("elevenlabs_credits_exhausted");
         } else {
-          fallbackReason = "elevenlabs_error";
+          fallbackTrail.push("elevenlabs_error");
         }
       }
     } else {
-      fallbackReason = "elevenlabs_key_unattached";
+      fallbackTrail.push("elevenlabs_key_unattached");
     }
 
-    // ── TIER 2: Google Gemini API TTS (Immediate Seamless Fallback when Credits Exceeded) ──
+    // ── TIER 3 (SECOND FALLBACK): Google Gemini API TTS (Activates when both Gnani & ElevenLabs credits exhausted) ──
+    const fallbackReason = fallbackTrail.join(",") || "gnani_and_elevenlabs_exhausted";
     const geminiResult = await synthesizeWithGeminiTTS(cleanText, voiceId, emotion, fallbackReason);
     if (geminiResult.buffer && geminiResult.buffer.byteLength > 200) {
-      setCachedAudio(cacheKey, geminiResult.buffer, "audio/wav");
+      if (!simulateGnaniExhausted && !simulateElevenLabsExhausted) {
+        setCachedAudio(
+          cacheKey,
+          geminiResult.buffer,
+          "audio/wav",
+          "gemini",
+          geminiResult.modelUsed || "gemini-2.5-flash-preview-tts"
+        );
+      }
       return new Response(geminiResult.buffer as unknown as BodyInit, {
         status: 200,
         headers: {
           "Content-Type": "audio/wav",
           "Content-Length": geminiResult.buffer.byteLength.toString(),
           "X-TTS-Provider": "gemini",
-          "X-TTS-Fallback-Reason": fallbackReason || "elevenlabs_quota_exceeded",
+          "X-TTS-Fallback-Reason": fallbackReason,
           "X-TTS-Gemini-Model": geminiResult.modelUsed || "gemini-2.5-flash-preview-tts",
+          "X-TTS-Hierarchy-Tier": "3",
           "Cache-Control": "no-cache",
         },
       });
     }
 
     // Immediate browser fallback (never block on 18s external Edge WebSocket timeout)
-    return NextResponse.json({ ok: false, fallback: "browser", reason: fallbackReason || "tts_unavailable" });
+    return NextResponse.json({
+      ok: false,
+      fallback: "browser",
+      reason: fallbackReason || "tts_unavailable",
+    });
   } catch (err: any) {
     return NextResponse.json(
       {
